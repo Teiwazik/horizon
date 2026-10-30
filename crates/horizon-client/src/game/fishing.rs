@@ -1,7 +1,7 @@
 //! Fishing: `FishingRodItem.use` (cast / reel in), the `FishingHook` (flight,
 //! bobbing, lure and bite timers, open water, hooking mobs, retrieving the
 //! `gameplay/fishing` loot) and `FishingHookRenderer` (bobber and line).
-use super::{Game, view_vector};
+use super::{Game, lan::LanHost, lan_mobs::guest_bounds, view_vector};
 use horizon_client::advancements::EntityView;
 use horizon_client::lan::{entity::States, hub::Hub};
 use horizon_client::{
@@ -46,6 +46,15 @@ pub(super) struct Hook {
     open_water: bool,
     luck: i32,
     lure: i32,
+    /// The position a server's update put it heading for.
+    lerp: HookLerp,
+}
+/// A player a hook can catch (`canHitEntity`): their entity id, which
+/// guest they are (none: the host) and their box.
+pub(super) struct HookTarget {
+    id: u32,
+    conn: Option<u32>,
+    bounds: Aabb,
 }
 const SIZE: f64 = 0.25;
 fn bounds(p: Vec3) -> Aabb {
@@ -139,6 +148,7 @@ impl Game<'_> {
                 open_water: true,
                 luck,
                 lure,
+                lerp: HookLerp::default(),
             });
         }
         self.swing_arm();
@@ -168,6 +178,11 @@ impl Game<'_> {
             } else if let Some(item) = self.dropped.iter_mut().find(|i| i.id == id) {
                 item.velocity = pulled(item.velocity);
                 hooked_item = true;
+            } else if self.creatures.hook_targets.iter().any(|t| t.id == id) {
+                // A player: the hub moves them when the tick ends.
+                self.creatures
+                    .hook_pulls
+                    .push((id, Vec3::new(d.x * 0.1, d.y * 0.1, d.z * 0.1)));
             }
             // CriteriaTriggers.FISHING_ROD_HOOKED with no items.
             let hooked = self
@@ -182,8 +197,10 @@ impl Game<'_> {
             damage = if hooked_item { 3 } else { 5 };
         } else if hook.nibble > 0 {
             let biome = self.biome_name_at(hook.position);
-            let Some(loot) = horizon_client::structure_blocks::loot_data(&self.options.resources)
-            else {
+            let Some(loot) = horizon_client::structure_blocks::loot_data(
+                &self.options.resources,
+                &self.pack_files(),
+            ) else {
                 return damage;
             };
             // `withLuck(this.luck + owner.getLuck())`: the rod's Luck of the Sea
@@ -476,6 +493,15 @@ impl Game<'_> {
         if !self.holds_rod() || d2 > 1024.0 {
             return;
         }
+        // The players it can catch, as they stand now (the host's own hook;
+        // guests' hooks use the ones taken as their turns start).
+        if self.lan_acting.is_none()
+            && matches!(h.state, State::Flying | State::Hooked(_))
+            && let Some(host) = self.lan.take()
+        {
+            self.refresh_hook_targets(&host);
+            self.lan = Some(host);
+        }
         h.previous = h.position;
         if h.on_ground {
             h.life += 1;
@@ -501,8 +527,8 @@ impl Game<'_> {
                     self.hook = Some(h);
                     return;
                 }
-                // checkCollision: hook the first living mob it touches, or (via
-                // `canHitEntity`) a dropped item.
+                // checkCollision: hook the first living mob or other player it
+                // touches, or (via `canHitEntity`) a dropped item.
                 let bb = bounds(h.position);
                 let (lo, hi) = (bb.min_position(), bb.max_position());
                 let touches = |b: Aabb| {
@@ -514,6 +540,14 @@ impl Game<'_> {
                     .iter()
                     .find(|m| m.alive() && touches(m.bounds()))
                     .map(|m| m.id)
+                    .or_else(|| {
+                        let owner = self.lan_acting;
+                        self.creatures
+                            .hook_targets
+                            .iter()
+                            .find(|t| t.conn != owner && touches(t.bounds))
+                            .map(|t| t.id)
+                    })
                     .or_else(|| {
                         self.dropped
                             .iter()
@@ -528,12 +562,25 @@ impl Game<'_> {
                 }
             }
             State::Hooked(id) => {
-                // updateHookedEntity: ride the hooked mob or item at 0.8 of its height.
+                // updateHookedEntity: ride the hooked mob, player or item at 0.8 of its height.
                 let hooked = self
                     .mobs
                     .iter()
                     .find(|m| m.id == id && m.alive())
                     .map(|m| (m.position, f64::from(m.height())))
+                    .or_else(|| {
+                        self.creatures
+                            .hook_targets
+                            .iter()
+                            .find(|t| t.id == id)
+                            .map(|t| {
+                                let (lo, hi) = (t.bounds.min_position(), t.bounds.max_position());
+                                (
+                                    Vec3::new((lo.x + hi.x) / 2.0, lo.y, (lo.z + hi.z) / 2.0),
+                                    hi.y - lo.y,
+                                )
+                            })
+                    })
                     .or_else(|| {
                         self.dropped
                             .iter()
@@ -601,6 +648,59 @@ impl Game<'_> {
             h.velocity.z * 0.92,
         );
         self.hook = Some(h);
+    }
+    /// The players a hook can catch: everyone but spectators and the dead
+    /// (`Projectile.canHitEntity`), the host and the guests in the level.
+    pub(super) fn refresh_hook_targets(&mut self, host: &LanHost) {
+        let mut targets = Vec::new();
+        if self.options.dedicated.is_none()
+            && !self.spectator()
+            && let Some(p) = self.player.as_ref()
+            && !p.health.dead_or_dying()
+        {
+            targets.push(HookTarget {
+                id: host.host_entity as u32,
+                conn: None,
+                bounds: p.bounds(),
+            });
+        }
+        for g in &host.hub.guests {
+            if host.hub.here(g) && g.loaded && !g.dead && !g.spectator() {
+                targets.push(HookTarget {
+                    id: g.entity_id as u32,
+                    conn: Some(g.conn),
+                    bounds: guest_bounds(g),
+                });
+            }
+        }
+        self.creatures.hook_targets = targets;
+    }
+    /// `FishingHook.pullEntity` on the players the hooks reeled in this tick
+    /// pulled: their velocity moves, and a guest's reaches their client.
+    pub(super) fn flush_hook_pulls(&mut self) {
+        let pulls = std::mem::take(&mut self.creatures.hook_pulls);
+        let Some(mut host) = self.lan.take() else {
+            return;
+        };
+        for (id, delta) in pulls {
+            let push = |g: &mut Self| {
+                if let Some(p) = g.player.as_mut() {
+                    p.velocity = p.velocity.add_vector(delta);
+                }
+            };
+            if id == host.host_entity as u32 {
+                push(self);
+            } else if let Some(conn) = host
+                .hub
+                .guests
+                .iter()
+                .find(|g| g.entity_id as u32 == id)
+                .map(|g| g.conn)
+            {
+                self.guest_hit_by(&mut host, conn, push);
+            }
+        }
+        self.lan = Some(host);
     }
     /// `FishingRodCast`: the stack in the arm holding the rod
     /// (`FishingHookRenderer.getHoldingArm`) while the hook is out.
@@ -801,6 +901,81 @@ pub(super) struct RemoteHook {
     owner: u32,
     pub(super) position: Vec3,
     pub(super) previous: Vec3,
+    velocity: Vec3,
+    state: State,
+    on_ground: bool,
+    lerp: HookLerp,
+}
+
+/// The `onGround` of a server's update (`handleMoveEntity`), except that a
+/// hook resting on the ground stays so while the update does not lift it: the
+/// server's tracker can send the flag a tick behind the landing.
+fn resting(was: bool, at: Vec3, target: [f64; 3], sent: bool) -> bool {
+    sent || (was && target[1] <= at.y + 1.0e-3)
+}
+
+/// `LinearInterpolationHandler`: where a server's update has a hook heading
+/// and the steps left (`DEFAULT_INTERPOLATION_STEPS` 3).
+#[derive(Default)]
+pub(super) struct HookLerp {
+    target: Vec3,
+    steps: u32,
+}
+impl HookLerp {
+    /// `interpolateTo`: a new target restarts the steps, the same one does not.
+    fn start(&mut self, target: [f64; 3]) {
+        let target = Vec3::new(target[0], target[1], target[2]);
+        if self.steps == 0 || self.target != target {
+            self.target = target;
+            self.steps = 3;
+        }
+    }
+    /// `doInterpolate`: a step of the way there.
+    fn step(&mut self, at: Vec3) -> Vec3 {
+        if self.steps == 0 {
+            return at;
+        }
+        let n = f64::from(self.steps);
+        self.steps -= 1;
+        Vec3::new(
+            at.x + (self.target.x - at.x) / n,
+            at.y + (self.target.y - at.y) / n,
+            at.z + (self.target.z - at.z) / n,
+        )
+    }
+    /// `applyPredictedMovement`: what the hook moved by itself carries the
+    /// target along while it is heading there.
+    fn moved(&mut self, by: Vec3) {
+        if self.steps > 0 {
+            self.target = Vec3::new(
+                self.target.x + by.x,
+                self.target.y + by.y,
+                self.target.z + by.z,
+            );
+        }
+    }
+}
+
+impl Hook {
+    pub(super) fn id(&self) -> u32 {
+        self.id
+    }
+    /// A server's update of this client's own hook (`handleMoveEntity` also
+    /// sets `onGround`).
+    pub(super) fn move_to(&mut self, target: [f64; 3], on_ground: bool) {
+        self.on_ground = resting(self.on_ground, self.position, target, on_ground);
+        self.lerp.start(target);
+    }
+}
+impl RemoteHook {
+    pub(super) fn id(&self) -> u32 {
+        self.id
+    }
+    /// A server's update of another player's hook.
+    pub(super) fn move_to(&mut self, target: [f64; 3], on_ground: bool) {
+        self.on_ground = resting(self.on_ground, self.position, target, on_ground);
+        self.lerp.start(target);
+    }
 }
 
 impl Hook {
@@ -822,6 +997,7 @@ impl Hook {
             open_water: true,
             luck: 0,
             lure: 0,
+            lerp: HookLerp::default(),
         }
     }
     /// `FishingHook`'s entity for the players tracking it: the owner's id in
@@ -868,50 +1044,193 @@ impl Game<'_> {
 
     /// `handleAddEntity` for a fishing bobber: this player's own becomes its
     /// hook (`Player.fishing`), another player's is drawn on its line to them.
-    pub(super) fn spawn_remote_hook(&mut self, id: u32, at: Vec3, owner: i32) {
+    pub(super) fn spawn_remote_hook(&mut self, id: u32, at: Vec3, velocity: Vec3, owner: i32) {
         let own = self.remote.as_ref().map(|r| r.entity_id);
         if own == Some(owner) {
-            self.hook = Some(Hook::remote(id, at));
+            let mut hook = Hook::remote(id, at);
+            hook.velocity = velocity;
+            self.hook = Some(hook);
         } else {
             self.remote_hooks.push(RemoteHook {
                 id,
                 owner: owner as u32,
                 position: at,
                 previous: at,
+                velocity,
+                state: State::Flying,
+                on_ground: false,
+                lerp: HookLerp::default(),
             });
-        }
-    }
-
-    /// One tick of interpolation for the hooks a server tracks.
-    pub(super) fn step_remote_hooks(&mut self, mut step: impl FnMut(u32, Vec3) -> Vec3) {
-        if self.remote.is_none() {
-            return;
-        }
-        if let Some(h) = self.hook.as_mut() {
-            h.previous = h.position;
-            h.position = step(h.id, h.position);
-        }
-        for h in &mut self.remote_hooks {
-            h.previous = h.position;
-            h.position = step(h.id, h.position);
         }
     }
 
     /// `FishingHook.onSyncedDataUpdated`: this player's hook is biting
     /// (DATA_BITING), which `status` shows as a nibble.
     pub(super) fn remote_hook_data(&mut self, id: u32, values: &[(u8, i32, Value)]) {
-        let Some(h) = self
+        // DATA_HOOKED_ENTITY (the hooked id plus one, 0 for none): a hook on a
+        // client follows what it hooked (`FishingHook.onSyncedDataUpdated`).
+        let hooked = |value: &Value| match value {
+            Value::Int(v) if *v > 0 => State::Hooked(*v as u32 - 1),
+            _ => State::Flying,
+        };
+        if let Some(h) = self
             .hook
             .as_mut()
             .filter(|h| h.id == id && self.remote.is_some())
-        else {
-            return;
-        };
-        for (index, _, value) in values {
-            if let (9, Value::Bool(biting)) = (index, value) {
-                h.nibble = i32::from(*biting);
+        {
+            for (index, _, value) in values {
+                match (index, value) {
+                    (9, Value::Bool(biting)) => h.nibble = i32::from(*biting),
+                    (8, value) => h.state = hooked(value),
+                    _ => {}
+                }
+            }
+        } else if let Some(h) = self.remote_hooks.iter_mut().find(|h| h.id == id) {
+            for (index, _, value) in values {
+                if *index == 8 {
+                    h.state = hooked(value);
+                }
             }
         }
+    }
+
+    /// `Entity.lerpMotion` for a hook a server tracks: the motion its own tick
+    /// moves it on with between the tracker's updates.
+    pub(super) fn remote_hook_motion(&mut self, id: u32, v: Vec3) -> bool {
+        if self.remote.is_none() {
+            return false;
+        }
+        if let Some(h) = self.hook.as_mut().filter(|h| h.id == id) {
+            h.velocity = v;
+        } else if let Some(h) = self.remote_hooks.iter_mut().find(|h| h.id == id) {
+            h.velocity = v;
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// `FishingHook.tick` on a client: the interpolation step towards the
+    /// server's last update, then its own movement between the tracker's
+    /// updates (every five ticks), floating in water and riding what it
+    /// hooked, as the server's does.
+    pub(super) fn tick_remote_hooks(&mut self) {
+        if self.remote.is_none() {
+            return;
+        }
+        if let Some(mut h) = self.hook.take() {
+            h.previous = h.position;
+            h.position = h.lerp.step(h.position);
+            let before = h.position;
+            (h.position, h.velocity, h.state, h.on_ground) =
+                self.client_hook_step((h.position, h.velocity, h.state, h.on_ground));
+            h.lerp.moved(h.position.subtract(before));
+            self.hook = Some(h);
+        }
+        let mut hooks = std::mem::take(&mut self.remote_hooks);
+        for h in &mut hooks {
+            h.previous = h.position;
+            h.position = h.lerp.step(h.position);
+            let before = h.position;
+            (h.position, h.velocity, h.state, h.on_ground) =
+                self.client_hook_step((h.position, h.velocity, h.state, h.on_ground));
+            h.lerp.moved(h.position.subtract(before));
+        }
+        self.remote_hooks = hooks;
+    }
+
+    /// One tick of `FishingHook.tick`'s movement without the fishing (the
+    /// server's): position, motion, state and whether it rests on the ground.
+    fn client_hook_step(
+        &mut self,
+        (mut position, mut velocity, state, mut on_ground): (Vec3, Vec3, State, bool),
+    ) -> (Vec3, Vec3, State, bool) {
+        let b = [
+            position.x.floor() as i32,
+            position.y.floor() as i32,
+            position.z.floor() as i32,
+        ];
+        let liquid = self.water_height(b[0], b[1], b[2]).map_or(0.0, |w| w.0);
+        let in_water = liquid > 0.0;
+        match state {
+            State::Flying if in_water => {
+                velocity = Vec3::new(velocity.x * 0.3, velocity.y * 0.2, velocity.z * 0.3);
+                return (position, velocity, State::Bobbing, on_ground);
+            }
+            // A landed hook: the server stopped it dead (zero motion) and sends no
+            // more than the odd update; it does not fall on from here.
+            State::Flying if velocity == Vec3::ZERO && on_ground => {
+                return (position, velocity, state, on_ground);
+            }
+            State::Flying => {}
+            State::Hooked(id) => {
+                // updateHookedEntity: at 0.8 of the hooked entity's height.
+                let hooked = if self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|r| r.entity_id as u32 == id)
+                {
+                    self.player
+                        .as_ref()
+                        .map(|p| (p.position, f64::from(p.dimensions.height)))
+                } else {
+                    self.mobs
+                        .iter()
+                        .find(|m| m.id == id && m.alive())
+                        .map(|m| (m.position, f64::from(m.height())))
+                        .or_else(|| {
+                            self.dropped
+                                .iter()
+                                .find(|i| i.id == id)
+                                .map(|i| (i.position, horizon_client::entities::ItemEntity::WIDTH))
+                        })
+                };
+                return match hooked {
+                    Some((at, height)) => (
+                        Vec3::new(at.x, at.y + height * 0.8, at.z),
+                        Vec3::ZERO,
+                        state,
+                        on_ground,
+                    ),
+                    None => (position, velocity, State::Flying, on_ground),
+                };
+            }
+            State::Bobbing => {
+                let mut force = position.y + velocity.y - f64::from(b[1]) - f64::from(liquid);
+                if force.abs() < 0.01 {
+                    force += force.signum() * 0.1;
+                }
+                let r = f64::from(self.world.random.next_float());
+                velocity = Vec3::new(
+                    velocity.x * 0.9,
+                    velocity.y - force * r * 0.2,
+                    velocity.z * 0.9,
+                );
+            }
+        }
+        if !in_water && !on_ground {
+            velocity.y -= 0.03;
+        }
+        let mut scene = SceneCollisions {
+            world: &self.world,
+            binding: self.collision,
+            subject: None,
+        };
+        if let Ok(moved) = scene.resolve(bounds(position), velocity, 0.0, on_ground) {
+            let horizontal =
+                (moved.x - velocity.x).abs() > 1.0e-7 || (moved.z - velocity.z).abs() > 1.0e-7;
+            on_ground = velocity.y < 0.0 && moved.y > velocity.y;
+            position = Vec3::new(
+                position.x + moved.x,
+                position.y + moved.y,
+                position.z + moved.z,
+            );
+            if state == State::Flying && (on_ground || horizontal) {
+                velocity = Vec3::ZERO;
+            }
+        }
+        velocity = Vec3::new(velocity.x * 0.92, velocity.y * 0.92, velocity.z * 0.92);
+        (position, velocity, state, on_ground)
     }
 
     pub(super) fn remove_remote_hook(&mut self, id: u32) {

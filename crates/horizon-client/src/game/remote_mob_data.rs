@@ -5,11 +5,13 @@
 use super::Game;
 use horizon_client::mobs::render::{PROFESSIONS, VILLAGER_TYPES};
 use horizon_client::mobs::{
-    Mob, Species, Who, armadillo, bat, bee, camel, creaking, finalize, panda, sniffer, sync, tame,
+    Mob, Species, Who, armadillo, bat, bee, camel, creaking, equine, finalize, illusioner, panda,
+    sniffer, sync, tame, zombie_villager,
 };
 use horizon_client::particles::{ParticleOptions, ParticleType};
 use horizon_protocol::entity_data::{Particle, ParticleData, Value};
 use horizon_protocol::registry::{Builtin, Dynamic};
+use horizon_world::registry::BlockStateId;
 
 /// The values `apply` takes from one SetEntityData packet, by vanilla's entry
 /// indices (Entity 0..=7, LivingEntity 8..=14, Mob 15, then the subclasses).
@@ -31,7 +33,23 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
             // Entity.DATA_SHARED_FLAGS_ID's FLAG_ONFIRE: Entity.isOnFire on a
             // client, which draws the flames. A client doesn't count the
             // fire down: the flag goes off when the server's fire is out.
-            (0, Value::Byte(flags)) => m.fire_ticks = i32::from(flags & 1),
+            (0, Value::Byte(flags)) => {
+                m.fire_ticks = i32::from(flags & 1);
+                // Entity.isSprinting: a dashing cat's or ocelot's model.
+                m.extra.sprinting = flags & 8 != 0;
+                // Drowned.setSwimming: the shared flag of swimming.
+                if species == Species::Drowned {
+                    m.extra.flag = flags & 16 != 0;
+                }
+                // The shared flag of invisibility: Entity.isInvisible hides
+                // the model (an illusioner shows its mirror images).
+                let invisible = flags & 32 != 0;
+                if species == Species::Illusioner {
+                    illusioner::set_invisible(m, invisible);
+                } else if &*m.kind.id != "minecraft:player" {
+                    m.invisible = invisible;
+                }
+            }
             // Entity.DATA_POSE: the pose the species animates by.
             (6, Value::Id(pose)) => sync::set_pose(m, (*pose).clamp(0, 17) as u8),
             // LivingEntity.DATA_LIVING_ENTITY_FLAGS: using an item 1, in the
@@ -101,8 +119,9 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
             }
             // SnowGolem.DATA_PUMPKIN_ID: 16 while the pumpkin is on.
             (Species::SnowGolem, 16, Value::Byte(flags)) => m.extra.sheared = flags & 16 == 0,
-            // MushroomCow.DATA_TYPE: 0 red, 1 brown.
-            (Species::Mooshroom, 17, Value::Int(variant)) => {
+            // MushroomCow.DATA_TYPE (after AgeableMob's DATA_BABY_ID and
+            // AGE_LOCKED): 0 red, 1 brown.
+            (Species::Mooshroom, 18, Value::Int(variant)) => {
                 m.extra.variant = (*variant == 1) as u8
             }
             // Piglin.DATA_IS_DANCING: the dance pose.
@@ -112,6 +131,11 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
                 m.extra.sitting = flags & 1 != 0;
                 m.extra.tame = flags & 4 != 0;
             }
+            // Cat.IS_LYING and RELAX_STATE_ONE.
+            (Species::Cat, 21, Value::Bool(lying)) => m.extra.flag = *lying,
+            (Species::Cat, 22, Value::Bool(relaxing)) => m.extra.relax_one = *relaxing,
+            // Wolf.DATA_INTERESTED_ID: begging, which tilts the head.
+            (Species::Wolf, 20, Value::Bool(begging)) => m.extra.flag = *begging,
             // Wolf.DATA_COLLAR_COLOR and Cat's.
             (Species::Wolf, 21, Value::Int(c)) | (Species::Cat, 23, Value::Int(c)) => {
                 m.extra.color = (*c & 15) as u8;
@@ -157,6 +181,10 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
             }
             // Vex.DATA_FLAGS_ID: charging in bit 0.
             (Species::Vex, 16, Value::Byte(flags)) => m.extra.flag = flags & 1 != 0,
+            // GlowSquid.DATA_DARK_TICKS_REMAINING (after AgeableMob's two).
+            (Species::GlowSquid, 18, Value::Int(ticks)) => {
+                horizon_client::mobs::aquatic::set_dark_ticks(m, *ticks);
+            }
             // Creaking.CAN_MOVE, IS_ACTIVE and IS_TEARING_DOWN.
             (Species::Creaking, 16, Value::Bool(can_move)) => m.extra.flag2 = !*can_move,
             (Species::Creaking, 17, Value::Bool(active)) => m.extra.flag = *active,
@@ -215,6 +243,47 @@ fn apply(m: &mut Mob, values: &[(u8, i32, Value)], builtin: &Builtin, local_enti
             (Species::CopperGolem, 16, Value::Id(state)) => {
                 m.extra.variant = (*state).clamp(0, 3) as u8;
             }
+            // AbstractHorse.DATA_ID_FLAGS: eating 16 and standing 32 (the
+            // graze and the rear), which `sync::client_tick` animates.
+            (s, 18, Value::Byte(flags)) if equine::grazes(s) => equine::set_flags(m, *flags as u8),
+            // Enderman.DATA_CARRY_STATE (0 for none): the block it holds.
+            (Species::Enderman, 16, Value::Id(state)) => {
+                m.extra.carried = (*state > 0).then_some(BlockStateId(*state as u32));
+            }
+            // Zombie.DATA_DROWNED_CONVERSION_ID (after DATA_BABY_ID and
+            // DATA_SPECIAL_TYPE_ID): the conversion's shaking.
+            (Species::Zombie | Species::Husk, 18, Value::Bool(converting)) => {
+                m.extra.counter2 = i32::from(*converting);
+            }
+            // Skeleton.DATA_STRAY_CONVERSION_ID (the first entry after Mob's):
+            // the freezing conversion's shaking.
+            (Species::Skeleton, 16, Value::Bool(converting)) => {
+                m.extra.counter2 = i32::from(*converting);
+            }
+            // ZombieVillager.DATA_CONVERTING_ID (before its villager data).
+            (Species::ZombieVillager, 19, Value::Bool(converting)) => {
+                zombie_villager::set_converting(m, *converting);
+            }
+            // AbstractVillager.DATA_UNHAPPY_COUNTER (after AgeableMob's two):
+            // the head shake of `no`, which the server counts down.
+            (Species::Villager | Species::WanderingTrader, 18, Value::Int(ticks)) => {
+                m.extra.ints[0] = *ticks;
+            }
+            // Hoglin.DATA_IMMUNE_TO_ZOMBIFICATION (after AgeableMob's two) and
+            // AbstractPiglin's: `sync`'s conversion shake reads it.
+            (Species::Hoglin, 18, Value::Bool(immune))
+            | (Species::Piglin | Species::PiglinBrute, 16, Value::Bool(immune)) => {
+                m.extra.flag2 = *immune;
+            }
+            // Blaze.DATA_FLAGS_ID: charged 1, which makes it burn.
+            (Species::Blaze, 16, Value::Byte(flags)) => m.extra.flag = flags & 1 != 0,
+            // Turtle.HAS_EGG and LAYING_EGG (after AgeableMob's two).
+            (Species::Turtle, 18, Value::Bool(has_egg)) => m.extra.flag = *has_egg,
+            (Species::Turtle, 19, Value::Bool(laying)) => m.extra.flag2 = *laying,
+            // WitherBoss.DATA_TARGET_B and _C (after DATA_TARGET_A): the
+            // entities the side heads turn toward in `wither::client_tick`.
+            (Species::Wither, 17, Value::Int(id)) => m.extra.ints[0] = *id,
+            (Species::Wither, 18, Value::Int(id)) => m.extra.ints[1] = *id,
             // Pillager.IS_CHARGING_CROSSBOW: the charge pose (Raider's
             // IS_CELEBRATING takes 16).
             (Species::Pillager, 17, Value::Bool(charging)) => m.extra.flag = *charging,
@@ -357,9 +426,20 @@ impl Game<'_> {
         let Some(r) = &self.remote else {
             return;
         };
+        // LivingEntity.onSyncedDataUpdated(SLEEPING_POS_ID): a villager lies
+        // in its bed the way the bed faces, or gets up.
+        let bed = values.iter().find_map(|v| match v {
+            (14, _, Value::OptPos(bed)) => Some(bed.map_or(0, |b| self.bed_facing(b))),
+            _ => None,
+        });
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id as u32) {
             apply(m, values, &r.builtin, r.entity_id);
             apply_registry_data(m, values, &r.registries, self.world.game_time);
+            if let Some(code) = bed
+                && m.species() == Species::Villager
+            {
+                m.extra.ints[1] = code;
+            }
         }
     }
 }
@@ -448,6 +528,21 @@ mod tests {
             assert_eq!(m.extra.counter2, 0);
             assert!(beam(&m, 0.0).is_none());
         }
+    }
+
+    #[test]
+    fn a_mooshroom_takes_its_type_after_the_age_lock() {
+        let Some(mut m) = mob("minecraft:mooshroom") else {
+            return;
+        };
+        // AgeableMob.AGE_LOCKED (17) is not the colour.
+        apply(&mut m, &[(17, s::BOOLEAN, Value::Bool(true))]);
+        assert_eq!(m.extra.variant, 0);
+        // MushroomCow.DATA_TYPE (18): what MushroomCow.thunderHit changes.
+        apply(&mut m, &[(18, s::INT, Value::Int(1))]);
+        assert_eq!(m.extra.variant, 1);
+        apply(&mut m, &[(18, s::INT, Value::Int(0))]);
+        assert_eq!(m.extra.variant, 0);
     }
 
     #[test]
@@ -544,6 +639,35 @@ mod tests {
         );
         assert!(m.extra.tame && m.extra.sitting);
         assert_eq!(m.extra.color, 11);
+    }
+
+    /// Wolf.DATA_INTERESTED_ID: the begging flag reaches the client, whose
+    /// own `Wolf.tick` eases `interestedAngle` toward it (0.4 of the way a
+    /// tick), and `getHeadRollAngle` tilts the head by it.
+    #[test]
+    fn a_wolf_tilts_its_head_while_the_server_says_it_begs() {
+        use horizon_client::mobs::sync::client_tick;
+        let Some(mut m) = mob("minecraft:wolf") else {
+            return;
+        };
+        apply(&mut m, &[(20, s::BOOLEAN, Value::Bool(true))]);
+        client_tick(&mut m, 0);
+        assert!((m.anim.v[tame::INTEREST] - 0.4).abs() < 1e-6);
+        assert_eq!(m.anim.vo[tame::INTEREST], 0.0);
+        client_tick(&mut m, 0);
+        assert!((m.anim.v[tame::INTEREST] - 0.64).abs() < 1e-6);
+        assert!((m.anim.lerp(tame::INTEREST, 0.5) - 0.52).abs() < 1e-6);
+        for _ in 0..30 {
+            client_tick(&mut m, 0);
+        }
+        assert!(m.anim.v[tame::INTEREST] > 0.999);
+        apply(&mut m, &[(20, s::BOOLEAN, Value::Bool(false))]);
+        client_tick(&mut m, 0);
+        assert!(m.anim.v[tame::INTEREST] < 0.61);
+        for _ in 0..30 {
+            client_tick(&mut m, 0);
+        }
+        assert!(m.anim.v[tame::INTEREST] < 0.001);
     }
 
     #[test]

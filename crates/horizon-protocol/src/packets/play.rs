@@ -8,7 +8,7 @@ use crate::{
     },
     chunk::{ChunkData, LightData},
     entity_data::{EntityData, Particle, Value},
-    item::{Component, Hashed, HashedSlot, Slot, Stack},
+    item::{Component, DelimitedSlot, Hashed, HashedSlot, Slot, Stack},
     packet, packet_enum,
     packets::{
         Empty,
@@ -111,6 +111,7 @@ impl From<NetCost> for Stack {
             count: cost.count,
             added: cost.components,
             removed: Vec::new(),
+            wire: Default::default(),
         }
     }
 }
@@ -720,6 +721,20 @@ packet!(PlayerPosition {
 packet!(
     /// ClientboundProjectilePowerPacket: an AbstractHurtingProjectile's accelerationPower.
     ProjectilePower { id: i32 => VarInt, power: f64 => Double }
+);
+packet!(
+    /// ClientboundPlayerLookAtPacket's entity target: its id and the anchor
+    /// (`EntityAnchorArgument.Anchor`: 0 feet, 1 eyes) to look at on it.
+    LookAtEntity { id: i32 => VarInt, anchor: i32 => VarInt }
+);
+packet!(
+    /// ClientboundPlayerLookAtPacket: turn this player's `from` anchor towards
+    /// a point, or towards an entity when the client knows it.
+    PlayerLookAt {
+        from: i32 => VarInt,
+        target: [f64; 3] => Vec3d,
+        entity: Option<LookAtEntity> => Opt<LookAtEntity>,
+    }
 );
 packet!(PlayerRotation { yaw: f32 => Float, relative_yaw: bool => Bool, pitch: f32 => Float, relative_pitch: bool => Bool });
 packet!(RemoveEntities { ids: Vec<i32> => List<VarInt> });
@@ -1857,6 +1872,7 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     PlayerCombatKill(PlayerCombatKill) = PLAYER_COMBAT_KILL,
     PlayerInfoRemove(PlayerInfoRemove) = PLAYER_INFO_REMOVE,
     PlayerInfoUpdate(PlayerInfoUpdate) = PLAYER_INFO_UPDATE,
+    PlayerLookAt(PlayerLookAt) = PLAYER_LOOK_AT,
     PlayerPosition(PlayerPosition) = PLAYER_POSITION,
     PlayerRotation(PlayerRotation) = PLAYER_ROTATION,
     RemoveEntities(RemoveEntities) = REMOVE_ENTITIES,
@@ -2046,6 +2062,7 @@ impl Codec<TrackedWaypoint> for TrackedWaypoint {
 
 packet!(AcceptTeleportation { id: i32 => VarInt, x: f64 => Double, y: f64 => Double, z: f64 => Double, yaw: f32 => Float, pitch: f32 => Float });
 packet!(Attack { id: i32 => VarInt });
+packet!(TeleportToEntity { uuid: u128 => Uuid });
 packet!(
     /// GameType ids: 0 survival, 1 creative, 2 adventure, 3 spectator.
     ChangeGameMode { mode: i32 => VarInt }
@@ -2265,7 +2282,7 @@ packet!(
     SelectBundleItem { slot: i32 => VarInt, index: i32 => VarInt }
 );
 packet!(SetCarriedItem { slot: i16 => Short });
-packet!(SetCreativeModeSlot { slot: i16 => Short, item: Option<Stack> => Slot });
+packet!(SetCreativeModeSlot { slot: i16 => Short, item: Option<Stack> => DelimitedSlot });
 packet!(UseItem { hand: i32 => VarInt, sequence: i32 => VarInt, yaw: f32 => Float, pitch: f32 => Float });
 packet!(UseItemOn {
     hand: i32 => VarInt,
@@ -2293,6 +2310,7 @@ packet_enum!(Serverbound, crate::ids::play::serverbound {
     SetGameRule(SetGameRule) = SET_GAME_RULE,
     AcceptTeleportation(AcceptTeleportation) = ACCEPT_TELEPORTATION,
     Attack(Attack) = ATTACK,
+    TeleportToEntity(TeleportToEntity) = TELEPORT_TO_ENTITY,
     ChangeGameMode(ChangeGameMode) = CHANGE_GAME_MODE,
     Chat(Chat) = CHAT,
     ChatAck(ChatAck) = CHAT_ACK,
@@ -3059,12 +3077,37 @@ mod tests {
     }
 
     #[test]
+    fn player_look_at_round_trips() {
+        let at_point = PlayerLookAt {
+            from: 1,
+            target: [1.5, 64.0, -2.25],
+            entity: None,
+        };
+        let at_entity = PlayerLookAt {
+            from: 0,
+            target: [0.0, 70.0, 0.0],
+            entity: Some(LookAtEntity { id: 42, anchor: 1 }),
+        };
+        for p in [at_point, at_entity] {
+            let bytes = Clientbound::PlayerLookAt(p.clone()).encode();
+            // 1 id byte, 1 anchor, 3 doubles, the flag; the entity adds 2 VarInts.
+            let len = 1 + 1 + 24 + 1 + if p.entity.is_some() { 2 } else { 0 };
+            assert_eq!(bytes.len(), len);
+            assert_eq!(
+                Clientbound::decode(crate::ids::play::clientbound::PLAYER_LOOK_AT, &bytes[1..])
+                    .unwrap(),
+                Clientbound::PlayerLookAt(p)
+            );
+        }
+    }
+
+    #[test]
     fn unknown_packets_keep_their_payload() {
         let p =
-            Clientbound::decode(crate::ids::play::clientbound::PLAYER_LOOK_AT, &[1, 2, 3]).unwrap();
+            Clientbound::decode(crate::ids::play::clientbound::DEBUG_SAMPLE, &[1, 2, 3]).unwrap();
         assert_eq!(
             p,
-            Clientbound::Unknown(crate::ids::play::clientbound::PLAYER_LOOK_AT, vec![1, 2, 3])
+            Clientbound::Unknown(crate::ids::play::clientbound::DEBUG_SAMPLE, vec![1, 2, 3])
         );
         assert_eq!(p.encode()[1..], [1, 2, 3]);
     }

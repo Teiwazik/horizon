@@ -82,7 +82,7 @@ pub(super) struct ServerPackState {
     queue: Option<download::Queue>,
     pub(super) prompt: Option<PackPrompt>,
     /// The server list entry the setting is saved to (none: a direct join).
-    address: Option<String>,
+    pub(super) address: Option<String>,
     /// The account the downloads are made for (the download headers).
     user: (String, u128),
     /// The packs loaded on top of the player's own, bottom first.
@@ -197,9 +197,12 @@ fn human_readable(bytes: u64) -> String {
     format!("{} {prefix}B", java_text::format_fixed(value, 1))
 }
 
-fn saves() -> PathBuf {
+pub(super) fn saves() -> PathBuf {
     std::env::current_dir().unwrap_or_default().join("saves")
 }
+
+/// `WorldOpenFlows.WORLD_PACK_ID`: the id of a world's own resource pack.
+const WORLD_PACK_ID: u128 = 0x640a6a92_b6cb_48a0_b391_831586500359;
 
 /// `LoadingOverlay`'s stage lines for a pack reload, indexed by `progress`.
 const RELOAD_LINES: [&str; 6] = [
@@ -221,6 +224,19 @@ pub(super) struct PackReload {
 }
 
 impl Game<'_> {
+    /// `WorldOpenFlows.loadBundledResourcePack`: a world's own
+    /// `resourcepacks/resources.zip` is pushed as a local pack before the world
+    /// connects, after `configureForLocalWorld` so the pack is accepted at once.
+    pub(super) fn server_packs_world_pack(&mut self, folder: &str) {
+        let path = saves()
+            .join(folder)
+            .join("resourcepacks")
+            .join("resources.zip");
+        if path.is_file() {
+            self.server_packs.packs.local_world();
+            self.server_packs.packs.push_local(WORLD_PACK_ID, path);
+        }
+    }
     /// `ConnectScreen`: the server's setting decides what its packs do
     /// (`configureForServerControl`); single player's own server takes them
     /// all, quietly (`configureForLocalWorld`).
@@ -273,6 +289,8 @@ impl Game<'_> {
         open.requests.push((p.id, p.url, p.hash));
         open.required = p.required;
         open.prompt = text;
+        // Gui.setScreen: KeyMapping.releaseAll, so no walking behind the prompt.
+        self.keys.clear();
         self.capture(false);
     }
     /// `handleResourcePackPop`: one pack, or all of them.

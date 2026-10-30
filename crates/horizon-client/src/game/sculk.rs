@@ -6,6 +6,7 @@
 use super::{Game, Result};
 use horizon_client::{
     containers::BlockEntity,
+    effects::{EffectInstance, PlayerEffects},
     fast_hash::{FxHashMap, FxHashSet},
     mobs::{Mob, Species, Who, warden},
     particles::{ParticleOptions, ParticleType},
@@ -67,6 +68,7 @@ struct Steps {
 pub(super) struct PlayerEvents {
     steps: Option<Steps>,
     last_health: Option<f32>,
+    mount: Option<(u32, [f64; 3])>,
 }
 
 #[derive(Default)]
@@ -81,10 +83,12 @@ pub(super) struct SculkState {
     pub known_revision: Option<u64>,
     // Keyed by mob ids the server gives out: the fast hasher is safe.
     steps: FxHashMap<Who, Steps>,
+    /// The vehicle each rider had last tick and where it stood.
+    mounts: FxHashMap<Who, (u32, [f64; 3])>,
     damaged: FxHashMap<u32, i64>,
     last_health: Option<f32>,
     /// The darkness effect's blend factor, previous and current tick.
-    darkness: (f32, f32),
+    pub darkness: (f32, f32),
     /// Who causes the block changes being processed (the player's actions).
     pub actor: Option<Who>,
     ticks: u32,
@@ -98,6 +102,11 @@ impl SculkState {
             self.steps.insert(Who::Player, guest);
         }
         other.steps = steps;
+        let mount = self.mounts.remove(&Who::Player);
+        if let Some(guest) = other.mount.take() {
+            self.mounts.insert(Who::Player, guest);
+        }
+        other.mount = mount;
         std::mem::swap(&mut self.last_health, &mut other.last_health);
     }
 
@@ -623,6 +632,18 @@ impl Game<'_> {
             SculkKind::Shrieker => sculk::shrieker_can_listen(event),
             _ => sculk::is_vibration(event),
         };
+        // VibrationSystem.User.isValidVibration: a player sneaking past a
+        // sensor, whose step it ignores, is AVOID_VIBRATION (sensors only;
+        // a shrieker cannot trigger it).
+        if listens
+            && matches!(kind, SculkKind::Sensor | SculkKind::Calibrated)
+            && ctx.source == Some(Who::Player)
+            && !ctx.spectator
+            && ctx.stepping_carefully
+            && sculk::ignored_when_sneaking(event)
+        {
+            self.trigger_player("minecraft:avoid_vibration");
+        }
         if !sculk::valid_vibration(listens, event, ctx) {
             return;
         }
@@ -693,12 +714,15 @@ impl Game<'_> {
     fn warden_listen(&mut self, index: usize, event: &'static str, pos: [f64; 3], ctx: &Context) {
         let now = self.world.game_time;
         let (occludes, world) = (&self.sculk.tables.occludes, &self.world);
-        warden::listen(&mut self.mobs[index], now, event, pos, ctx, |a, b| {
+        let avoided = warden::listen(&mut self.mobs[index], now, event, pos, ctx, |a, b| {
             sculk::is_occluded(a, b, |p| {
                 let state = world.block(p.x, p.y, p.z);
                 occludes.get(state.0 as usize).copied().unwrap_or(false)
             })
         });
+        if avoided {
+            self.trigger_player("minecraft:avoid_vibration");
+        }
     }
 
     // ---- ticking ----
@@ -1148,23 +1172,10 @@ impl Game<'_> {
 
     // ---- darkness ----
 
-    /// `MobEffectInstance.BlendState.tick` for the darkness effect: it fades
-    /// in and out over 22 ticks.
+    /// The darkness effect's blend, where this game ticks the player in its
+    /// own level (a server's client ticks it in `tick_client_effects`).
     fn tick_darkness_blend(&mut self) {
-        const BLEND: f32 = 22.0;
-        let (_, current) = self.sculk.darkness;
-        let next = match self.potions.effects.get("darkness") {
-            Some(e) => {
-                let target = if e.duration == -1 || e.duration > BLEND as i32 {
-                    1.0
-                } else {
-                    0.0
-                };
-                current + (target - current).clamp(-1.0 / BLEND, 1.0 / BLEND)
-            }
-            None => 0.0,
-        };
-        self.sculk.darkness = (current, next);
+        self.sculk.darkness = darkness_blend_tick(&self.potions.effects, self.sculk.darkness);
     }
     /// The darkness effect's blend factor at the partial tick.
     fn darkness_blend(&self, partial: f32) -> f32 {
@@ -1539,6 +1550,7 @@ impl Game<'_> {
             if on_ground && !self.spectator() {
                 self.step_on_redstone_ore(at, crouch);
             }
+            self.mount_events(Who::Player, self.riding, true);
             let in_water = self.in_water_at(at);
             self.entity_motion_events(
                 Who::Player,
@@ -1577,8 +1589,41 @@ impl Game<'_> {
         }
     }
 
+    /// `RedStoneOreBlock.useItemOn`: a right-click lights the ore whatever the
+    /// hand holds. False (PASS) when the hand holds a block item, which goes on
+    /// to be placed; true (SUCCESS) otherwise.
+    pub(super) fn use_redstone_ore(
+        &mut self,
+        pos: [i32; 3],
+        held: Option<&horizon_client::items::ItemStack>,
+    ) -> Result<bool> {
+        if !matches!(
+            &*self.block_name(pos),
+            "minecraft:redstone_ore" | "minecraft:deepslate_redstone_ore"
+        ) {
+            return Ok(false);
+        }
+        self.attack_block(pos)?;
+        let block_item = held.is_some_and(|s| {
+            self.res
+                .items()
+                .get(&s.item)
+                .is_some_and(|i| i.block.is_some())
+        });
+        Ok(!block_item)
+    }
+
     fn tick_mob_sculk_events(&mut self) {
-        let snapshot: Vec<(u32, [f64; 3], bool, bool, Species, Option<i64>)> = self
+        let snapshot: Vec<(
+            u32,
+            [f64; 3],
+            bool,
+            bool,
+            Species,
+            Option<i64>,
+            Option<u32>,
+            u32,
+        )> = self
             .mobs
             .iter()
             .filter(|m| m.alive())
@@ -1590,16 +1635,34 @@ impl Game<'_> {
                     m.fluids.in_water,
                     m.species(),
                     m.last_damage.map(|(_, t)| t),
+                    m.extra.mount,
+                    m.age,
                 )
             })
             .collect();
-        for (id, at, on_ground, in_water, species, damaged) in snapshot {
+        for (id, at, on_ground, in_water, species, damaged, vehicle, age) in snapshot {
             if on_ground {
                 self.step_on_redstone_ore(at, false);
             }
+            // A mob first seen already riding raised its event when it spawned.
+            let seen = self.sculk.steps.contains_key(&Who::Mob(id));
+            self.mount_events(Who::Mob(id), vehicle, seen);
             let emits = !matches!(species, Species::Shulker);
             if emits {
                 self.entity_motion_events(Who::Mob(id), at, on_ground, in_water, false, false);
+                // Entity.processFlappingMovement with Bee.isFlapping: a bee off
+                // the ground over air flaps on every other tick (the mob's own
+                // `MobEvent::GameEvent` is not read here).
+                if species == Species::Bee && !on_ground && age.is_multiple_of(2) {
+                    let below = self.world.block(
+                        at[0].floor() as i32,
+                        (at[1] - 1.0e-5).floor() as i32,
+                        at[2].floor() as i32,
+                    );
+                    if self.res.facts().is_air(below) {
+                        self.post_entity_event("minecraft:flap", Who::Mob(id));
+                    }
+                }
             }
             if let Some(t) = damaged {
                 let seen = self.sculk.damaged.insert(id, t);
@@ -1614,6 +1677,51 @@ impl Game<'_> {
             Who::Player => true,
             Who::Mob(id) => alive.contains(id),
         });
+        self.sculk.mounts.retain(|who, _| match who {
+            Who::Player => true,
+            Who::Mob(id) => alive.contains(id),
+        });
+    }
+    /// Where the vehicle `id` stands: a mob, boat, minecart or cushion.
+    fn vehicle_position(&self, id: u32) -> Option<[f64; 3]> {
+        let p = if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+            m.position
+        } else if let Some(b) = self.boats.iter().find(|b| b.id == id) {
+            b.position
+        } else if let Some(c) = self.carts.iter().find(|c| c.id == id) {
+            c.position
+        } else {
+            self.cushions.iter().find(|c| c.id == id)?.position
+        };
+        Some([p.x, p.y, p.z])
+    }
+    /// `Entity.startRiding` and `removeVehicle`: `entity_mount` at the new
+    /// vehicle and `entity_dismount` at the old one, derived from the vehicle
+    /// the rider has now and the one it had last tick. `announce` is false
+    /// for a rider first seen riding.
+    fn mount_events(&mut self, who: Who, vehicle: Option<u32>, announce: bool) {
+        let last = self.sculk.mounts.get(&who).copied();
+        let now = vehicle.and_then(|id| self.vehicle_position(id));
+        if last.map(|l| l.0) != vehicle {
+            if let Some((_, at)) = last {
+                let ctx = self.who_context(Some(who), None);
+                self.post_game_event("minecraft:entity_dismount", at, ctx);
+            }
+            if let (true, Some(at)) = (announce, now) {
+                let ctx = self.who_context(Some(who), None);
+                self.post_game_event("minecraft:entity_mount", at, ctx);
+            }
+        }
+        // A vehicle that is gone keeps the spot it was last seen at.
+        let kept = last.filter(|l| Some(l.0) == vehicle).map(|l| l.1);
+        match (vehicle, now.or(kept)) {
+            (Some(id), Some(at)) => {
+                self.sculk.mounts.insert(who, (id, at));
+            }
+            _ => {
+                self.sculk.mounts.remove(&who);
+            }
+        }
     }
     fn in_water_at(&self, at: [f64; 3]) -> bool {
         let (x, y, z) = (
@@ -1715,6 +1823,41 @@ impl Game<'_> {
             ctx,
         );
     }
+}
+
+/// `MobEffects.DARKNESS`'s `setBlendDuration(22)`: its fade in, its fade out,
+/// and how long before the end the fade out starts.
+const DARKNESS_BLEND: i32 = 22;
+
+/// `MobEffectInstance.BlendState.hasEffect` for the darkness effect.
+fn darkness_target(e: &EffectInstance) -> f32 {
+    if e.ends_within(DARKNESS_BLEND) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// `MobEffectInstance.BlendState.tick` for the darkness effect: from the
+/// (previous, current) factors, the next ones. It fades in and out over 22
+/// ticks; with no darkness it is gone.
+pub(super) fn darkness_blend_tick(effects: &PlayerEffects, (_, current): (f32, f32)) -> (f32, f32) {
+    let next = match effects.get("darkness") {
+        Some(e) => {
+            let step = 1.0 / DARKNESS_BLEND as f32;
+            current + (darkness_target(e) - current).clamp(-step, step)
+        }
+        None => 0.0,
+    };
+    (current, next)
+}
+
+/// A new darkness instance's `BlendState`: from nothing, or, when the server
+/// asked for no blending, at once (`MobEffectInstance.skipBlending`'s
+/// `BlendState.setImmediate`).
+pub(super) fn darkness_blend_added(e: &EffectInstance, blend: bool) -> (f32, f32) {
+    let factor = if blend { 0.0 } else { darkness_target(e) };
+    (factor, factor)
 }
 
 #[cfg(test)]

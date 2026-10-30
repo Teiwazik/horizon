@@ -62,7 +62,7 @@ pub fn register(m: &mut Mob) {
 
 /// `Illusioner.finalizeSpawn`: a bow in the main hand.
 pub fn finalize(m: &mut Mob) {
-    m.extra.main_hand = Some("minecraft:bow".into());
+    m.extra.set_main_hand(Some("minecraft:bow".into()));
 }
 
 /// `IllusionerMirrorSpellGoal` and `IllusionerBlindnessSpellGoal`.
@@ -143,6 +143,15 @@ impl Goal for Spell {
             1.0,
             1.0,
         ));
+    }
+}
+
+/// `Entity.isInvisible` of an illusioner on a client: the shared flag stands
+/// in for the effect the server holds, which draws the mirror images.
+pub fn set_invisible(m: &mut Mob, on: bool) {
+    m.extra.effects.retain(|e| e.0 != INVISIBILITY);
+    if on {
+        m.extra.effects.push((INVISIBILITY, i32::MAX, 0));
     }
 }
 
