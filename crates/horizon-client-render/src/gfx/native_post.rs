@@ -120,6 +120,9 @@ pub struct NativeFrame {
     shadow_terrain: Option<(glam::DVec3, Mat4)>,
     /// Whether this frame draws the shadow map's terrain again (`write`).
     pub shadow_refresh: bool,
+    /// Whether the water mirror is drawn for the pack (`NativePack::reflection`): without
+    /// it `has_reflection` stays 0.
+    pub reflects: bool,
     /// Each sprite layer's `[[materials]]` id (binding 5), read by the terrain's stages.
     pub materials: wgpu::Buffer,
     /// The pack's `[[textures]]` and their samplers, bound in every stage.
@@ -304,6 +307,7 @@ impl NativeFrame {
             shadow_camera: shadow.map(super::native_shadow::camera),
             shadow_terrain: None,
             shadow_refresh: true,
+            reflects: true,
             materials,
             textures,
             opaque_depth,
@@ -514,6 +518,9 @@ impl NativeFrame {
                 inputs.shadow_view_proj =
                     (view_proj * Mat4::from_translation(moved)).to_cols_array_2d();
             }
+        }
+        if !self.reflects {
+            inputs.has_reflection = 0;
         }
         let view_proj = (Mat4::from_cols_array_2d(&inputs.projection)
             * Mat4::from_cols_array_2d(&inputs.view))

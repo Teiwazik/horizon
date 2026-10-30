@@ -46,6 +46,28 @@ fn the_sample_passes() {
     assert_eq!(sha, sample().sha256().unwrap());
 }
 
+/// `reads` follows the stage function into the functions it calls.
+#[test]
+fn a_stage_reads_the_resources_its_calls_do() {
+    let report = check(&sample()).unwrap();
+    assert!(!report.stages[1].reads("reflection"));
+    let mut files = sample().files;
+    files.insert(
+        "material.wgsl".into(),
+        b"fn mirror(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(reflection, reflection_sampler, uv, 0.0);
+}
+fn material(input: MaterialInput) -> Surface {
+    return Surface(input.albedo + mirror(input.screen) * 0.0);
+}
+"
+            .to_vec(),
+    );
+    let report = check(&Pack::from_files(files).unwrap()).unwrap();
+    assert!(report.stages[1].reads("reflection"));
+    assert!(!report.stages[1].reads("shadow_map"));
+}
+
 #[test]
 fn a_syntax_error_points_at_its_line() {
     let p = one(

@@ -31,6 +31,19 @@ pub struct NativePack {
     pub weather: Option<wgpu::RenderPipeline>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
     pub displacement: Option<Displacement>,
+    /// Whether the material stage reads the water mirror (`reflection`) and `[reflection]`'s
+    /// option, if any, is on: else the reflection pass is left out.
+    pub reflection: bool,
+}
+
+/// Whether the option `id`, if any, is on in `constants` (not 0; on when it is not there).
+fn option_on(constants: &[(String, f64)], id: Option<&String>) -> bool {
+    id.is_none_or(|id| {
+        constants
+            .iter()
+            .find(|(k, _)| k == id)
+            .is_none_or(|(_, v)| *v != 0.0)
+    })
 }
 
 impl NativePack {
@@ -49,7 +62,7 @@ impl NativePack {
     ) -> Result<(Self, Vec<String>), String> {
         let (globals, format) = (terrain.globals, terrain.format);
         let textures = super::native_post::pack_textures(device, queue, &report);
-        let frame = NativeFrame::new(
+        let mut frame = NativeFrame::new(
             device,
             report.shadow.as_ref(),
             materials,
@@ -62,14 +75,7 @@ impl NativePack {
             .manifest
             .displacement
             .as_ref()
-            .filter(|d| {
-                d.option.as_ref().is_none_or(|id| {
-                    constants
-                        .iter()
-                        .find(|(k, _)| k == id)
-                        .is_none_or(|(_, v)| *v != 0.0)
-                })
-            })
+            .filter(|d| option_on(constants, d.option.as_ref()))
             .filter(|_| terrain.pbr.is_some())
             .map(|d| {
                 // No more cells than the height maps have texels.
@@ -102,6 +108,19 @@ impl NativePack {
             })
             .transpose()?;
         let has_vertex = vertex.is_some();
+        let reflection = report
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::Material)
+            .is_some_and(|s| s.reads("reflection"))
+            && option_on(
+                constants,
+                report
+                    .manifest
+                    .reflection
+                    .as_ref()
+                    .and_then(|r| r.option.as_ref()),
+            );
         let fog = report.material_fog;
         let vanilla_clouds = report
             .manifest
@@ -181,6 +200,7 @@ impl NativePack {
             labels.extend(post.labels().into_iter().map(str::to_owned));
         }
         let own_fog = material.is_some() && !fog;
+        frame.reflects = reflection;
         let pack = Self {
             frame,
             sky,
@@ -194,6 +214,7 @@ impl NativePack {
             own_fog,
             weather,
             displacement,
+            reflection,
         };
         Ok((pack, labels))
     }

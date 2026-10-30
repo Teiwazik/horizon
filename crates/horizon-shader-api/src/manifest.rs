@@ -49,6 +49,8 @@ pub struct Manifest {
     pub shadow: Option<Shadow>,
     /// Relief as geometry near the camera, if the pack asks for it; needs `[material]`.
     pub displacement: Option<Displacement>,
+    /// When the material stage's water mirror (`reflection`) is drawn; needs `[material]`.
+    pub reflection: Option<Reflection>,
     /// Material ids by sprite, in order: the first entry whose pattern matches wins.
     pub materials: Vec<Material>,
     /// Images every stage reads, in order (`TEXTURE_BINDING` + their index).
@@ -210,6 +212,15 @@ pub struct Displacement {
     pub option: Option<String>,
 }
 
+/// `[reflection]`: when Horizon draws the world mirrored about the water in view for the
+/// material stage's `reflection`. Without it, whenever the stage reads that texture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reflection {
+    /// The option the mirror is drawn while it is not 0 (a bool on, a number above 0), if
+    /// any.
+    pub option: Option<String>,
+}
+
 /// How far from the camera `[displacement]` reaches, in blocks, and its grid's cells a side.
 pub const DISPLACEMENT_DISTANCES: std::ops::RangeInclusive<f32> = 4.0..=32.0;
 pub const DISPLACEMENT_CELLS: std::ops::RangeInclusive<u32> = 4..=64;
@@ -351,6 +362,7 @@ struct Raw {
     budget: RawBudget,
     shadow: Option<RawShadow>,
     displacement: Option<RawDisplacement>,
+    reflection: Option<RawReflection>,
     #[serde(default)]
     materials: Vec<RawMaterial>,
     #[serde(default)]
@@ -463,6 +475,12 @@ struct RawDisplacement {
     distance: f32,
     #[serde(default = "default_displacement_cells")]
     cells: u32,
+    option: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReflection {
     option: Option<String>,
 }
 
@@ -799,6 +817,20 @@ impl Manifest {
             }
             None => None,
         };
+        let reflection = match raw.reflection {
+            Some(_) if raw.material.is_none() => {
+                return Err(err("[reflection] needs [material]".into()));
+            }
+            Some(r) => {
+                if let Some(id) = &r.option
+                    && !options.iter().any(|o| o.id == *id)
+                {
+                    return Err(err(format!("reflection.option: `{id}` is no option")));
+                }
+                Some(Reflection { option: r.option })
+            }
+            None => None,
+        };
         Ok(Manifest {
             id: raw.id,
             name: raw.name,
@@ -818,6 +850,7 @@ impl Manifest {
             budget: Budget { gpu_ms },
             shadow,
             displacement,
+            reflection,
             materials,
             textures,
             lights,

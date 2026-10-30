@@ -69,6 +69,9 @@ distance = 12.0            # how far, in blocks, 4 to 32; the relief eases out o
 cells = 16                 # the grid's cells along a face's side, 4 to 64 (no more than the texels)
 option = "displacement"    # optional: the bool option that turns it on
 
+[reflection]               # optional, needs [material]: when the water mirror (`reflection`) is drawn
+option = "water_reflections"  # optional: drawn while this option is not 0 (else whenever the stage reads it)
+
 [[post]]                   # full-screen passes, in the order they run (8 at most)
 file = "post/grade.wgsl"
 name = "Colour grade"      # optional: the GPU time overlay's label
@@ -127,6 +130,9 @@ stages.
 
 ## Changelog
 
+- 2026-10-30: API 0.5 (additions): the water mirror the material stage reads as `reflection`
+  is drawn only for a stage that reads it, and with `[reflection] option` only while that
+  option is not 0 (`has_reflection` is 0 otherwise): a world drawn again saved when unused.
 - 2026-10-30: API 0.5 (additions): `[[post]] output` and `scale`: a pass may write a target
   of the pack's own (up to 4, read by name by the passes after it, last frame's before it is
   written) at the world's size, half or a quarter, without breaking the chain of `previous`,

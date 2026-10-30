@@ -4200,7 +4200,7 @@ impl Renderer {
         // facing its eye below the plane, so nothing leaves the mirror as the view turns.
         let mirror_plane = frame
             .water_plane
-            .filter(|_| !frame.title && self.native.is_some());
+            .filter(|_| !frame.title && self.native.as_ref().is_some_and(|n| n.reflection));
         let mirror = mirror_plane.map(|plane| Frustum {
             planes: frustum(mirror_view_projection(
                 cull_proj,
@@ -5219,7 +5219,7 @@ impl Renderer {
         // material stage samples as `reflection` (`frame.has_reflection`).
         let mut reflection = None;
         if !frame.title
-            && self.native.is_some()
+            && self.native.as_ref().is_some_and(|n| n.reflection)
             && let Some(plane) = frame.water_plane
         {
             let size = [(self.config.width + 1) / 2, (self.config.height + 1) / 2];

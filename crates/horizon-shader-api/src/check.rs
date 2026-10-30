@@ -68,6 +68,26 @@ pub struct CheckedStage {
     pub texture_reads: usize,
 }
 
+impl CheckedStage {
+    /// Whether the stage's function, or a function it calls, reads the prelude's `global`
+    /// (a resource of the stage, such as `reflection`).
+    pub fn reads(&self, global: &str) -> bool {
+        let Some((function, _)) = self
+            .module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_deref() == Some(self.kind.function()))
+        else {
+            return false;
+        };
+        self.module
+            .global_variables
+            .iter()
+            .filter(|(_, g)| g.name.as_deref() == Some(global))
+            .any(|(handle, _)| !self.info[function][handle].is_empty())
+    }
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub stages: Vec<CheckedStage>,

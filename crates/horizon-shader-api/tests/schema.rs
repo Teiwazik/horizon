@@ -355,6 +355,48 @@ fn reads_solid_shadow_materials_and_refuses_unknown_ids() {
 }
 
 #[test]
+fn reads_reflection_and_its_option() {
+    let head = "schema = 1
+id = \"t\"
+name = \"T\"
+version = \"1\"
+api = \"0.5\"
+";
+    let material = "[material]
+file = \"m.wgsl\"
+";
+    let option = "[[options]]
+id = \"mirror\"
+name = \"Mirror\"
+type = \"float\"
+default = 1.0
+min = 0.0
+max = 1.0
+";
+    let m = Manifest::parse(&format!(
+        "{head}{material}{option}[reflection]
+option = \"mirror\"
+"
+    ))
+    .unwrap();
+    assert_eq!(m.reflection.unwrap().option.as_deref(), Some("mirror"));
+    assert!(Manifest::parse(&format!("{head}{material}")).unwrap().reflection.is_none());
+    assert!(
+        refused(&format!("{head}[[post]]
+file = \"p.wgsl\"
+[reflection]
+"))
+            .contains("needs [material]")
+    );
+    assert!(
+        refused(&format!("{head}{material}[reflection]
+option = \"nope\"
+"))
+            .contains("is no option")
+    );
+}
+
+#[test]
 fn reads_post_outputs_and_their_scales() {
     let head = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.5\"\n";
     let pass = |file: &str, extra: &str| format!("[[post]]\nfile = \"{file}\"\n{extra}");
