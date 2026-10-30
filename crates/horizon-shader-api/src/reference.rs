@@ -1,8 +1,8 @@
 //! docs/api/shaders-reference.md, generated from the stages and inputs this
 //! crate defines (`tests/reference.rs` fails when the file drifts).
 use crate::check::{MAX_EXPRESSIONS, MAX_TEXTURE_READS};
-use crate::inputs::{Frame, SURFACE, Struct};
-use crate::manifest::{API, MAX_GPU_MS, MAX_OPTIONS, MAX_POST_PASSES};
+use crate::inputs::{DISPLACEMENT_INPUT, Frame, SURFACE, Struct};
+use crate::manifest::{API, MAX_GPU_MS, MAX_OPTIONS, MAX_PAGE_ITEMS, MAX_PAGES, MAX_POST_PASSES};
 use crate::package::{MAX_TOTAL, MAX_WGSL};
 use crate::stages::{GROUP, StageKind};
 
@@ -45,6 +45,8 @@ pub fn markdown() -> String {
             StageKind::Post => "[[post]]",
             StageKind::Sky => "[sky]",
             StageKind::Material => "[material]",
+            StageKind::Vertex => "[vertex]",
+            StageKind::Weather => "[weather]",
         };
         out += &format!("| {} | `{key}` | `{}` |\n", kind.name(), kind.signature());
     }
@@ -54,6 +56,14 @@ pub fn markdown() -> String {
         out += &table(kind.input(), None);
         if kind == StageKind::Material {
             out += &table(&SURFACE, None);
+            out += "Under `[displacement]` the stage also defines
+                    `fn displacement(input: DisplacementInput) -> f32`, called for each corner of the grid the
+                    faces near the camera are cut into; the corner moves along the face's normal by the depth it
+                    gives at the point's height less the depth at the texture's mean height, pinned at the face's
+                    edges and easing out over the last quarter of the distance.
+
+";
+            out += &table(&DISPLACEMENT_INPUT, None);
         }
         out += &format!(
             "Resources (bind group {GROUP}):\n\n| Binding | Declaration | Meaning |\n| --- | --- | --- |\n"
@@ -62,11 +72,44 @@ pub fn markdown() -> String {
             out += &format!("| {} | `{}` | {} |\n", r.binding, r.ty, r.doc);
         }
         out += "\n";
+        if kind != StageKind::Sky {
+            out += "Helpers:\n\n";
+        }
         if kind == StageKind::Post {
-            out += "Helpers:\n\n\
-                    - `fn depth_at(uv: vec2<f32>) -> f32`: the world's depth at `uv`.\n\
+            out += "- `fn depth_at(uv: vec2<f32>) -> f32`: the world's depth at `uv`.\n\
                     - `fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32>`: the camera-relative position, in blocks, of\n  \
-                    the point at `uv` and `depth`.\n\n";
+                    the point at `uv` and `depth`.\n\
+                    - `fn surface_at(texel: vec2<i32>) -> SurfaceData`: the solid terrain's surface at a pixel, as the\n  \
+                    material stage's `set_surface` left it: `present` (false where the sky, an entity, water, glass or a\n  \
+                    particle shows instead), `normal` (world axes), `smoothness` and `data`.\n";
+            out += "\nA `[[post]]` entry with `output = \"<name>\"` writes a target of the pack's own, at its `scale` of the\n\
+                    world's size (1, 0.5 or 0.25), instead of the next pass's `previous`; the prelude of every pass declares\n\
+                    `var <name>: texture_2d<f32>` (group 3 from binding 32), which holds last frame's until written again (a\n\
+                    pass reads a blank one in place of the target it writes).\n";
+        }
+        if kind == StageKind::Material {
+            out += "- `fn block_light_color(position: vec3<f32>) -> vec4<f32>`: the colour of the block light at the
+                      camera-relative `position` (rgb) and how strongly the sources reach it (a).
+                    - `fn block_texture(uv: vec2<f32>) -> vec4<f32>`: the surface's own block texture at `uv` (the sprite's
+                      space, as `input.uv`, repeating), at the mip level of the point being shaded.
+                    - `fn block_texture_level(uv: vec2<f32>, lod: f32) -> vec4<f32>`: the same at mip level `lod`.
+                    - `fn block_texture_size() -> vec2<f32>`: that texture's size in texels.
+                    - `fn block_texture_lod() -> f32`: the mip level `block_texture` reads.
+                    - `fn block_pbr_maps() -> bool`: whether the resource packs ship LabPBR maps (`_n`, `_s`).
+                    - `fn block_normal_map(uv: vec2<f32>) -> vec4<f32>`: the surface's LabPBR normal map at `uv` (rg the
+                      normal along `input.tangent` and down the texture, b ambient occlusion, a height); (0.5, 0.5, 1, 1) without one.
+                    - `fn block_specular_map(uv: vec2<f32>) -> vec4<f32>`: its LabPBR specular map (r smoothness, g F0 or a
+                      metal, b porosity or subsurface, a emission, 1 none); (0, 0, 0, 0) without one.
+                    - `fn block_normal_map_level(uv: vec2<f32>, lod: f32) -> vec4<f32>`,
+                      `fn block_specular_map_level(uv: vec2<f32>, lod: f32) -> vec4<f32>`: the same at mip level `lod`.
+                    - `fn block_pbr_size() -> vec2<f32>`: the LabPBR maps' size in texels.
+                    - `fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32)`: what the post stage's
+                      `surface_at` reads for this point of solid terrain (`data` the pack's own; the face's normal and 0, 0 unset).
+";
+        }
+        if kind != StageKind::Sky {
+            out += "- `fn shadow_position(position: vec3<f32>) -> vec3<f32>`: where the camera-relative `position` is stored\n  \
+                    in `shadow_map` (xy, 0..1 from the top left; z, its depth from the light), distortion included.\n\n";
         }
     }
     out += "## The frame\n\n";
@@ -79,8 +122,18 @@ pub fn markdown() -> String {
          | `float` | `default`, `min`, `max`, `step` | `override <id>: f32` |\n\
          | `int` | `default`, `min`, `max` | `override <id>: i32` |\n\
          | `choice` | `values`, `default` (one of them) | `override <id>: u32`, the value's index |\n\n\
+         ## Settings pages\n\n\
+         Without `[[pages]]` the settings screen shows every option, two a row. With them, it opens on the first\n\
+         page; each has an `id`, a `name` (its title and the label of the buttons opening it), an optional\n\
+         `description` (their tooltip), `columns` (1 or 2, default 2) and `items`, laid left to right, then down:\n\n\
+         | Item | Shows |\n| --- | --- |\n\
+         | `\"<option id>\"` | the option's button |\n\
+         | `\"page:<id>\"` | a button opening that page; Done goes back |\n\
+         | `\"\"` | an empty slot |\n\n\
+         Every page must be reached from the first, and every option be on one of them.\n\n\
          ## Limits\n\n\
          - {MAX_POST_PASSES} post passes, {MAX_OPTIONS} options, `budget.gpu_ms` up to {MAX_GPU_MS}.\n\
+         - {MAX_PAGES} settings pages of {MAX_PAGE_ITEMS} items at most.\n\
          - {} KiB per WGSL file, {} MiB per pack.\n\
          - Per stage: {MAX_EXPRESSIONS} naga expressions over all its functions, {MAX_TEXTURE_READS} texture reads (samples,\n  \
          gathers and loads, the prelude's included).\n\n\

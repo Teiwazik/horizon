@@ -202,10 +202,12 @@ fn saves() -> PathBuf {
 }
 
 /// `LoadingOverlay`'s stage lines for a pack reload, indexed by `progress`.
-const RELOAD_LINES: [&str; 4] = [
+const RELOAD_LINES: [&str; 6] = [
     "Preparing resources",
-    "Loading assets",
+    "Loading block models and textures",
+    "Building the GUI atlas",
     "Loading pack tables",
+    "Preparing textures",
     "Applying resources",
 ];
 /// A pack reload `ServerPacks::tick` asked for: the CPU half runs on a
@@ -213,6 +215,8 @@ const RELOAD_LINES: [&str; 4] = [
 /// on the render thread.
 pub(super) struct PackReload {
     pub(super) progress: Progress,
+    /// Started from the resource pack menu (`reload_packs`), not by a server's packs.
+    menu: bool,
     handle: std::thread::JoinHandle<std::result::Result<super::packs::StagedPack, String>>,
 }
 
@@ -414,6 +418,12 @@ impl Game<'_> {
             return;
         };
         self.server_packs.active = server.clone();
+        self.spawn_pack_reload(server, false);
+    }
+    /// Stages the player's packs over `server` on a worker under the loading overlay;
+    /// `drive_pack_reload` applies them. `menu`: the resource pack menu asked, whose
+    /// failure goes back to it rather than to the server's packs.
+    pub(super) fn spawn_pack_reload(&mut self, server: Vec<packs::Pack>, menu: bool) {
         // The overlay swallows input until the apply (`LoadingOverlay`):
         // release what is held so nothing keeps acting while it covers the
         // frame (`KeyMapping.releaseAll` when a screen opens).
@@ -448,10 +458,20 @@ impl Game<'_> {
                 .map_err(|e| e.to_string())
             });
         match handle {
-            Ok(handle) => self.server_packs.reload = Some(PackReload { progress, handle }),
+            Ok(handle) => {
+                self.server_packs.reload = Some(PackReload {
+                    progress,
+                    menu,
+                    handle,
+                });
+            }
             Err(e) => {
                 log::error!("Horizon: could not start the pack reload worker: {e}");
-                self.finish_pack_reload(false);
+                if menu {
+                    self.pack_reload_failed(e.to_string());
+                } else {
+                    self.finish_pack_reload(false);
+                }
             }
         }
     }
@@ -465,13 +485,24 @@ impl Game<'_> {
             return;
         }
         let reload = self.server_packs.reload.take().unwrap();
+        let menu = reload.menu;
         let staged = reload
             .handle
             .join()
             .unwrap_or_else(|_| Err("the pack reload worker panicked".into()));
-        let ok = match staged
-            .and_then(|staged| self.apply_staged_pack(staged).map_err(|e| e.to_string()))
-        {
+        let applied =
+            staged.and_then(|staged| self.apply_staged_pack(staged).map_err(|e| e.to_string()));
+        if menu {
+            if let Err(e) = applied {
+                self.pack_reload_failed(e);
+            }
+            // The selection changed again while this one loaded.
+            if std::mem::take(&mut self.pending_pack_reload) {
+                self.reload_packs();
+            }
+            return;
+        }
+        let ok = match applied {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("Horizon: server resource pack reload failed: {e}");

@@ -96,6 +96,12 @@ pub struct RenderAssets {
     pub translucent_layers: Vec<bool>,
     /// Each layer's `MipmapGenerator` settings.
     pub sprite_mips: Vec<crate::mipmap::Settings>,
+    /// The resource packs' LabPBR maps (normals, specular) layer by layer at `sprite_size`:
+    /// empty when they ship none.
+    pub pbr_normals: Vec<u8>,
+    pub pbr_specular: Vec<u8>,
+    /// The LabPBR maps' layer size (at most `sprite_size`).
+    pub pbr_size: u32,
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -197,6 +203,7 @@ impl RenderAssets {
     pub fn load(root: &Path, assets: &Assets) -> Result<Self> {
         let registry = assets.registry;
         let mut sprites = crate::sprites::Sprites::default();
+        sprites.prefetch(root, &["block", "item"]);
         for name in MATERIALS {
             sprites.insert(root, &format!("minecraft:block/{name}"))?;
         }
@@ -231,6 +238,9 @@ impl RenderAssets {
             sprite_layers: sprites.layers,
             translucent_layers: sprites.translucent,
             sprite_mips: sprites.mips,
+            pbr_normals: sprites.normals,
+            pbr_specular: sprites.specular,
+            pbr_size: sprites.pbr_size,
         })
     }
 }

@@ -7,11 +7,14 @@ pub const MANIFEST: &str = "horizon-shaders.toml";
 pub const SCHEMA: u32 = 1;
 /// The shader API line this build serves: the stages, their signatures and
 /// the inputs a pack's WGSL may read.
-pub const API: &str = "0.1";
+pub const API: &str = "0.5";
 /// Full-screen passes a pack may chain.
-pub const MAX_POST_PASSES: usize = 8;
+pub const MAX_POST_PASSES: usize = 12;
 /// Options a pack may declare.
 pub const MAX_OPTIONS: usize = 64;
+/// Settings pages a pack may declare, and the items one page may hold.
+pub const MAX_PAGES: usize = 32;
+pub const MAX_PAGE_ITEMS: usize = 64;
 /// The most GPU time a pack may declare for itself, in milliseconds.
 pub const MAX_GPU_MS: f32 = 16.0;
 
@@ -31,21 +34,233 @@ pub struct Manifest {
     pub shared: Vec<String>,
     pub sky: Option<Stage>,
     pub material: Option<Stage>,
+    /// Where terrain's corners are drawn; needs `[material]`.
+    pub vertex: Option<Stage>,
     /// Full-screen passes, in the order they run.
     pub post: Vec<Stage>,
+    /// The colour of rain and snow streaks (Minecraft's own when absent).
+    pub weather: Option<Stage>,
     pub options: Vec<PackOption>,
+    /// How the settings screen lays the options out; the first page is the one it opens on.
+    /// Empty: one page with every option.
+    pub pages: Vec<OptionPage>,
     pub budget: Budget,
+    /// The shadow map the pack asks for, if any.
+    pub shadow: Option<Shadow>,
+    /// Relief as geometry near the camera, if the pack asks for it; needs `[material]`.
+    pub displacement: Option<Displacement>,
+    /// Material ids by sprite, in order: the first entry whose pattern matches wins.
+    pub materials: Vec<Material>,
+    /// Images every stage reads, in order (`TEXTURE_BINDING` + their index).
+    pub textures: Vec<PackTexture>,
+    /// The colour of block light by the block giving it off, in order: the first entry whose
+    /// pattern matches wins (`Manifest::light_of`).
+    pub lights: Vec<LightColor>,
 }
+
+/// `[[lights]]`: the colour the light of `blocks` (block ids, `namespace:path` or a path in
+/// `minecraft`, with `*` wildcards) tints its surroundings, read by the material stage's
+/// `block_light_color`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightColor {
+    pub color: [f32; 3],
+    pub blocks: Vec<String>,
+}
+
+/// `[[lights]]` entries a manifest may declare.
+pub const MAX_LIGHTS: usize = 256;
+
+/// `[[textures]]`: a PNG of the pack every stage reads as `<id>: texture_2d<f32>`, with
+/// `<id>_sampler`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackTexture {
+    /// The WGSL name of the texture.
+    pub id: String,
+    /// The PNG, a plain path in the pack.
+    pub file: String,
+    /// Bilinear filtering (else the nearest texel).
+    pub linear: bool,
+    /// Coordinates outside 0..1 repeat the image (else they clamp to its edges).
+    pub repeat: bool,
+}
+
+/// `[[textures]]` a pack may declare, and the side of the largest.
+pub const MAX_TEXTURES: usize = 8;
+pub const MAX_TEXTURE_SIZE: u32 = 2048;
+
+/// `[[materials]]`: an id the material stage reads (`input.material`) on the blocks whose
+/// texture matches one of `sprites`, like Iris packs' block.properties.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Material {
+    /// 1 to 65535 (0 is "no entry").
+    pub id: u32,
+    /// Sprite names, `namespace:path` or just the path (`block/oak_leaves`), each with any
+    /// number of `*` wildcards (`block/*_leaves`).
+    pub sprites: Vec<String>,
+    /// Blocks, as Iris packs' block.properties writes them (`oak_log`, `minecraft:stone`,
+    /// `grass_block:snowy=true`): the textures their models draw with take the id where no
+    /// `sprites` pattern of any entry names them.
+    pub blocks: Vec<String>,
+    /// The textures with this id draw in the translucent pass (sorted, blended, the material
+    /// stage's `input.translucent`), clear texels and all, rather than cut out with the solid
+    /// terrain (Iris's `layer.translucent`): glass a pack tints and makes reflective.
+    pub translucent: bool,
+}
+
+/// `[[materials]]` entries a manifest may declare.
+pub const MAX_MATERIALS: usize = 1024;
+
+impl Manifest {
+    /// The id of the sprite `name` (`namespace:path`, or a path in `minecraft`): the first
+    /// `[[materials]]` entry with a matching pattern, else 0.
+    pub fn material_of(&self, name: &str) -> u32 {
+        let full = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let path = full.split_once(':').map_or(full.as_str(), |(_, p)| p);
+        self.materials
+            .iter()
+            .find(|m| {
+                m.sprites.iter().any(|pattern| {
+                    let target = if pattern.contains(':') {
+                        full.as_str()
+                    } else {
+                        path
+                    };
+                    glob(pattern, target)
+                })
+            })
+            .map_or(0, |m| m.id)
+    }
+
+    /// The `[[lights]]` colour of the block `name` (`namespace:path`, or a path in
+    /// `minecraft`): the first entry with a matching pattern.
+    pub fn light_of(&self, name: &str) -> Option<[f32; 3]> {
+        let full = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let path = full.split_once(':').map_or(full.as_str(), |(_, p)| p);
+        self.lights
+            .iter()
+            .find(|l| {
+                l.blocks.iter().any(|pattern| {
+                    let target = if pattern.contains(':') {
+                        full.as_str()
+                    } else {
+                        path
+                    };
+                    glob(pattern, target)
+                })
+            })
+            .map(|l| l.color)
+    }
+}
+
+/// Whether `text` matches `pattern`, where `*` stands for any run of characters.
+fn glob(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+/// `[shadow]`: the renderer draws the solid terrain and entities as the sun (the moon by
+/// night) sees them into a square depth map each frame, which the material and post stages
+/// read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shadow {
+    /// The map's side, in texels.
+    pub resolution: u32,
+    /// Half the side of the square the map covers around the camera, in blocks.
+    pub distance: f32,
+    /// `[[materials]]` ids drawn into the map whole, their cutouts ignored: leaves cast
+    /// solid shadows rather than ones dotted with light.
+    pub solid_materials: Vec<u32>,
+}
+
+/// `[displacement]`: within `distance` of the camera, the faces of solid terrain whose
+/// resource pack textures have LabPBR heights are drawn as a grid of `cells` by `cells`, each
+/// corner moved along the face's normal by the material stage's
+/// `fn displacement(input: DisplacementInput) -> f32`: relief that is geometry, which
+/// occludes itself, writes its depth and is lit at its true place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Displacement {
+    /// How far from the camera faces are displaced, in blocks; the relief eases out over the
+    /// last quarter.
+    pub distance: f32,
+    /// The grid's cells along a face's side (fewer where the textures have fewer texels).
+    pub cells: u32,
+    /// The `bool` option that turns it on, if any (else it is always on).
+    pub option: Option<String>,
+}
+
+/// How far from the camera `[displacement]` reaches, in blocks, and its grid's cells a side.
+pub const DISPLACEMENT_DISTANCES: std::ops::RangeInclusive<f32> = 4.0..=32.0;
+pub const DISPLACEMENT_CELLS: std::ops::RangeInclusive<u32> = 4..=64;
+
+/// The shadow map's side, in texels.
+pub const SHADOW_RESOLUTIONS: std::ops::RangeInclusive<u32> = 256..=8192;
+/// Half the side of the square the shadow map covers, in blocks.
+pub const SHADOW_DISTANCES: std::ops::RangeInclusive<f32> = 32.0..=512.0;
 
 /// One stage: the WGSL file that defines its function.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Stage {
     pub file: String,
+    /// WGSL files put before `file`, after the shared ones, for this stage only.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// Shown in the GPU time overlay; the file name when absent.
     #[serde(default)]
     pub name: Option<String>,
+    /// The material stage only: whether Horizon applies its fog after the pack's colour
+    /// (true when absent); false for a pack that fogs its surfaces itself.
+    #[serde(default)]
+    pub fog: Option<bool>,
+    /// The sky stage only: whether Minecraft's clouds still draw (true when absent); false
+    /// for a pack that draws its own.
+    #[serde(default)]
+    pub clouds: Option<bool>,
+    /// The sky stage only: whether Minecraft's sun still draws over the sky (true when
+    /// absent); false for a pack whose sky draws its own sun. The moon and stars still draw.
+    #[serde(default)]
+    pub sun: Option<bool>,
+    /// The sky stage only: whether Minecraft's stars still draw over the sky (true when
+    /// absent); false for a pack whose sky draws its own.
+    #[serde(default)]
+    pub stars: Option<bool>,
+    /// A post pass only: its target's size against the world's, 1, 0.5 or 0.25 (1 when
+    /// absent); below 1 the pass writes an `output`.
+    #[serde(default)]
+    pub scale: Option<f32>,
+    /// A post pass only: the pack target it writes in place of the chain of passes. The
+    /// passes after it read that target by name, and the next one's `previous` is still the
+    /// chain's last picture.
+    #[serde(default)]
+    pub output: Option<String>,
 }
+
+/// A post pass's sizes against the world's (`[[post]] scale`).
+pub const POST_SCALES: [f32; 3] = [1.0, 0.5, 0.25];
+/// Pack targets (`[[post]] output`) a pack may write.
+pub const MAX_POST_TARGETS: usize = 4;
 
 /// An option the player can change: a WGSL `override` constant of the
 /// same name, set when the pipelines are built.
@@ -56,6 +271,31 @@ pub struct PackOption {
     pub name: String,
     pub description: String,
     pub kind: OptionKind,
+}
+
+/// `[[pages]]`: a page of the pack's settings screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionPage {
+    /// What `page:<id>` items link to.
+    pub id: String,
+    /// The page's title, and the label of the buttons linking to it.
+    pub name: String,
+    /// The tooltip of the buttons linking to it.
+    pub description: String,
+    /// 1 or 2: full-width buttons, or two a row.
+    pub columns: u8,
+    pub items: Vec<PageItem>,
+}
+
+/// What a page shows in one slot, in order: left to right, then down.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageItem {
+    /// `"<id>"`: the option of that id.
+    Option(usize),
+    /// `"page:<id>"`: a button opening `Manifest::pages[i]`.
+    Page(usize),
+    /// `""`: an empty slot.
+    Empty,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,12 +339,147 @@ struct Raw {
     shared: Vec<String>,
     sky: Option<Stage>,
     material: Option<Stage>,
+    vertex: Option<Stage>,
     #[serde(default)]
     post: Vec<Stage>,
+    weather: Option<Stage>,
     #[serde(default)]
     options: Vec<RawOption>,
     #[serde(default)]
+    pages: Vec<RawPage>,
+    #[serde(default)]
     budget: RawBudget,
+    shadow: Option<RawShadow>,
+    displacement: Option<RawDisplacement>,
+    #[serde(default)]
+    materials: Vec<RawMaterial>,
+    #[serde(default)]
+    textures: Vec<RawTexture>,
+    #[serde(default)]
+    lights: Vec<RawLight>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLight {
+    color: [f32; 3],
+    blocks: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTexture {
+    id: String,
+    file: String,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    wrap: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMaterial {
+    id: u32,
+    #[serde(default)]
+    sprites: Vec<String>,
+    #[serde(default)]
+    blocks: Vec<String>,
+    #[serde(default)]
+    translucent: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawShadow {
+    #[serde(default = "default_shadow_resolution")]
+    resolution: u32,
+    #[serde(default = "default_shadow_distance")]
+    distance: f32,
+    #[serde(default)]
+    solid_materials: Vec<u32>,
+}
+
+/// `[[post]] scale` and `output`: scales from `POST_SCALES`, below 1 only with an output,
+/// the last pass drawing the picture itself, outputs named as WGSL names no other resource
+/// takes, each at one scale, `MAX_POST_TARGETS` at most.
+fn check_post_targets(post: &[Stage], textures: &[RawTexture]) -> Result<(), String> {
+    let reserved = [
+        "frame", "scene_color", "scene_depth", "previous", "linear_sampler", "nearest_sampler",
+        "shadow_map", "shadow_sampler", "history", "shadow_map_translucent", "shadow_color",
+        "scene_surface",
+    ];
+    let mut targets: Vec<(&str, f32)> = Vec::new();
+    for (i, p) in post.iter().enumerate() {
+        let scale = p.scale.unwrap_or(1.0);
+        if !POST_SCALES.contains(&scale) {
+            return Err(format!("{}: scale {scale} is not one of {POST_SCALES:?}", p.file));
+        }
+        if i + 1 == post.len() && (p.output.is_some() || scale != 1.0) {
+            return Err(format!(
+                "{}: the last [[post]] pass draws the picture: no `output` or `scale`",
+                p.file
+            ));
+        }
+        let Some(name) = &p.output else {
+            if scale != 1.0 {
+                return Err(format!("{}: a scaled pass writes an `output`", p.file));
+            }
+            continue;
+        };
+        let valid = name.len() <= 32
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && !name.starts_with("horizon_");
+        if !valid || reserved.contains(&name.as_str()) || textures.iter().any(|t| t.id == *name) {
+            return Err(format!(
+                "{}: output {name:?} is not a free WGSL name ([a-z][a-z0-9_]*, at most 32)",
+                p.file
+            ));
+        }
+        match targets.iter().find(|t| t.0 == name) {
+            Some(&(_, s)) if s != scale => {
+                return Err(format!("{}: output {name:?} is written at two scales", p.file));
+            }
+            Some(_) => {}
+            None => targets.push((name, scale)),
+        }
+    }
+    if targets.len() > MAX_POST_TARGETS {
+        return Err(format!(
+            "{} [[post]] outputs; a pack may write {MAX_POST_TARGETS}",
+            targets.len()
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDisplacement {
+    #[serde(default = "default_displacement_distance")]
+    distance: f32,
+    #[serde(default = "default_displacement_cells")]
+    cells: u32,
+    option: Option<String>,
+}
+
+fn default_displacement_distance() -> f32 {
+    12.0
+}
+
+fn default_displacement_cells() -> u32 {
+    16
+}
+
+fn default_shadow_resolution() -> u32 {
+    2048
+}
+
+fn default_shadow_distance() -> f32 {
+    128.0
 }
 
 #[derive(Deserialize)]
@@ -121,6 +496,22 @@ struct RawOption {
     max: Option<toml::Value>,
     step: Option<f64>,
     values: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPage {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "default_columns")]
+    columns: u8,
+    items: Vec<String>,
+}
+
+fn default_columns() -> u8 {
+    2
 }
 
 #[derive(Default, Deserialize)]
@@ -167,8 +558,185 @@ impl Manifest {
                 raw.post.len()
             )));
         }
-        let stages = raw.sky.iter().chain(&raw.material).chain(&raw.post);
-        for file in raw.shared.iter().chain(stages.map(|s| &s.file)) {
+        if raw.vertex.is_some() && raw.material.is_none() {
+            return Err(err(
+                "[vertex] needs a [material]: they draw terrain together".into(),
+            ));
+        }
+        if raw
+            .sky
+            .iter()
+            .chain(&raw.post)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .any(|s| s.fog.is_some())
+        {
+            return Err(err("`fog` is a key of [material] only".into()));
+        }
+        if raw
+            .material
+            .iter()
+            .chain(&raw.post)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .any(|s| s.clouds.is_some())
+        {
+            return Err(err("`clouds` is a key of [sky] only".into()));
+        }
+        if raw
+            .material
+            .iter()
+            .chain(&raw.post)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .any(|s| s.sun.is_some())
+        {
+            return Err(err("`sun` is a key of [sky] only".into()));
+        }
+        if raw
+            .material
+            .iter()
+            .chain(&raw.post)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .any(|s| s.stars.is_some())
+        {
+            return Err(err("`stars` is a key of [sky] only".into()));
+        }
+        if raw
+            .sky
+            .iter()
+            .chain(&raw.material)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .any(|s| s.scale.is_some() || s.output.is_some())
+        {
+            return Err(err("`scale` and `output` are keys of [[post]] only".into()));
+        }
+        check_post_targets(&raw.post, &raw.textures).map_err(err)?;
+        let shadow = match raw.shadow {
+            Some(s) if !SHADOW_RESOLUTIONS.contains(&s.resolution) => {
+                return Err(err(format!(
+                    "shadow.resolution {} is not in {SHADOW_RESOLUTIONS:?}",
+                    s.resolution
+                )));
+            }
+            Some(s) if !SHADOW_DISTANCES.contains(&s.distance) => {
+                return Err(err(format!(
+                    "shadow.distance {} is not in {SHADOW_DISTANCES:?}",
+                    s.distance
+                )));
+            }
+            Some(s) => {
+                if let Some(id) = s
+                    .solid_materials
+                    .iter()
+                    .find(|id| !raw.materials.iter().any(|m| m.id == **id))
+                {
+                    return Err(err(format!(
+                        "shadow.solid_materials: no [[materials]] entry has id {id}"
+                    )));
+                }
+                Some(Shadow {
+                    resolution: s.resolution,
+                    distance: s.distance,
+                    solid_materials: s.solid_materials,
+                })
+            }
+            None => None,
+        };
+        if raw.materials.len() > MAX_MATERIALS {
+            return Err(err(format!(
+                "{} [[materials]]; a pack may declare {MAX_MATERIALS}",
+                raw.materials.len()
+            )));
+        }
+        if let Some(m) = raw.materials.iter().find(|m| !(1..=65535).contains(&m.id)) {
+            return Err(err(format!("material id {} is not in 1..=65535", m.id)));
+        }
+        if raw.textures.len() > MAX_TEXTURES {
+            return Err(err(format!(
+                "{} [[textures]]; a pack may declare {MAX_TEXTURES}",
+                raw.textures.len()
+            )));
+        }
+        let mut textures: Vec<PackTexture> = Vec::new();
+        for t in raw.textures {
+            if !pack_identifier(&t.id) || textures.iter().any(|o| o.id == t.id) {
+                return Err(err(format!(
+                    "texture id {:?} is not a WGSL identifier, or is declared twice",
+                    t.id
+                )));
+            }
+            if !crate::package::plain_path(&t.file) || !t.file.ends_with(".png") {
+                return Err(err(format!(
+                    "{:?} is not a plain path to a .png file",
+                    t.file
+                )));
+            }
+            let linear = match t.filter.as_deref() {
+                None | Some("linear") => true,
+                Some("nearest") => false,
+                Some(f) => return Err(err(format!("texture filter {f:?}: linear or nearest"))),
+            };
+            let repeat = match t.wrap.as_deref() {
+                None | Some("repeat") => true,
+                Some("clamp") => false,
+                Some(w) => return Err(err(format!("texture wrap {w:?}: repeat or clamp"))),
+            };
+            textures.push(PackTexture {
+                id: t.id,
+                file: t.file,
+                linear,
+                repeat,
+            });
+        }
+        if raw.lights.len() > MAX_LIGHTS {
+            return Err(err(format!(
+                "{} [[lights]]; a pack may declare {MAX_LIGHTS}",
+                raw.lights.len()
+            )));
+        }
+        if let Some(l) = raw
+            .lights
+            .iter()
+            .find(|l| l.color.iter().any(|c| !(0.0..=4.0).contains(c)))
+        {
+            return Err(err(format!(
+                "light color {:?} is not in 0..=4 per channel",
+                l.color
+            )));
+        }
+        let lights = raw
+            .lights
+            .into_iter()
+            .map(|l| LightColor {
+                color: l.color,
+                blocks: l.blocks,
+            })
+            .collect();
+        let materials = raw
+            .materials
+            .into_iter()
+            .map(|m| Material {
+                id: m.id,
+                sprites: m.sprites,
+                blocks: m.blocks,
+                translucent: m.translucent,
+            })
+            .collect();
+        let stages = raw
+            .sky
+            .iter()
+            .chain(&raw.material)
+            .chain(&raw.vertex)
+            .chain(&raw.post)
+            .chain(&raw.weather);
+        for file in raw
+            .shared
+            .iter()
+            .chain(stages.flat_map(|s| s.files.iter().chain(std::iter::once(&s.file))))
+        {
             if !crate::package::plain_path(file) || !file.ends_with(".wgsl") {
                 return Err(err(format!("{file:?} is not a plain path to a .wgsl file")));
             }
@@ -188,6 +756,7 @@ impl Manifest {
             }
             options.push(option);
         }
+        let pages = check_pages(raw.pages, &options).map_err(err)?;
         let gpu_ms = match raw.budget.gpu_ms {
             Some(ms) if !(ms > 0.0 && ms <= f64::from(MAX_GPU_MS)) => {
                 return Err(err(format!(
@@ -195,6 +764,40 @@ impl Manifest {
                 )));
             }
             ms => ms.map(|ms| ms as f32),
+        };
+        let displacement = match raw.displacement {
+            Some(_) if raw.material.is_none() => {
+                return Err(err("[displacement] needs [material]".into()));
+            }
+            Some(d) if !DISPLACEMENT_DISTANCES.contains(&d.distance) => {
+                return Err(err(format!(
+                    "displacement.distance {} is not in {DISPLACEMENT_DISTANCES:?}",
+                    d.distance
+                )));
+            }
+            Some(d) if !DISPLACEMENT_CELLS.contains(&d.cells) => {
+                return Err(err(format!(
+                    "displacement.cells {} is not in {DISPLACEMENT_CELLS:?}",
+                    d.cells
+                )));
+            }
+            Some(d) => {
+                if let Some(id) = &d.option
+                    && !options
+                        .iter()
+                        .any(|o| o.id == *id && matches!(o.kind, OptionKind::Bool { .. }))
+                {
+                    return Err(err(format!(
+                        "displacement.option: `{id}` is no bool option"
+                    )));
+                }
+                Some(Displacement {
+                    distance: d.distance,
+                    cells: d.cells,
+                    option: d.option,
+                })
+            }
+            None => None,
         };
         Ok(Manifest {
             id: raw.id,
@@ -207,17 +810,49 @@ impl Manifest {
             shared: raw.shared,
             sky: raw.sky,
             material: raw.material,
+            vertex: raw.vertex,
             post: raw.post,
+            weather: raw.weather,
             options,
+            pages,
             budget: Budget { gpu_ms },
+            shadow,
+            displacement,
+            materials,
+            textures,
+            lights,
         })
+    }
+
+    /// The pack targets its post passes write (`[[post]] output`), in the order first
+    /// written, with their scale.
+    pub fn post_targets(&self) -> Vec<(&str, f32)> {
+        let mut out: Vec<(&str, f32)> = Vec::new();
+        for p in &self.post {
+            if let Some(name) = &p.output
+                && !out.iter().any(|t| t.0 == name)
+            {
+                out.push((name, p.scale.unwrap_or(1.0)));
+            }
+        }
+        out
     }
 
     /// Every WGSL file the manifest names, shared files first, each once.
     pub fn files(&self) -> Vec<&str> {
         let mut files: Vec<&str> = Vec::new();
-        let stages = self.sky.iter().chain(&self.material).chain(&self.post);
-        for file in self.shared.iter().chain(stages.map(|s| &s.file)) {
+        let stages = self
+            .sky
+            .iter()
+            .chain(&self.material)
+            .chain(&self.vertex)
+            .chain(&self.post)
+            .chain(&self.weather);
+        for file in self
+            .shared
+            .iter()
+            .chain(stages.flat_map(|s| s.files.iter().chain(std::iter::once(&s.file))))
+        {
             if !files.contains(&file.as_str()) {
                 files.push(file);
             }
@@ -234,6 +869,105 @@ pub fn pack_identifier(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && name.len() <= 64
         && !name.starts_with("horizon_")
+}
+
+/// `[[pages]]` checked against the options: known ids, each page's own id once, links to
+/// other pages only, and every page and option reached from the first page.
+fn check_pages(raw: Vec<RawPage>, options: &[PackOption]) -> Result<Vec<OptionPage>, String> {
+    let pages = read_pages(&raw, options)?;
+    if pages.is_empty() {
+        return Ok(pages);
+    }
+    let (mut seen, mut next, mut shown) = (vec![false; pages.len()], vec![0], vec![false; options.len()]);
+    seen[0] = true;
+    while let Some(at) = next.pop() {
+        for item in &pages[at].items {
+            match *item {
+                PageItem::Option(i) => shown[i] = true,
+                PageItem::Page(i) if !seen[i] => {
+                    seen[i] = true;
+                    next.push(i);
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(i) = seen.iter().position(|s| !s) {
+        return Err(format!(
+            "page {:?} can't be reached from the first page, {:?}",
+            pages[i].id, pages[0].id
+        ));
+    }
+    if let Some(i) = shown.iter().position(|s| !s) {
+        return Err(format!(
+            "option {:?} is on no page the settings reach",
+            options[i].id
+        ));
+    }
+    Ok(pages)
+}
+
+fn read_pages(raw: &[RawPage], options: &[PackOption]) -> Result<Vec<OptionPage>, String> {
+    if raw.len() > MAX_PAGES {
+        return Err(format!("{} pages; a pack may declare {MAX_PAGES}", raw.len()));
+    }
+    for (i, page) in raw.iter().enumerate() {
+        if !pack_identifier(&page.id) {
+            return Err(format!(
+                "page {:?}: the id must be a letter, then letters, digits or _, up to 64",
+                page.id
+            ));
+        }
+        if raw[..i].iter().any(|p| p.id == page.id) {
+            return Err(format!("page {:?} is declared twice", page.id));
+        }
+    }
+    raw.iter()
+        .enumerate()
+        .map(|(at, page)| {
+            let fail = |e: String| format!("page {:?}: {e}", page.id);
+            if page.name.trim().is_empty() {
+                return Err(fail("needs a name".into()));
+            }
+            if !(1..=2).contains(&page.columns) {
+                return Err(fail(format!("columns = {}; 1 or 2", page.columns)));
+            }
+            if page.items.len() > MAX_PAGE_ITEMS {
+                return Err(fail(format!(
+                    "{} items; a page may hold {MAX_PAGE_ITEMS}",
+                    page.items.len()
+                )));
+            }
+            let mut items = Vec::with_capacity(page.items.len());
+            for item in &page.items {
+                let item = if item.is_empty() {
+                    PageItem::Empty
+                } else if let Some(link) = item.strip_prefix("page:") {
+                    match raw.iter().position(|p| p.id == link) {
+                        Some(i) if i == at => return Err(fail("links to itself".into())),
+                        Some(i) => PageItem::Page(i),
+                        None => return Err(fail(format!("no page {link:?} to link to"))),
+                    }
+                } else {
+                    match options.iter().position(|o| o.id == *item) {
+                        Some(i) => PageItem::Option(i),
+                        None => return Err(fail(format!("no option {item:?}"))),
+                    }
+                };
+                if item != PageItem::Empty && items.contains(&item) {
+                    return Err(fail(format!("{:?} is on the page twice", page.items[items.len()])));
+                }
+                items.push(item);
+            }
+            Ok(OptionPage {
+                id: page.id.clone(),
+                name: page.name.clone(),
+                description: page.description.clone(),
+                columns: page.columns,
+                items,
+            })
+        })
+        .collect()
 }
 
 impl RawOption {

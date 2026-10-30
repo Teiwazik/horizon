@@ -134,14 +134,19 @@ impl Post {
             let color = make_tex(
                 "Scaled world",
                 self.format,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                // COPY_SRC: the pass dump reads it back.
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
             )
             .create_view(&Default::default());
             // TEXTURE_BINDING: occlusion culling reads it.
             let depth = make_tex(
                 "Scaled world depth",
                 wgpu::TextureFormat::Depth32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
             )
             .create_view(&Default::default());
             let group = self.bind(device, &color);

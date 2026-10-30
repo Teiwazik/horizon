@@ -2,7 +2,7 @@
 use super::{Column, Span, TileKey};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
-    mesher::{OPAQUE_LAYER, SectionMesh, TerrainVertex},
+    mesher::{OPAQUE_LAYER, SectionMesh, TerrainVertex, fluid_face},
     streaming::WorkerContext,
 };
 use horizon_assets::model::Direction;
@@ -235,6 +235,13 @@ type Faces = BTreeMap<FaceKey, Vec<Rect>>;
 fn add_face(faces: &mut Faces, direction: Direction, plane: f32, rect: Rect, material: Material) {
     for (overlay, paint) in material.faces.into_iter().enumerate() {
         let Some(paint) = paint else { continue };
+        // The same fluid flags the section mesher sets, so the material stage's
+        // water reaches the distant tiles too and the LOD boundary keeps one look.
+        let color = if material.fluid != 0 {
+            fluid_face(paint.color, direction as usize)
+        } else {
+            paint.color
+        };
         faces
             .entry(FaceKey {
                 direction,
@@ -242,7 +249,7 @@ fn add_face(faces: &mut Faces, direction: Direction, plane: f32, rect: Rect, mat
                 overlay: overlay as u8,
                 layer: paint.layer,
                 light: paint.light,
-                color: paint.color,
+                color,
                 translucent: paint.translucent,
             })
             .or_default()

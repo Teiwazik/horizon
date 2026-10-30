@@ -127,6 +127,14 @@ mod vertex_tests {
         assert_eq!(super::emitting(rgb, 15), 0xF056_3412);
         assert_eq!(super::emitting(rgb, 15) | super::EMISSION_BITS, rgb);
     }
+    #[test]
+    fn fluid_faces_keep_the_colour_and_the_emission() {
+        let lit = super::emitting(super::pack_rgb([0x12, 0x34, 0x56]), 9);
+        assert_eq!(super::fluid_face(lit, 0), 0x8656_3412);
+        assert_eq!(super::fluid_face(lit, 5), 0xD656_3412);
+        // Another face replaces the first.
+        assert_eq!(super::fluid_face(super::fluid_face(lit, 5), 1), 0x9656_3412);
+    }
 }
 pub struct SectionMesh {
     pub solid: Vec<TerrainVertex>,
@@ -142,6 +150,9 @@ pub struct SectionMesh {
     /// each frame by `block_entity_render` like vanilla's per-section
     /// `SectionCompiler.Results.blockEntities`.
     pub block_entities: Vec<([i32; 3], u32)>,
+    /// Blocks that give off light (world position, state id), for the colour of block light
+    /// Horizon's shader packs read (`gfx::block_light`).
+    pub lights: Vec<([i32; 3], u32)>,
 }
 impl Default for SectionMesh {
     fn default() -> Self {
@@ -151,6 +162,7 @@ impl Default for SectionMesh {
             translucent: Vec::new(),
             visibility: ALL_VISIBLE,
             block_entities: Vec::new(),
+            lights: Vec::new(),
         }
     }
 }
@@ -582,11 +594,23 @@ impl Padded {
 pub const OPAQUE_LAYER: u16 = 1 << 15;
 /// The bits of `TerrainVertex::color`'s alpha byte that hold the light its face emits, for
 /// HDR output's highlights (`gfx/hdr.rs`): 15 minus the level, so the usual 0xFF means none.
-/// The byte's other four bits stay set.
+/// The byte's high nibble carries the fluid face flags (`fluid_face`); the shaders ignore
+/// the vertex alpha, so both travel to the material stage untouched.
 pub const EMISSION_BITS: u32 = 0x0F00_0000;
 /// `color` marked as emitting light `level` (0 to 15).
 pub fn emitting(color: u32, level: u8) -> u32 {
     color & !EMISSION_BITS | u32::from(15 - level.min(15)) << 24
+}
+/// The high nibble of `TerrainVertex::color`'s alpha byte: 8 plus the face (`Direction`
+/// as usize) on a fluid quad, 0xF on every other. `terrain.wgsl` reads only the low nibble
+/// (the emission) and `shaders/` packs get an alpha of 1, so only the material stage of
+/// Horizon's own packs reads it (`gfx/native_material.rs`); whether the fluid is water or
+/// lava follows from the pass that draws it.
+pub const FLUID_FACE_BITS: u32 = 0xF000_0000;
+/// `color` marked as a fluid quad of face `face` (`Direction` as usize, 0 to 5).
+pub fn fluid_face(color: u32, face: usize) -> u32 {
+    debug_assert!(face < 6);
+    color & !FLUID_FACE_BITS | 0x8000_0000 | (face as u32) << 28
 }
 const UNSET: u32 = u32::MAX;
 const NO_BIOME: u16 = u16::MAX;
@@ -719,6 +743,8 @@ pub struct Mesher<'a> {
     pub smooth_lighting: bool,
     /// The `cutoutLeaves` option (fancy graphics); off makes leaves opaque.
     pub cutout_leaves: bool,
+    /// Sprite layers a shader pack moves into the translucent pass, by layer.
+    pub translucent_layers: &'a [bool],
 }
 impl Mesher<'_> {
     /// `region[dz][dx]` are the chunks around the meshed column (centre 1,1).
@@ -752,6 +778,10 @@ impl Mesher<'_> {
                     let state = &info[id as usize];
                     if state.block_entity {
                         out.block_entities
+                            .push(([center.x * 16 + x, base_y + y, center.z * 16 + z], id));
+                    }
+                    if state.emission > 0 {
+                        out.lights
                             .push(([center.x * 16 + x, base_y + y, center.z * 16 + z], id));
                     }
                     if state.solid
@@ -881,7 +911,9 @@ impl Mesher<'_> {
             ([lighting::gray(directional); 4], [coords; 4])
         };
         let tint = Self::tint(state, q.tint_index, tints, pos);
-        let target = if face.translucent {
+        let translucent = face.translucent
+            || self.translucent_layers.get(face.layer as usize).copied().unwrap_or(false);
+        let target = if translucent {
             &mut out.translucent
         } else {
             &mut out.solid
@@ -898,7 +930,7 @@ impl Mesher<'_> {
                 q.uv[i],
                 // Opaque leaves (forceOpaque) and quads over opaque texels draw in the
                 // solid layer: no alpha cutout (a dirt path's side skips its clear top row).
-                if face.opaque && !face.translucent || !self.cutout_leaves && state.leaves {
+                if face.opaque && !translucent || !self.cutout_leaves && state.leaves {
                     face.layer as u16 | OPAQUE_LAYER
                 } else {
                     face.layer as u16

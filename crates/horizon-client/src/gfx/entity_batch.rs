@@ -41,6 +41,7 @@ impl EntityBatch {
         additive: &[Vertex],
         hand: &[Vertex],
         see_through: &[Vertex],
+        shadow_only: &[Vertex],
     ) -> [u32; MATERIALS] {
         let quads = entities.as_chunks::<4>().0;
         for bucket in &mut self.buckets {
@@ -65,7 +66,7 @@ impl EntityBatch {
         }
         let entity_vertices = quads.len() * 4;
         self.combined.reserve(
-            (entity_vertices + additive.len() + hand.len() + see_through.len())
+            (entity_vertices + additive.len() + hand.len() + see_through.len() + shadow_only.len())
                 .saturating_sub(self.combined.len()),
         );
         self.combined
@@ -92,6 +93,7 @@ impl EntityBatch {
         self.combined.extend_from_slice(additive);
         self.combined.extend_from_slice(hand);
         self.combined.extend_from_slice(see_through);
+        self.combined.extend_from_slice(shadow_only);
         counts.map(|count| count as u32)
     }
 }
@@ -157,7 +159,7 @@ mod tests {
         hand: &[Vertex],
     ) {
         let (expected, counts) = baseline(entities, additive, hand);
-        assert_eq!(batch.update(entities, additive, hand, &[]), counts);
+        assert_eq!(batch.update(entities, additive, hand, &[], &[]), counts);
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(&batch.combined),
             bytemuck::cast_slice::<_, u8>(&expected)
@@ -228,7 +230,7 @@ mod tests {
             equivalent(&mut batch, &entities, &additive, &hand);
             for _ in 0..50 {
                 black_box(baseline(black_box(&entities), &additive, &hand));
-                black_box(batch.update(black_box(&entities), &additive, &hand, &[]));
+                black_box(batch.update(black_box(&entities), &additive, &hand, &[], &[]));
                 black_box(&batch.combined);
             }
             let mut before = Vec::new();
@@ -241,7 +243,7 @@ mod tests {
                 before.push(start.elapsed().as_nanos() / 100);
                 let start = Instant::now();
                 for _ in 0..100 {
-                    black_box(batch.update(black_box(&entities), &additive, &hand, &[]));
+                    black_box(batch.update(black_box(&entities), &additive, &hand, &[], &[]));
                     black_box(&batch.combined);
                 }
                 after.push(start.elapsed().as_nanos() / 100);

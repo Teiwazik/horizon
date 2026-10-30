@@ -143,6 +143,51 @@ uniform! {
         frame_index: u32,
         /// 1 while F1 hides the HUD, else 0.
         hide_gui: u32,
+        /// The y of the horizontal water plane the renderer mirrored the world
+        /// about this frame, in world blocks, when `has_reflection` is 1.
+        water_plane: f32,
+        /// 1 while `reflection` holds this frame's planar reflection buffer.
+        has_reflection: u32,
+        /// Half the side of the square the shadow map covers, in blocks (the manifest's
+        /// `[shadow] distance`); 0 without a shadow map.
+        shadow_distance: f32,
+        /// How strongly the shadow map is distorted toward its centre, 0..1: a point at
+        /// shadow clip `xy` is stored at `xy / (length(xy) * k + 1 - k)`, so texels near the
+        /// camera cover less ground (`shadow_position` applies it).
+        shadow_distortion: f32,
+        /// Unit vector toward the body casting this frame's shadows: the sun by day, the moon
+        /// by night.
+        light_direction: [f32; 3],
+        /// 1 while `shadow_map` holds this frame's shadow map.
+        has_shadow: u32,
+        /// Camera-relative world to the shadow camera's clip space, before the distortion
+        /// (orthographic, looking along `-light_direction`; z 0 at the light, 1 away from it).
+        shadow_view_proj: [[f32; 4]; 4],
+        /// Last frame's camera-relative world to clip space (its `projection * view`); a point
+        /// at camera-relative `p` now was at `p + camera_motion` relative to last frame's camera.
+        previous_view_projection: [[f32; 4]; 4],
+        /// How far the camera moved since last frame, in blocks.
+        camera_motion: [f32; 3],
+        /// Seconds since last frame.
+        delta_time: f32,
+        /// Rain that lingers: `rain` followed with a half-life of 30 seconds as it starts and
+        /// 10 as it stops (Iris's `wetness`).
+        wetness: f32,
+        /// 1 while the biome at the camera has rain (not snow, not dry), eased with a
+        /// half-life of 20 seconds in and 10 out (Complementary's `inRainy`).
+        biome_rain: f32,
+        /// The same for a biome with snow (`inSnowy`).
+        biome_snow: f32,
+        /// The moon's phase, 0 (full) to 7.
+        moon_phase: u32,
+        /// `eye_light` eased with a half-life of 2 seconds (Iris's `eyeBrightnessSmooth`):
+        /// it follows the light levels' steps without stepping itself.
+        eye_light_smooth: [f32; 2],
+        /// 1 while the camera is in water (`eye_in` 1), eased with a half-life of a
+        /// quarter second in and out.
+        in_water: f32,
+        /// The same for lava (`eye_in` 2).
+        in_lava: f32,
     }
 }
 
@@ -176,6 +221,42 @@ pub const MATERIAL_INPUT: Struct = Struct {
         position: "vec3<f32>" = "The point, camera-relative, in blocks.",
         uv: "vec2<f32>" = "The texture coordinate inside the block atlas.",
         translucent: "bool" = "Drawn in the translucent pass (water, stained glass, ice).",
+        face: "u32" = "For a fluid, which face of the block the point is on, `Direction` order: 0 down, 1 up, 2 north, 3 south, 4 west, 5 east. 0 elsewhere.",
+        fluid: "u32" = "0 not a fluid, 1 water, 2 lava.",
+        screen: "vec2<f32>" = "The point on the world's picture, 0..1 from the top left. The `reflection` buffer holds the scene from the mirrored camera in the same mapping, so a mirror-like surface samples itself here (see `has_reflection`).",
+        material: "u32" = "The `[[materials]]` id of the block texture here (0 when none matches).",
+        emission: "f32" = "The light level the block itself emits, 0..1 (a torch 14/15, glowstone 1; 0 for most blocks).",
+        normal: "vec3<f32>" = "The surface's geometric normal, a unit vector in world axes, facing the camera (block faces are flat, so it is exact per face).",
+        tangent: "vec4<f32>" = "The surface's tangent: xyz the unit direction in world axes along which `uv.x` grows, w the sign (1 or -1) that makes `cross(normal, tangent.xyz) * tangent.w` the direction `uv.y` grows along (down the texture). With `normal` it turns a normal map's normals (`block_normal_map`) into world axes.",
+        displaced: "f32" = "How much of the relief `[displacement]` gave this point as geometry, 0..1: 1 near the camera, where the surface already lies where `displacement` put it (`position` is that point; a parallax effect would count its depth twice), easing to 0 at `[displacement] distance`; always 0 without `[displacement]`.",
+    },
+};
+
+/// The input of the material stage's `displacement`, under `[displacement]`.
+pub const DISPLACEMENT_INPUT: Struct = Struct {
+    name: "DisplacementInput",
+    doc: "One corner of the grid a block face near the camera is cut into, for `fn displacement(input: DisplacementInput) -> f32` (`[displacement]`), which returns how deep below the face, in blocks, the surface lies at `height`.",
+    fields: fields! {
+        position: "vec3<f32>" = "The corner on the flat face, camera-relative, in blocks.",
+        normal: "vec3<f32>" = "The face's normal, a unit vector in world axes.",
+        uv: "vec2<f32>" = "The texture coordinate inside the block's sprite (as `MaterialInput.uv`).",
+        material: "u32" = "The `[[materials]]` id of the block texture (0 when none matches).",
+        height: "f32" = "A LabPBR height, 0..1 (1 the top of the relief): the normal map's alpha here, or the texture's average height (what the face's edges are pinned to).",
+    },
+};
+
+/// The vertex stage's input: one corner of a block's surface.
+pub const VERTEX_INPUT: Struct = Struct {
+    name: "VertexInput",
+    doc: "One corner of a block's surface, for `fn vertex(input: VertexInput) -> vec3<f32>`, which returns where it is drawn (camera-relative, in blocks; `input.position` leaves it).",
+    fields: fields! {
+        position: "vec3<f32>" = "The corner, camera-relative, in blocks (`+ frame.camera_position` for the world's).",
+        uv: "vec2<f32>" = "The texture coordinate inside the block atlas.",
+        material: "u32" = "The `[[materials]]` id of the block texture (0 when none matches).",
+        light: "vec2<f32>" = "Block and sky light, 0..1.",
+        tint: "vec4<f32>" = "The vertex colour (biome tint, face shade, ambient occlusion); alpha 1.",
+        face: "u32" = "For a fluid, the face of the block the corner is on (as `MaterialInput.face`), else 0.",
+        fluid: "u32" = "1 on a fluid's surface (water or lava), else 0.",
     },
 };
 
@@ -200,6 +281,19 @@ pub const SKY_INPUT: Struct = Struct {
     },
 };
 
+/// The weather stage's input: one point of a rain or snow streak.
+pub const WEATHER_INPUT: Struct = Struct {
+    name: "WeatherInput",
+    doc: "One point of a rain or snow streak, for `fn weather(input: WeatherInput) -> vec4<f32>`, \
+          which returns the colour blended over the world (alpha its opacity).",
+    fields: fields! {
+        color: "vec4<f32>" = "The rain or snow texture's colour here times the streak's vertex colour (alpha 0.1..1).",
+        light: "vec2<f32>" = "Block and sky light, 0..1.",
+        position: "vec3<f32>" = "The point, camera-relative, in blocks.",
+        snow: "bool" = "A snow streak (rain otherwise).",
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,9 +301,9 @@ mod tests {
     #[test]
     fn frame_fields_carry_their_docs() {
         let wgsl = Frame::WGSL;
-        assert_eq!(wgsl.fields.len(), 28);
+        assert_eq!(wgsl.fields.len(), 45);
         assert!(wgsl.fields.iter().all(|f| !f.doc.trim().is_empty()));
-        assert_eq!(std::mem::size_of::<Frame>(), 4 * 64 + 9 * 16);
+        assert_eq!(std::mem::size_of::<Frame>(), 6 * 64 + 14 * 16);
         assert!(
             wgsl.wgsl()
                 .contains("    camera_position: vec3<f32>,\n    time: f32,\n")

@@ -57,20 +57,74 @@ impl Game<'_> {
         let result = Pack::read(path).map_err(|e| vec![e]).and_then(|pack| {
             let report = check(&pack)
                 .map_err(|p| p.iter().map(ToString::to_string).collect::<Vec<String>>())?;
-            let constants = pack
+            // The player's values (Shader Pack Settings), else the defaults.
+            let options = &pack.manifest.options;
+            let values = horizon_client::shader_pack_list::load_values(path, options);
+            let constants = options.iter().map(|o| o.id.clone()).zip(values).collect();
+            // Each sprite layer's `[[materials]]` id, by the layer's texture name.
+            let names = &self.pack.render.sprite_layers;
+            let layers = names.values().max().map_or(0, |&l| l as usize + 1);
+            let mut materials = vec![0u32; layers];
+            for (name, &layer) in names.iter() {
+                let id = report.manifest.material_of(name);
+                if id != 0 {
+                    materials[layer as usize] = id;
+                }
+            }
+            // `blocks` lists: the layers their models draw with, where no pattern named them.
+            let listed: String = report
                 .manifest
-                .options
+                .materials
                 .iter()
-                .map(|o| (o.id.clone(), o.kind.default_constant()))
+                .filter(|m| !m.blocks.is_empty())
+                .map(|m| format!("block.{}={}\n", m.id, m.blocks.join(" ")))
                 .collect();
+            if !listed.is_empty() {
+                let macros = horizon_shaders::Macros::standard();
+                let ids = horizon_shaders::BlockIds::parse(&horizon_shaders::Properties::parse(
+                    &listed, &macros,
+                ));
+                let table = super::shader_packs::block_id_table(&self.pack, &ids);
+                for (layer, id) in materials.iter_mut().enumerate() {
+                    if *id == 0
+                        && let Some(&listed) = table.get(layer * 2)
+                        && listed > 0
+                    {
+                        *id = listed as u32;
+                    }
+                }
+            }
+            // Each light-giving block state's `[[lights]]` colour, with its level.
+            let mut lights = horizon_client::gfx::block_light::LightTable::default();
+            if !report.manifest.lights.is_empty() {
+                for (id, state) in self.res.facts().states.iter().enumerate() {
+                    if state.emission == 0 {
+                        continue;
+                    }
+                    if let Some(color) = report.manifest.light_of(&state.name) {
+                        lights.insert(id as u32, (color, state.emission));
+                    }
+                }
+            }
+            // `[[materials]] translucent`: the layers of those ids, for the mesher.
+            let translucent_ids: Vec<u32> = report
+                .manifest
+                .materials
+                .iter()
+                .filter(|m| m.translucent)
+                .map(|m| m.id)
+                .collect();
+            let translucent: Vec<bool> =
+                materials.iter().map(|id| translucent_ids.contains(id)).collect();
             let labels = renderer
-                .set_native_shader_pack(Some((report, constants)))
+                .set_native_shader_pack(Some((report, constants)), &materials, lights)
                 .map_err(|e| vec![e])?;
-            Ok((pack.manifest, labels))
+            Ok((pack.manifest, labels, translucent))
         });
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         match result {
-            Ok((m, labels)) => {
+            Ok((m, labels, translucent)) => {
+                self.set_translucent_layers(translucent);
                 log::info!(
                     "shader pack {} {}: {} in {} ms",
                     m.id,
@@ -93,7 +147,8 @@ impl Game<'_> {
     }
 }
 
-/// A hash of the pack's file names, sizes and modification times (`None` when unreadable).
+/// A hash of the pack's file names, sizes and modification times, and of its option values
+/// (`None` when unreadable).
 fn fingerprint(path: &Path) -> Option<u64> {
     fn walk(path: &Path, hasher: &mut std::hash::DefaultHasher) -> Option<()> {
         let meta = std::fs::metadata(path).ok()?;
@@ -116,5 +171,8 @@ fn fingerprint(path: &Path) -> Option<u64> {
     }
     let mut hasher = std::hash::DefaultHasher::new();
     walk(path, &mut hasher)?;
+    std::fs::read(horizon_client::shader_pack_list::values_path(path))
+        .unwrap_or_default()
+        .hash(&mut hasher);
     Some(hasher.finish())
 }

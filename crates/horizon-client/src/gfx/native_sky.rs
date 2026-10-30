@@ -162,7 +162,7 @@ mod tests {
     use horizon_shader_api::{Frame as FrameInputs, MANIFEST, Pack, StageKind, check};
 
     fn stage(sky: &str) -> CheckedStage {
-        let mut manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.1\"\n\
+        let mut manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.5\"\n\
             [sky]\nfile = \"sky.wgsl\"\n"
             .to_owned();
         if sky.contains("gain") {
@@ -252,7 +252,7 @@ mod tests {
                 resource: globals_buffer.as_entire_binding(),
             }],
         });
-        let frame = NativeFrame::new(&device);
+        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None);
         queue.write_buffer(
             &frame.buffer,
             0,

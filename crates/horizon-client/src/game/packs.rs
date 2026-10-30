@@ -20,6 +20,9 @@ use std::{
 };
 
 /// Where overlay roots are built (beside options.txt).
+/// `apply_staged_pack`'s error when the new renderer's textures do not fit video memory.
+pub(super) const OUT_OF_VIDEO_MEMORY: &str = "the resource packs' textures do not fit video memory";
+
 pub fn cache_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_default()
@@ -136,37 +139,33 @@ impl Game<'_> {
             self.pending_pack_reload = true;
             return;
         }
-        if let Err(e) = self.reload_selected_packs() {
-            log::warn!("Horizon: resource reload failed: {e}");
-            if self.screen != super::Screen::Options {
-                self.open_options_at(
-                    self.title.is_some(),
-                    horizon_client::options_ui::Page::Packs,
-                );
-            }
-            self.ui.options.resource_error = Some(e.to_string());
+        // Staged on a worker under the loading overlay, as a server's packs are: the
+        // window keeps drawing while a large pack loads.
+        if self.server_packs.reload.is_none() {
+            self.spawn_pack_reload(self.server_packs.active.clone(), true);
+        } else {
+            self.pending_pack_reload = true;
         }
     }
-    /// The CPU half of the reload, safe on a worker (`PackReload` runs it):
-    /// `apply_staged_pack` finishes the GPU half and the swap.
-    pub(super) fn stage_selected_packs(&mut self) -> horizon_client::Result<StagedPack> {
-        let vanilla = self.vanilla_root();
-        if self.ui.vanilla_root.as_os_str().is_empty() {
-            self.ui.vanilla_root = vanilla.clone();
+    /// A reload from the resource pack menu failed: back to the menu with the error.
+    /// Out of video memory, the textures' budget is halved and the packs load again.
+    pub(super) fn pack_reload_failed(&mut self, e: String) {
+        if e == OUT_OF_VIDEO_MEMORY && horizon_client::sprites::lower_texture_cap() {
+            log::warn!(
+                "Horizon: loading the packs again with block textures within {} MiB",
+                horizon_client::sprites::texture_budget() >> 20
+            );
+            self.reload_packs();
+            return;
         }
-        stage_pack(
-            &vanilla,
-            &self.settings.resource_packs,
-            &self.server_packs.active,
-            &self.settings.mods.enabled,
-            &self.options.dev_mods,
-            &self.pack.assets,
-            &self.res,
-            &self.pack.context,
-            self.settings.force_unicode,
-            self.settings.japanese_glyphs,
-            &super::Progress::new(),
-        )
+        log::warn!("Horizon: resource reload failed: {e}");
+        if self.screen != super::Screen::Options {
+            self.open_options_at(
+                self.title.is_some(),
+                horizon_client::options_ui::Page::Packs,
+            );
+        }
+        self.ui.options.resource_error = Some(e);
     }
     /// The render-thread half: the renderer on the new pack's textures, then
     /// the swap (`ReloadInstance`'s application listeners).
@@ -181,7 +180,17 @@ impl Game<'_> {
         if let Some(renderer) = &mut self.renderer {
             renderer.release_surface();
         }
-        let renderer = match self
+        // Both renderers' textures share the video memory until the swap: running out is an
+        // error returned to the reload (`OUT_OF_VIDEO_MEMORY`), not raised (raised errors
+        // are fatal).
+        let device = self.renderer.as_ref().map(|r| r.device.clone());
+        let scopes = device.as_ref().map(|d| {
+            (
+                d.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+                d.push_error_scope(wgpu::ErrorFilter::Validation),
+            )
+        });
+        let built = self
             .window
             .clone()
             .map(|window| {
@@ -195,8 +204,26 @@ impl Game<'_> {
                     self.settings.horizon.api,
                 )
             })
-            .transpose()
-        {
+            .transpose();
+        let built = match scopes {
+            Some((oom, validation)) => {
+                let validation = pollster::block_on(validation.pop());
+                match (pollster::block_on(oom.pop()), built) {
+                    // Its textures were made in place of none: dropped, they free what they
+                    // hold, and the working renderer stays.
+                    (Some(e), _) => {
+                        log::warn!("Horizon: the new pack's textures do not fit video memory ({e})");
+                        Err(OUT_OF_VIDEO_MEMORY.into())
+                    }
+                    (None, Ok(_)) if validation.is_some() => {
+                        Err(format!("{}", validation.unwrap()).into())
+                    }
+                    (_, built) => built,
+                }
+            }
+            None => built,
+        };
+        let renderer = match built {
             Ok(renderer) => renderer,
             Err(error) => {
                 if let Some(renderer) = &mut self.renderer {
@@ -249,15 +276,9 @@ impl Game<'_> {
         self.creative_screen.forget_items();
         Ok(())
     }
-    /// `Minecraft.reloadResourcePacks`: the reload staged on the spot, then
-    /// applied (`PackReload` runs the same two phases across frames).
-    pub(super) fn reload_selected_packs(&mut self) -> horizon_client::Result<()> {
-        let staged = self.stage_selected_packs()?;
-        self.apply_staged_pack(staged)
-    }
 }
 
-/// The CPU half of `reload_selected_packs` (`PackReload` runs it on a
+/// The CPU half of a pack reload (`PackReload` runs it on a
 /// worker; `apply_staged_pack` does the GPU half and the swap): the overlay
 /// root, the models and sprites, the menu bundle, the pack's tables and its
 /// CPU mip chains.
@@ -278,6 +299,7 @@ pub(super) fn stage_pack(
     let root = super::mods::content_root(&root, mods_enabled, dev_mods);
     progress.set(1);
     let render = Arc::new(assets.reload(&root)?);
+    progress.set(2);
     let mut atlas = HudAtlas::build_over(&root, vanilla_root)?;
     atlas.font.uniform = force_unicode;
     atlas.font.japanese = japanese;
@@ -285,7 +307,7 @@ pub(super) fn stage_pack(
         atlas,
         panorama: Arc::new(horizon_client::gfx::panorama::Faces::load(&root)),
     };
-    progress.set(2);
+    progress.set(3);
     let pack = PackResources::load(
         &root,
         assets.clone(),
@@ -294,8 +316,9 @@ pub(super) fn stage_pack(
         context.biomes.clone(),
         context.light.clone(),
     )?;
+    progress.set(4);
     let textures = prepare_renderer_textures(&pack);
-    progress.set(3);
+    progress.set(5);
     Ok(StagedPack {
         root,
         gui,

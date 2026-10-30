@@ -18,6 +18,8 @@ impl Game<'_> {
         // Spans tell the pack's passes which entities are hidden; without them, nothing changes.
         self.pack_shadow_casters = match (&self.renderer, &self.pack_ids) {
             (Some(r), Some(_)) => r.pack_shadow_casters(),
+            // A native pack's shadow pass draws the entities and, in first person, the player.
+            (Some(r), None) => (false, r.native_shadow()),
             _ => (false, false),
         };
         let at = camera.to_array().map(|v| v.floor() as i32);

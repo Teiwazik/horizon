@@ -33,8 +33,9 @@ pub struct PassTiming {
     read: wgpu::Buffer,
     period_ns: f32,
     stage: Stage,
-    /// The passes of the timed frame, in order.
+    /// The passes of the timed frame, in order, and which of them are spans (`span`).
     names: Vec<String>,
+    spans: Vec<bool>,
     /// Each pass's last `WINDOW` times, in milliseconds.
     samples: Vec<(String, VecDeque<f32>)>,
     /// Log the medians every `REPORT` timed frames.
@@ -76,6 +77,7 @@ impl PassTiming {
             period_ns: queue.get_timestamp_period(),
             stage: Stage::Idle,
             names: Vec::new(),
+            spans: Vec::new(),
             samples: Vec::new(),
             log: Self::logging(),
             marker: None,
@@ -124,6 +126,7 @@ impl PassTiming {
         }
         if matches!(self.stage, Stage::Idle) {
             self.names.clear();
+            self.spans.clear();
             self.stage = Stage::Recording;
         }
     }
@@ -146,7 +149,36 @@ impl PassTiming {
             return None;
         }
         self.names.push(name.to_owned());
+        self.spans.push(false);
         Some(i)
+    }
+
+    /// The pass `name`'s queries, in a timed frame, for a pass begun where the timer itself
+    /// cannot be borrowed: its timestamp writes are `stamps(i)`.
+    pub fn reserve(&mut self, name: &str) -> Option<u32> {
+        self.push(name)
+    }
+
+    /// The timestamp writes of the pass `reserve` returned `i` for.
+    pub fn stamps(&self, i: u32) -> wgpu::RenderPassTimestampWrites<'_> {
+        stamps(&self.queries, i)
+    }
+
+    /// Everything the GPU did since the last timed pass ended, up to the end of what was drawn
+    /// into `target`, as the pass `name`: the work of several passes drawn without timestamps.
+    pub fn span(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: super::timing::Target,
+        name: &str,
+    ) {
+        let before = self.names.len();
+        self.mark(device, encoder, target);
+        if self.names.len() > before {
+            self.names[before] = name.to_owned();
+            self.spans[before] = true;
+        }
     }
 
     /// A pass that ends once everything drawn into `target` before it has, in a timed frame:
@@ -217,7 +249,7 @@ impl PassTiming {
             .collect();
         drop(data);
         self.read.unmap();
-        let times = pass_times(&stamps, self.period_ns);
+        let times = pass_times(&stamps, &self.spans, self.period_ns);
         for (name, ms) in self.names.iter().zip(times) {
             let Some(ms) = ms.filter(|_| !name.is_empty()) else {
                 continue;
@@ -277,17 +309,25 @@ fn stamps(queries: &wgpu::QuerySet, i: u32) -> wgpu::RenderPassTimestampWrites<'
 /// Each pass's time in milliseconds from its (beginning, end) timestamps, `None` for a pass
 /// the GPU left unstamped. Passes overlap on tiled GPUs (a pass begins before the one before it
 /// ends): a pass costs the time from the later of its beginning and the previous pass's end.
-fn pass_times(stamps: &[u64], period_ns: f32) -> Vec<Option<f32>> {
+/// A span (`spans[i]`) counts from the previous pass's end, whenever its own marker began.
+fn pass_times(stamps: &[u64], spans: &[bool], period_ns: f32) -> Vec<Option<f32>> {
     let mut previous_end = 0;
     stamps
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|&[begin, end]| {
+        .enumerate()
+        .map(|(i, &[begin, end])| {
             if begin == 0 || end < begin {
                 return None;
             }
-            let from = begin.max(previous_end).min(end);
+            let span = spans.get(i).copied().unwrap_or(false) && previous_end > 0;
+            let from = if span {
+                previous_end
+            } else {
+                begin.max(previous_end)
+            }
+            .min(end);
             previous_end = end;
             Some((end - from) as f32 * period_ns / 1e6)
         })
@@ -302,6 +342,12 @@ mod tests {
     fn overlapping_passes_cost_from_the_previous_end() {
         // Pass 2 begins before pass 1 ends; pass 3 was never stamped.
         let stamps = [1_000_000, 3_000_000, 2_000_000, 5_000_000, 0, 0];
-        assert_eq!(pass_times(&stamps, 1.0), [Some(2.0), Some(2.0), None]);
+        assert_eq!(pass_times(&stamps, &[], 1.0), [Some(2.0), Some(2.0), None]);
+        // A span's marker began late: it counts from pass 1's end.
+        let stamps = [1_000_000, 3_000_000, 6_000_000, 7_000_000];
+        assert_eq!(
+            pass_times(&stamps, &[false, true], 1.0),
+            [Some(2.0), Some(4.0)]
+        );
     }
 }

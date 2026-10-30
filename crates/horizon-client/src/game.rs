@@ -1374,6 +1374,9 @@ struct Game<'a> {
     pending_entry: Option<PendingWorldEntry>,
     world_loader: Option<world_loading::WorldLoader>,
     pending_pack_reload: bool,
+    /// When `resourcepacks/` was last looked at for the open pack screen, and what it held
+    /// (`watch_pack_folder`).
+    pack_folder: Option<(std::time::Instant, Vec<(String, u64, Option<std::time::SystemTime>)>)>,
     /// A server's resource packs (game/server_packs.rs).
     server_packs: server_packs::ServerPackState,
     /// The link a chat click asks to open (`ConfirmLinkScreen`).
@@ -1487,6 +1490,8 @@ struct Game<'a> {
     entity_spans: std::cell::RefCell<Vec<horizon_client::gfx::pack_draw::EntitySpan>>,
     /// The glowing entities' silhouettes this frame (game/glowing.rs).
     glowing_vertices: std::cell::RefCell<Vec<Vertex>>,
+    /// The local player's model in first person, for a native pack's shadow pass only.
+    shadow_only_vertices: std::cell::RefCell<Vec<Vertex>>,
     /// The shader pack's entity and block entity ids, while one draws entities.
     pack_ids: Option<shader_packs::PackIds>,
     started: Instant,
@@ -1802,6 +1807,10 @@ struct Game<'a> {
     events: events::Events,
     /// The overworld's last `sky_darken` and its inputs (time, rain, thunder).
     sky_darken_memo: std::cell::Cell<Option<((i64, u32, u32), i32)>>,
+    /// The last water plane `water_plane` found, kept while none is in reach.
+    water_plane_memo: std::cell::Cell<Option<f32>>,
+    /// The camera's block and the second `water_plane` last scanned at.
+    water_plane_scan: std::cell::Cell<Option<([i32; 3], i64)>>,
     persist: persist::EntityMemory,
     /// Connected to a server: the world comes from the network (game/remote.rs).
     remote: Option<remote::Remote>,
@@ -5836,7 +5845,8 @@ impl Game<'_> {
         // the sleep overlay, debug screen and open screens still draw.
         let spectator = self.spectator();
         let (wi, hi) = (w as i32, h as i32);
-        let show_hud = !self.ui.hide_gui;
+        let show_hud =
+            !self.ui.hide_gui && !(self.screen == Screen::Options && self.ui.options.preview);
         // max(Hud.leftHeight, Hud.rightHeight) after the bars: the item name and
         // the action bar sit above it.
         let mut bar_height = 39;
@@ -7873,7 +7883,15 @@ impl Game<'_> {
         self.mob_geometry(camera, alpha, &mut out);
         // In first person only a shader pack's shadow pass draws the player.
         self.mark_player(out.len(), self.camera_type.first_person());
+        let player_start = out.len();
         self.player_model_geometry(camera, self.clock.camera_fraction(), &mut out);
+        // A native pack has no per-entity draws to hide it with: its shadow pass alone gets
+        // the first-person model.
+        if self.pack_ids.is_none() && self.camera_type.first_person() {
+            self.shadow_only_vertices
+                .borrow_mut()
+                .extend(out.drain(player_start..));
+        }
         self.mark_entity(out.len(), "minecraft:player");
         self.guest_model_geometry(camera, alpha, &mut out);
         self.mark_entity(out.len(), "minecraft:evoker_fangs");
@@ -7885,9 +7903,10 @@ impl Game<'_> {
         self.see_through_vertices = see_through;
         // Entity shadows (EntityRenderer.extractShadow).
         self.mark_translucent_entity(out.len(), "minecraft:entity_shadow");
-        let shadow_sprite = self
-            .settings
-            .entity_shadows
+        // A native shader pack's sun shadows already fall under the entities: the round
+        // blob would be a second one (Iris drops it with a pack's shadow pass too).
+        let pack_shadows = self.renderer.as_ref().is_some_and(|r| r.native_shadow());
+        let shadow_sprite = (self.settings.entity_shadows && !pack_shadows)
             .then(|| self.gui.atlas.sprites.get("misc/shadow").copied())
             .flatten();
         if let Some(sprite) = shadow_sprite {
@@ -10594,6 +10613,20 @@ impl Game<'_> {
         self.apply_ui_settings();
     }
     /// `LevelExtractor.allChanged`: every loaded section is rebuilt.
+    /// The sprite layers a shader pack draws in the translucent pass: every section is meshed
+    /// again when they change.
+    pub(super) fn set_translucent_layers(&mut self, layers: Vec<bool>) {
+        let layers: Arc<[bool]> = if layers.iter().any(|&t| t) {
+            layers.into()
+        } else {
+            Arc::from([])
+        };
+        if *layers != *self.streaming.translucent_layers {
+            self.streaming.translucent_layers = layers;
+            self.all_sections_changed();
+        }
+    }
+
     fn all_sections_changed(&mut self) {
         for &(x, z) in self.world.chunks.keys() {
             for sy in 0..horizon_client::chunk::HEIGHT / 16 {
@@ -11378,11 +11411,13 @@ impl Game<'_> {
         if let Some(reload) = &self.server_packs.reload {
             if let Some(renderer) = &mut self.renderer {
                 let mut hud = HudBatch::new([renderer.config.width, renderer.config.height]);
+                let fraction = reload.progress.fraction();
+                let line = format!("{} ({}%)", reload.progress.line(), (fraction * 100.0) as u32);
                 horizon_client::level_loading::draw_progress(
                     &mut hud,
                     &self.gui.atlas,
-                    reload.progress.line(),
-                    reload.progress.fraction(),
+                    &line,
+                    fraction,
                 );
                 return renderer.render(&loading_frame(&hud));
             }
@@ -11601,6 +11636,7 @@ impl Game<'_> {
         entities.clear();
         self.see_through_vertices.clear();
         self.glowing_vertices.get_mut().clear();
+        self.shadow_only_vertices.get_mut().clear();
         if !title {
             entities = horizon_client::spans::time("entity_geometry", || {
                 self.entity_geometry(camera, alpha, entities)
@@ -11669,6 +11705,7 @@ impl Game<'_> {
         hud.patches.append(&mut self.map_patches);
         let entity_spans = std::mem::take(self.entity_spans.get_mut());
         let glowing = std::mem::take(self.glowing_vertices.get_mut());
+        let shadow_only = std::mem::take(self.shadow_only_vertices.get_mut());
         let frame = Frame {
             weather: &weather,
             weather_time: horizon_client::weather::Time::new(self.world.game_time, alpha as f32),
@@ -11683,6 +11720,11 @@ impl Game<'_> {
             detail_distance: (self.streaming.radius * 16) as f32,
             depth_far,
             underwater,
+            water_plane: if title || underwater {
+                None
+            } else {
+                self.water_plane(camera)
+            },
             title,
             skybox: self.dim == Dim::Overworld && self.settings.horizon.sky,
             end_sky: self.dim == Dim::End && self.settings.horizon.sky,
@@ -11748,6 +11790,7 @@ impl Game<'_> {
             },
             additive: &additive,
             see_through: &see_through,
+            shadow_only: &shadow_only,
             celestial: if self.settings.horizon.sky || title {
                 &celestial
             } else {
@@ -11794,6 +11837,7 @@ impl Game<'_> {
         self.entity_vertices = entities;
         *self.entity_spans.get_mut() = entity_spans;
         *self.glowing_vertices.get_mut() = glowing;
+        *self.shadow_only_vertices.get_mut() = shadow_only;
         self.see_through_vertices = see_through;
         result
     }
@@ -11868,7 +11912,9 @@ impl Game<'_> {
                     || self.dialog_open()
                     || (self.screen == Screen::Win && self.win_screen_pauses())));
         let radius = self.settings.menu_blur as f32;
-        (blurred && radius >= 1.0).then_some(radius)
+        // The options' Hide button shows the world itself.
+        let preview = self.screen == Screen::Options && self.ui.options.preview;
+        (blurred && radius >= 1.0 && !preview).then_some(radius)
     }
     /// `LevelExtractor` / `LevelRenderer`: the world border wall this frame.
     fn border_draw(
@@ -13484,6 +13530,7 @@ impl<'a> Game<'a> {
             pending_entry: None,
             world_loader: None,
             pending_pack_reload: false,
+            pack_folder: None,
             server_packs: Default::default(),
             link_prompt: None,
             dialogs: Default::default(),
@@ -13563,6 +13610,7 @@ impl<'a> Game<'a> {
             see_through_vertices: Vec::new(),
             entity_spans: Default::default(),
             glowing_vertices: Default::default(),
+            shadow_only_vertices: Default::default(),
             pack_ids: None,
             health_hud: hud_layout::HealthHud::default(),
             started: now,
@@ -13764,6 +13812,8 @@ impl<'a> Game<'a> {
             mods: Default::default(),
             native_shaders: Default::default(),
             sky_darken_memo: Default::default(),
+            water_plane_memo: Default::default(),
+            water_plane_scan: Default::default(),
             persist: Default::default(),
             remote: None,
             lan: None,
@@ -14139,12 +14189,14 @@ fn load_resources(
 ) -> Result<Loaded> {
     let requested_root = root.clone();
     let threads = settings.horizon.worker_threads();
+    horizon_client::sprites::set_texture_budget(settings.horizon.texture_budget_mib);
     // Stage A: the menu bundle (atlas and panorama). With a loading screen it is
     // published at once so the title screen can appear while the world bundle
     // loads; the synchronous launch instead carries it in `Loaded`.
     let mut loaded_gui = None;
     let mut ui_ready = false;
     let mut pack_error = None;
+    log::info!("load start: {:.2}s", started.elapsed().as_secs_f32());
     let ui = match UiResources::load(&root, vanilla_root) {
         Ok(ui) => Some(ui),
         // Minecraft.rollbackResourcePacks: the packs' textures don't fit, start
@@ -14171,8 +14223,11 @@ fn load_resources(
         ui_ready = true;
     }
     progress.set(0);
+    log::info!("load ui: {:.2}s", started.elapsed().as_secs_f32());
     let (assets, render) = match Assets::load(&root).and_then(|assets| {
+        log::info!("load registry: {:.2}s", started.elapsed().as_secs_f32());
         let render = assets.reload(&root)?;
+        log::info!("load models+sprites: {:.2}s", started.elapsed().as_secs_f32());
         Ok((assets, render))
     }) {
         Ok(bundle) => bundle,
@@ -14436,6 +14491,12 @@ fn prepare_renderer_textures(pack: &PackResources) -> horizon_client::gfx::Prepa
         &assets.sprite_mips,
         (&pack.forcefield.2, pack.forcefield.0),
     )
+    .with_pbr(
+        &assets.pbr_normals,
+        &assets.pbr_specular,
+        assets.pbr_size,
+        assets.texture_layers,
+    )
 }
 
 /// Upload pack textures and create the renderer on the window's device.
@@ -14458,6 +14519,8 @@ fn build_renderer(
     // Chinese and Japanese menu labels go blank when the loading screen hands
     // over to the game.
     atlas.font.reset_cache();
+    // Made here when the worker did not: the renderer's own fallback has no LabPBR maps.
+    let prepared = Some(prepared.unwrap_or_else(|| prepare_renderer_textures(pack)));
     let mut renderer = pollster::block_on(Renderer::new(
         window,
         offscreen,
@@ -14564,6 +14627,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         detail_distance: 12.0,
         depth_far: 1000.0,
         underwater: false,
+        water_plane: None,
         cave_culling: false,
         title: true,
         skybox: false,
@@ -14591,6 +14655,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         lightning: Default::default(),
         additive: &[],
         see_through: &[],
+        shadow_only: &[],
         celestial: &[],
         stars: None,
         hand: &[],

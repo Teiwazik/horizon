@@ -63,6 +63,9 @@ pub struct Call {
 
 pub struct Flat {
     pub solid: wgpu::RenderPipeline,
+    /// The solid draws as the mirror camera draws them (cull Front, phase 2's
+    /// planar reflection).
+    pub solid_mirror: wgpu::RenderPipeline,
     pub translucent: wgpu::RenderPipeline,
     flatten: wgpu::ComputePipeline,
     compute_layout: wgpu::BindGroupLayout,
@@ -259,6 +262,7 @@ impl Flat {
             &str,
             &str,
             Option<wgpu::BlendState>,
+            Option<wgpu::Face>,
         ) -> wgpu::RenderPipeline,
     ) -> Self {
         let vertex = wgpu::ShaderStages::VERTEX;
@@ -313,12 +317,26 @@ impl Flat {
         let flatten_seen = compute_pipeline(&seen_layout, "flatten_seen");
         let storage_usage = wgpu::BufferUsages::STORAGE;
         Self {
-            solid: pipeline(&layout, "Terrain solid (flat)", "fs_solid", None),
+            solid: pipeline(
+                &layout,
+                "Terrain solid (flat)",
+                "fs_solid",
+                None,
+                Some(wgpu::Face::Back),
+            ),
+            solid_mirror: pipeline(
+                &layout,
+                "Terrain solid mirrored (flat)",
+                "fs_solid_mirror",
+                None,
+                Some(wgpu::Face::Front),
+            ),
             translucent: pipeline(
                 &layout,
                 "Terrain translucent (flat)",
                 "fs_translucent",
                 Some(wgpu::BlendState::ALPHA_BLENDING),
+                Some(wgpu::Face::Back),
             ),
             flatten,
             compute_layout,

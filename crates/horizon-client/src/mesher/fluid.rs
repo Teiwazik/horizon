@@ -3,7 +3,8 @@
 //! beside glass and leaves, back faces, cardinal shading and max(self, above)
 //! light.
 use super::{
-    Info, MeshTables, Padded, SectionMesh, TerrainVertex, lighting, pack_coords, pack_rgb, pi,
+    Info, MeshTables, Padded, SectionMesh, TerrainVertex, fluid_face, lighting, pack_coords,
+    pack_rgb, pi,
 };
 use horizon_core::{
     geometry::{Axis, Direction, VoxelShape, trig},
@@ -307,14 +308,19 @@ pub(super) fn tesselate(
     } else {
         &mut out.solid
     };
-    let mut quad =
-        |v: [([f32; 3], [f32; 2]); 4], layer: u16, color: u32, light: u16, back: bool| {
-            let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
-            target.extend(v.map(vertex));
-            if back {
-                target.extend([v[0], v[3], v[2], v[1]].map(vertex));
-            }
-        };
+    let mut quad = |v: [([f32; 3], [f32; 2]); 4],
+                    layer: u16,
+                    color: u32,
+                    light: u16,
+                    back: bool,
+                    face: usize| {
+        let color = fluid_face(color, face);
+        let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
+        target.extend(v.map(vertex));
+        if back {
+            target.extend([v[0], v[3], v[2], v[1]].map(vertex));
+        }
+    };
     let (fx, fy, fz) = (x as f32, y as f32, z as f32);
     let bottom = if render_down { EPSILON } else { 0.0 };
     if render_up && !occluded_by(Direction::Up, nw.min(sw).min(se.min(ne)), up) {
@@ -363,6 +369,7 @@ pub(super) fn tesselate(
             color(lighting::cardinal(nether, D::Up)),
             light([x, y, z]),
             backward,
+            Direction::Up as usize,
         );
     }
     if render_down {
@@ -378,6 +385,7 @@ pub(super) fn tesselate(
             color(lighting::cardinal(nether, D::Down)),
             light([x, y - 1, z]),
             false,
+            Direction::Down as usize,
         );
     }
     let side_light = light([x, y, z]);
@@ -432,6 +440,7 @@ pub(super) fn tesselate(
             color(up_shade * side),
             side_light,
             !is_overlay,
+            d as usize,
         );
     }
 }

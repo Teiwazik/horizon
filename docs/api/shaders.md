@@ -45,19 +45,38 @@ schema = 1                 # the manifest's format; a reader refuses schemas new
 id = "soft_light"          # [a-z0-9_]{1,64}: the settings key and the registry id
 name = "Soft Light"
 version = "1.0.0"
-api = "0.1"                # the shader API line the WGSL is written for
+api = "0.5"                # the shader API line the WGSL is written for
 description = "..."        # optional, like authors and license
 shared = ["common.wgsl"]   # optional: WGSL put before every stage's file, in order
 
 [sky]                      # each stage is optional, but a pack has at least one
 file = "sky.wgsl"
+clouds = true              # optional: false when the pack draws its own clouds
+sun = true                 # optional: false when the pack draws its own sun (the moon and stars stay)
+stars = true               # optional: false when the pack draws its own stars
 
 [material]
 file = "material.wgsl"
+fog = true                 # optional: false when the pack fogs its surfaces itself
+
+[shadow]                   # optional: a shadow map from the sun (the moon by night)
+resolution = 2048          # its side in texels, 256 to 8192
+distance = 128.0           # half the side of the square it covers, in blocks, 32 to 512
+solid_materials = [2]      # optional: [[materials]] ids drawn whole, their cutouts ignored (solid leaf shadows)
+
+[displacement]             # optional, needs [material]: LabPBR relief as geometry near the camera
+distance = 12.0            # how far, in blocks, 4 to 32; the relief eases out over the last quarter
+cells = 16                 # the grid's cells along a face's side, 4 to 64 (no more than the texels)
+option = "displacement"    # optional: the bool option that turns it on
 
 [[post]]                   # full-screen passes, in the order they run (8 at most)
 file = "post/grade.wgsl"
 name = "Colour grade"      # optional: the GPU time overlay's label
+
+[[post]]                   # a pass of its own target, at half or a quarter of the world's size
+file = "post/glow.wgsl"
+output = "glow"            # optional: a target the later passes read by this name; the
+scale = 0.5                #   chain's `previous` goes on past it (the last pass writes none)
 
 [[options]]                # 64 at most; `id` is the WGSL `override` it sets
 id = "saturation"
@@ -67,6 +86,18 @@ default = 1.1
 min = 0.0
 max = 2.0
 step = 0.05
+
+[[pages]]                  # optional: the settings screen's pages, the first the one it opens on
+id = "main"
+name = "Sample"
+items = ["page:colour", ""]   # a button opening a page, an empty slot (or an option's id)
+
+[[pages]]
+id = "colour"
+name = "Colour"            # the page's title and its button's label
+description = "How colourful the picture is."   # optional: the button's tooltip
+columns = 1                # optional: 1 or 2 (default) buttons a row
+items = ["saturation"]
 
 [budget]
 gpu_ms = 1.5               # optional: the GPU time the pack aims to add (0 to 16 ms)
@@ -96,6 +127,55 @@ stages.
 
 ## Changelog
 
+- 2026-10-30: API 0.5 (additions): `[[post]] output` and `scale`: a pass may write a target
+  of the pack's own (up to 4, read by name by the passes after it, last frame's before it is
+  written) at the world's size, half or a quarter, without breaking the chain of `previous`,
+  so blurs and marches run on a fraction of the pixels.
+- 2026-10-29: API 0.5 (additions): `[displacement]`: within its distance, the solid faces
+  whose resource pack textures have LabPBR heights are drawn as a grid whose corners the
+  material stage's `fn displacement(input: DisplacementInput) -> f32` moves along the normal,
+  measured from the texture's mean height and pinned at the face's edges (relief that is
+  geometry, with its depth and self-occlusion); `MaterialInput.displaced` says how much of it
+  a point has, for a parallax effect to step aside.
+- 2026-10-29: API 0.5 (additions): the material prelude's `block_texture`, `block_texture_size`
+  and `block_texture_lod` (the surface's own sprite, for normals and detail generated from it);
+  `[[pages]]` for the settings screen; `[sky] sun` and `stars`; `[shadow] solid_materials`; in
+  first person the player's model casts into the shadow map; the `[weather]` stage
+  (`fn weather(input: WeatherInput) -> vec4<f32>`) colours rain and snow streaks; under a pack
+  that fogs its terrain itself, entities mark the frame's alpha 0 for its post stage to fog them;
+  `block_texture_level` (the sprite at a chosen mip level); `[[materials]] blocks` (ids by block,
+  as block.properties writes them, for the textures no `sprites` pattern names), up to 1024
+  entries; a stage's `files` (more WGSL files of the pack, joined after the shared ones).
+- 2026-10-29: API 0.5 (additions): the material prelude's `set_surface(normal, smoothness, data)`
+  and the post stage's `scene_surface` with `surface_at` (the solid terrain's normal, smoothness
+  and a value of the pack's own, where the picture still shows that terrain), for reflections
+  and other deferred effects; a pack may chain 12 post passes.
+- 2026-10-29: API 0.5 (additions): the frame's `wetness`, `biome_rain`, `biome_snow` (eased, as
+  Iris's `wetness` and Complementary's `inRainy`/`inSnowy`) and `moon_phase`.
+- 2026-10-29: API 0.5 (additions): `[[materials]] translucent = true` draws that id's textures in
+  the translucent pass, clear texels included (Iris's `layer.translucent`).
+- 2026-10-29: API 0.5 (additions): the material stage's `opaque_color` (the world before
+  translucent terrain, for screen-space reflections on glass), `input.tangent`, and the
+  resource packs' LabPBR maps: `block_pbr_maps`, `block_normal_map`, `block_specular_map` and
+  their `_level` forms, and `block_pbr_size`.
+- 2026-10-29: API 0.5 (additions): the frame's `eye_light_smooth` (Iris's
+  `eyeBrightnessSmooth`), `in_water` and `in_lava` (eased).
+- 2026-10-28: API 0.5: `[[materials]]` (texture globs to the material stage's `material` id),
+  the `[vertex]` stage (terrain and shadow positions), `[[textures]]` (PNGs bound for every
+  stage), the material stage's `emission` and `opaque_depth`, the post stage's `history` and the
+  frame's `previous_view_projection`, `camera_motion` and `delta_time`; `[sky] clouds = false`
+  hides Minecraft's clouds for a pack that draws its own; the water plane is looked for 24
+  blocks around and below the camera; entities cast into the shadow map.
+- 2026-10-28: API 0.4: `[shadow]`: the engine draws the solid terrain the light sees into a
+  distorted depth map each frame (the shadow camera of `shaders/` packs), which the material and
+  post stages read as `shadow_map` with `shadow_sampler` and the prelude's `shadow_position`; the
+  frame's `light_direction`, `shadow_view_proj`, `shadow_distance`, `shadow_distortion` and
+  `has_shadow`; the material stage's `normal`; `[material] fog = false` turns Horizon's fog off
+  for a pack that fogs its surfaces itself.
+- 2026-10-28: API 0.3: the material stage's `screen` input and the frame's `reflection` buffer
+  (`water_plane`, `has_reflection`): the engine renders the world as a camera mirrored about the
+  water plane into a half-res target, and the material stage samples it (a planar water mirror;
+  an analytic sky stands in at the target's edges and far away).
 - 2026-10-26: the material stage in the game: terrain's surfaces through the pack's `material`.
 - 2026-10-26: the sky stage in the game: the pack's `sky` gets vanilla's colour along each ray.
 - 2026-10-26: the post stage in the game (`HORIZON_SHADER_PACK`, hot reload with the last good pack kept).

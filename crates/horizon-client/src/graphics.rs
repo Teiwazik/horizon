@@ -246,6 +246,10 @@ pub struct Graphics {
     pub chunk_updates: u32,
     /// Section mesh bytes uploaded per frame, in KiB; 0 is unlimited.
     pub upload_budget_kib: u32,
+    /// The block textures' video memory (colour and LabPBR maps, top mip level), in MiB;
+    /// 0 leaves it to Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources
+    /// next load.
+    pub texture_budget_mib: u32,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -286,6 +290,7 @@ impl Default for Graphics {
             entity_culling: false,
             chunk_updates: 0,
             upload_budget_kib: 0,
+            texture_budget_mib: 0,
             sky: true,
             fog: true,
             weather: true,
@@ -335,6 +340,9 @@ impl Graphics {
                 "entityCulling" => g.entity_culling = flag(g.entity_culling),
                 "chunkUpdates" => g.chunk_updates = number(g.chunk_updates).min(512),
                 "uploadBudgetKiB" => g.upload_budget_kib = number(g.upload_budget_kib).min(65536),
+                "textureBudgetMiB" => {
+                    g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
+                }
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
@@ -370,7 +378,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -378,6 +386,7 @@ impl Graphics {
             bool_text(self.entity_culling),
             self.chunk_updates,
             self.upload_budget_kib,
+            self.texture_budget_mib,
             bool_text(self.sky),
             bool_text(self.fog),
             bool_text(self.weather),
@@ -485,6 +494,7 @@ mod tests {
             entity_culling: true,
             chunk_updates: 12,
             upload_budget_kib: 4096,
+            texture_budget_mib: 1536,
             sky: false,
             fog: false,
             weather: false,

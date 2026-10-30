@@ -231,6 +231,61 @@ impl Game<'_> {
     fn fluid_height(&self, x: i32, y: i32, z: i32) -> Option<(f32, bool)> {
         self.fluid_height_of(x, y, z, Some(Fluid::Water))
     }
+    /// The horizontal water plane around the camera for the reflection pass:
+    /// the median standing-water surface of a grid of columns 48 blocks
+    /// around, each scanned down from the camera to its ground (`Game::water_plane`
+    /// in the frame). A lake or the sea has one plane; the shaders mirror only
+    /// the water that lies on it. With no water in reach the last plane found
+    /// stays, so the reflection never switches off as the camera moves.
+    pub(super) fn water_plane(&self, camera: glam::DVec3) -> Option<f32> {
+        const RADIUS: i32 = 48;
+        const STEP: usize = 4;
+        const DEPTH: i32 = 96;
+        let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
+        let top = camera.y.floor() as i32 + 2;
+        // Scanned again once the camera moves to another block, or each second.
+        let scan = ([cx, top, cz], self.world.game_time.div_euclid(20));
+        if self.water_plane_scan.replace(Some(scan)) == Some(scan) {
+            return self.water_plane_memo.get();
+        }
+        let mut heights = Vec::with_capacity(625);
+        for x in (cx - RADIUS..=cx + RADIUS).step_by(STEP) {
+            for z in (cz - RADIUS..=cz + RADIUS).step_by(STEP) {
+                // The top of the column's water: the highest standing water
+                // under the camera (a full block's water continues above it).
+                for y in (top - DEPTH..=top).rev() {
+                    if let Some((h, source)) = self.fluid_height(x, y, z) {
+                        if source && h < 1.0 {
+                            heights.push(y as f32 + h);
+                        }
+                        break;
+                    }
+                    if self.res.facts().get(self.world.block(x, y, z)).solid_render {
+                        break;
+                    }
+                }
+            }
+        }
+        if heights.is_empty() {
+            return self.water_plane_memo.get();
+        }
+        heights.sort_by(f32::total_cmp);
+        let found = heights[heights.len() / 2];
+        // The plane in use stays while it is still one of the surfaces in reach, so two
+        // lakes at different heights do not make the mirror flicker between them.
+        // (A quarter of the columns on it keeps it.)
+        let plane = match self.water_plane_memo.get() {
+            Some(last)
+                if 4 * heights.iter().filter(|h| (*h - last).abs() < 0.05).count()
+                    >= heights.len() =>
+            {
+                last
+            }
+            _ => found,
+        };
+        self.water_plane_memo.set(Some(plane));
+        Some(plane)
+    }
     /// `FluidState.getHeight` and whether it is a source, for `fluid` or,
     /// with `None`, any fluid (`ClipContext.Fluid.ANY`).
     fn fluid_height_of(&self, x: i32, y: i32, z: i32, fluid: Option<Fluid>) -> Option<(f32, bool)> {

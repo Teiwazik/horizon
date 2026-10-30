@@ -106,7 +106,47 @@ impl Game<'_> {
         ui.languages = lang::available(&[&root]);
         self.refresh_pack_lists();
     }
+    /// While the pack screen is open, `resourcepacks/` is looked at once a second and the
+    /// list found again when its packs changed (`PackSelectionScreen.tick`'s watcher).
+    fn watch_pack_folder(&mut self) {
+        if self.ui.options.page() != Page::Packs {
+            self.pack_folder = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .pack_folder
+            .as_ref()
+            .is_some_and(|(at, _)| now.duration_since(*at).as_secs_f32() < 1.0)
+        {
+            return;
+        }
+        let signature: Vec<(String, u64, Option<std::time::SystemTime>)> =
+            std::fs::read_dir(super::packs::packs_dir())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| {
+                    let meta = e.metadata().ok();
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        meta.as_ref().map_or(0, |m| m.len()),
+                        meta.and_then(|m| m.modified().ok()),
+                    )
+                })
+                .collect();
+        let changed = self
+            .pack_folder
+            .as_ref()
+            .is_some_and(|(_, seen)| *seen != signature);
+        self.pack_folder = Some((now, signature));
+        if changed {
+            let infos = super::packs::pack_infos(&self.vanilla_root());
+            self.ui.options.update_pack_infos(infos);
+        }
+    }
     pub(super) fn draw_options(&mut self, batch: &mut HudBatch) {
+        self.watch_pack_folder();
         let mut ui = std::mem::take(&mut self.ui.options);
         ui.draw(&self.settings, batch, &self.gui.atlas, self.cursor);
         self.ui.options = ui;
@@ -240,6 +280,18 @@ impl Game<'_> {
                 }
                 // Saved; the next frame's `shader_pack_inputs` loads the pick.
                 Event::ShaderPack => self.settings.save(&Self::options_path()),
+                Event::ShaderPackOptions(i) => {
+                    if let Some(pack) = self.settings.shader_packs.get(i) {
+                        let path = Self::shader_packs_dir().join(&pack.file);
+                        if let Err(e) = horizon_client::shader_pack_list::save_values(
+                            &path,
+                            &pack.options,
+                            &pack.values,
+                        ) {
+                            log::warn!("shader pack options of {}: {e}", pack.file);
+                        }
+                    }
+                }
                 Event::OpenShaderPackFolder => {
                     let dir = Self::shader_packs_dir();
                     let _ = std::fs::create_dir_all(&dir);

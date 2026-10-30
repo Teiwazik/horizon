@@ -1,5 +1,5 @@
 //! Schema 1 of `horizon-shaders.toml` and the `.hshader` package.
-use horizon_shader_api::{MANIFEST, Manifest, OptionKind, Pack};
+use horizon_shader_api::{MANIFEST, Manifest, OptionKind, Pack, PageItem};
 use std::{collections::BTreeMap, path::Path};
 
 fn sample_dir() -> &'static Path {
@@ -27,7 +27,7 @@ fn reads_every_key_of_schema_1() {
             m.version.as_str(),
             m.api.as_str()
         ),
-        ("sample_pack", "Sample Pack", "1.0.0", "0.1")
+        ("sample_pack", "Sample Pack", "1.0.0", "0.5")
     );
     assert_eq!(m.authors, ["Horizon"]);
     assert_eq!(m.license.as_deref(), Some("MIT"));
@@ -93,7 +93,7 @@ fn reads_every_key_of_schema_1() {
 #[test]
 fn the_smallest_manifest() {
     let m = Manifest::parse(
-        "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.1\"\n[[post]]\nfile = \"a.wgsl\"\n",
+        "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n[[post]]\nfile = \"a.wgsl\"\n",
     )
     .unwrap();
     assert!(m.sky.is_none() && m.options.is_empty() && m.budget.gpu_ms.is_none());
@@ -105,8 +105,8 @@ fn refuses_what_this_build_does_not_read() {
     let cases = [
         (text.replace("schema = 1", "schema = 2"), "schema 2"),
         (
-            text.replace("api = \"0.1\"", "api = \"0.2\""),
-            "shader API 0.2",
+            text.replace("api = \"0.5\"", "api = \"0.6\""),
+            "shader API 0.6",
         ),
         (
             text.replace("\"sample_pack\"", "\"Sample\""),
@@ -162,10 +162,10 @@ fn refuses_what_this_build_does_not_read() {
         assert!(e.contains(needle), "{needle:?} not in {e:?}");
         assert!(e.starts_with(MANIFEST), "{e}");
     }
-    let no_stage = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.1\"\n";
+    let no_stage = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n";
     assert!(refused(no_stage).contains("no stage"));
-    let many = (0..9).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
-    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("9 post passes"));
+    let many = (0..13).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
+    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("13 post passes"));
 }
 
 #[test]
@@ -234,5 +234,146 @@ fn refuses_files_a_pack_does_not_use() {
         Pack::from_files(files)
             .unwrap_err()
             .contains("missing at the pack's root")
+    );
+}
+
+#[test]
+fn reads_materials_textures_the_vertex_stage_and_the_sky_keys() {
+    let m = Manifest::parse(
+        "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n\
+         [sky]\nfile = \"sky.wgsl\"\nclouds = false\nsun = false\nstars = false\n\
+         [material]\nfile = \"m.wgsl\"\nfog = false\n\
+         [vertex]\nfile = \"v.wgsl\"\n\
+         [[textures]]\nid = \"noise\"\nfile = \"noise.png\"\nfilter = \"nearest\"\nwrap = \"clamp\"\n\
+         [[materials]]\nid = 2\nsprites = [\"block/*_leaves\", \"block/vine\"]\n\
+         [[materials]]\nid = 3\nsprites = [\"mod:block/glow*\", \"block/*\"]\n",
+    )
+    .unwrap();
+    assert_eq!(m.sky.as_ref().unwrap().clouds, Some(false));
+    assert_eq!(m.sky.as_ref().unwrap().sun, Some(false));
+    assert_eq!(m.sky.as_ref().unwrap().stars, Some(false));
+    assert_eq!(m.material.as_ref().unwrap().fog, Some(false));
+    assert_eq!(m.vertex.as_ref().unwrap().file, "v.wgsl");
+    let t = &m.textures[0];
+    assert_eq!(
+        (t.id.as_str(), t.file.as_str(), t.linear, t.repeat),
+        ("noise", "noise.png", false, false)
+    );
+    // The first entry that matches wins; a pattern without a namespace means any.
+    assert_eq!(m.material_of("block/oak_leaves"), 2);
+    assert_eq!(m.material_of("minecraft:block/vine"), 2);
+    assert_eq!(m.material_of("other:block/oak_leaves"), 2);
+    assert_eq!(m.material_of("mod:block/glowing"), 3);
+    assert_eq!(m.material_of("block/stone"), 3);
+    assert_eq!(m.material_of("item/stick"), 0);
+}
+
+#[test]
+fn refuses_the_new_keys_where_they_do_not_belong() {
+    let head = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n";
+    let cases = [
+        (
+            "[[post]]\nfile = \"a.wgsl\"\nclouds = false\n",
+            "`clouds` is a key of [sky] only",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\nsun = false\n",
+            "`sun` is a key of [sky] only",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\nstars = false\n",
+            "`stars` is a key of [sky] only",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\nfog = false\n",
+            "`fog` is a key of [material] only",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\n[vertex]\nfile = \"v.wgsl\"\n",
+            "[vertex] needs a [material]",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\n[[materials]]\nid = 0\nsprites = []\n",
+            "material id 0",
+        ),
+        (
+            "[[post]]\nfile = \"a.wgsl\"\n[[textures]]\nid = \"t\"\nfile = \"t.jpg\"\n",
+            ".png file",
+        ),
+    ];
+    for (body, needle) in cases {
+        let e = refused(&format!("{head}{body}"));
+        assert!(e.contains(needle), "{needle:?} not in {e:?}");
+    }
+}
+
+#[test]
+fn reads_settings_pages_and_refuses_broken_links() {
+    let pages = "[[pages]]\nid = \"main\"\nname = \"Sample\"\nitems = [\"saturation\", \"\", \"page:more\"]\n\
+                 [[pages]]\nid = \"more\"\nname = \"More\"\ndescription = \"The rest.\"\ncolumns = 1\n\
+                 items = [\"tonemap\", \"samples\", \"vignette\"]\n";
+    let m = Manifest::parse(&format!("{}{pages}", sample_text())).unwrap();
+    assert_eq!(m.pages.len(), 2);
+    assert_eq!(
+        m.pages[0].items,
+        [PageItem::Option(0), PageItem::Empty, PageItem::Page(1)]
+    );
+    assert_eq!(
+        (m.pages[1].columns, m.pages[1].description.as_str()),
+        (1, "The rest.")
+    );
+    assert_eq!(
+        m.pages[1].items,
+        [PageItem::Option(3), PageItem::Option(2), PageItem::Option(1)]
+    );
+    // Without pages, the settings show every option on one.
+    assert!(Manifest::parse(&sample_text()).unwrap().pages.is_empty());
+    let cases = [
+        (pages.replace("\"page:more\"", "\"page:less\""), "no page \"less\""),
+        (pages.replace("\"page:more\"", "\"page:main\""), "links to itself"),
+        (pages.replace("\"tonemap\"", "\"tone\""), "no option \"tone\""),
+        (pages.replace("\"samples\",", "\"tonemap\","), "on the page twice"),
+        (pages.replace("columns = 1", "columns = 3"), "1 or 2"),
+        (pages.replace("id = \"more\"", "id = \"main\""), "declared twice"),
+        (pages.replace(", \"vignette\"]", "]"), "option \"vignette\" is on no page"),
+        (pages.replace("\"page:more\"", "\"\""), "page \"more\" can't be reached"),
+    ];
+    for (pages, needle) in cases {
+        let e = refused(&format!("{}{pages}", sample_text()));
+        assert!(e.contains(needle), "{needle:?} not in {e:?}");
+    }
+}
+
+#[test]
+fn reads_solid_shadow_materials_and_refuses_unknown_ids() {
+    let head = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n\
+                [[post]]\nfile = \"a.wgsl\"\n[[materials]]\nid = 2\nsprites = [\"block/*_leaves\"]\n";
+    let m = Manifest::parse(&format!("{head}[shadow]\nsolid_materials = [2]\n")).unwrap();
+    assert_eq!(m.shadow.unwrap().solid_materials, [2]);
+    let e = refused(&format!("{head}[shadow]\nsolid_materials = [3]\n"));
+    assert!(e.contains("no [[materials]] entry has id 3"), "{e}");
+}
+
+#[test]
+fn reads_post_outputs_and_their_scales() {
+    let head = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.5\"\n";
+    let pass = |file: &str, extra: &str| format!("[[post]]\nfile = \"{file}\"\n{extra}");
+    let m = Manifest::parse(&format!(
+        "{head}{}{}{}{}",
+        pass("a.wgsl", "output = \"glow\"\nscale = 0.5\n"),
+        pass("b.wgsl", "output = \"soft\"\nscale = 0.25\n"),
+        pass("c.wgsl", "output = \"glow\"\nscale = 0.5\n"),
+        pass("d.wgsl", "")
+    ))
+    .unwrap();
+    assert_eq!(m.post_targets(), [("glow", 0.5), ("soft", 0.25)]);
+    let one = |extra: &str| format!("{head}{}{}", pass("a.wgsl", extra), pass("z.wgsl", ""));
+    assert!(refused(&one("scale = 0.5\n")).contains("writes an `output`"));
+    assert!(refused(&one("scale = 0.3\noutput = \"x\"\n")).contains("is not one of"));
+    assert!(refused(&one("output = \"previous\"\n")).contains("not a free WGSL name"));
+    assert!(refused(&format!("{head}{}", pass("a.wgsl", "output = \"x\"\n"))).contains("last"));
+    assert!(
+        refused(&format!("{head}[sky]\nfile = \"s.wgsl\"\nscale = 0.5\n"))
+            .contains("[[post]] only")
     );
 }

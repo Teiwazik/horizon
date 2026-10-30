@@ -151,6 +151,30 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 /// A packed atlas image: sprite name, size and RGBA pixels.
 type PackedImage = (String, u32, u32, Vec<u8>);
+/// How many times its default size a pack's texture keeps in the atlas.
+const GUI_DETAIL: u32 = 8;
+/// `pixels` (`w` by `h` RGBA) shrunk by `factor` a side, each texel the mean of the
+/// `factor` squared it covers.
+fn box_down(pixels: &[u8], w: u32, h: u32, factor: u32) -> Vec<u8> {
+    let (ow, oh, f) = ((w / factor) as usize, (h / factor) as usize, factor as usize);
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for y in 0..oh {
+        for x in 0..ow {
+            let mut sum = [0u32; 4];
+            for dy in 0..f {
+                let row = ((y * f + dy) * w as usize + x * f) * 4;
+                for texel in pixels[row..row + f * 4].chunks_exact(4) {
+                    for (s, &v) in sum.iter_mut().zip(texel) {
+                        *s += u32::from(v);
+                    }
+                }
+            }
+            let n = (f * f) as u32;
+            out.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+        }
+    }
+    out
+}
 /// A frame of an animated strip at `x, y`, nearest-resampled to the longer
 /// side of the frame: array layers are square, as `Sprites::load` keeps them
 /// for the world's sprite arrays.
@@ -405,6 +429,13 @@ impl HudAtlas {
                 .with_extension("")
                 .to_string_lossy()
                 .replace('\\', "/");
+            // LabPBR's normal and specular maps beside a texture are the world's
+            // (sprites.rs), not images to draw.
+            if let Some(base) = name.strip_suffix("_n").or_else(|| name.strip_suffix("_s"))
+                && textures.join(format!("{base}.png")).is_file()
+            {
+                return None;
+            }
             let (mut w, mut h, pixels) = decode(path).ok()?;
             let mcmeta = fs::read_to_string(path.with_extension("png.mcmeta")).ok();
             let animation = mcmeta
@@ -446,6 +477,21 @@ impl HudAtlas {
                     if frames { (side, side) } else { (dw, dh) }
                 })
                 .filter(|&size| size != (w, h));
+            // High-resolution packs (256x and up) would overflow the atlas: a texture
+            // over GUI_DETAIL times its default size is averaged down to that, which the
+            // GUI, drawing it at the default size, never shows more of.
+            let (w, h, pixels) = match gui_size {
+                Some((gw, gh)) if w > gw * GUI_DETAIL && h > gh * GUI_DETAIL => {
+                    let factor = (w / (gw * GUI_DETAIL)).min(h / (gh * GUI_DETAIL));
+                    let factor = 1 << factor.ilog2();
+                    if w % factor == 0 && h % factor == 0 {
+                        (w / factor, h / factor, box_down(&pixels, w, h, factor))
+                    } else {
+                        (w, h, pixels)
+                    }
+                }
+                _ => (w, h, pixels),
+            };
             let flags = mcmeta.as_deref().and_then(TextureFlags::from_mcmeta);
             let animated = frames && animation.is_some();
             let (gw, gh) = gui_size.unwrap_or((w, h));

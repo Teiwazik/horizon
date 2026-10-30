@@ -74,7 +74,13 @@ impl Sides {
     /// Calls `draw(first, count)` for each run of quads an eye at `eye`
     /// (relative to the mesh's origin) can see the front of, nearest the
     /// start first. Empty buckets do not break a run.
-    pub fn visible(&self, eye: [f32; 3], mut draw: impl FnMut(u32, u32)) {
+    pub fn visible(&self, eye: [f32; 3], draw: impl FnMut(u32, u32)) {
+        self.visible_from(eye, eye[1], draw);
+    }
+
+    /// `visible` for every eye from `eye` straight down to the height `low`: the camera and
+    /// its mirror below a water plane, which differ only in y.
+    pub fn visible_from(&self, eye: [f32; 3], low: f32, mut draw: impl FnMut(u32, u32)) {
         let mut start = 0;
         let mut run: Option<u32> = None;
         for (i, bucket) in BUCKETS.iter().enumerate() {
@@ -84,6 +90,7 @@ impl Sides {
             }
             let seen = match *bucket {
                 Bucket::Side(axis, true) => eye[axis] > self.planes[i] - MARGIN,
+                Bucket::Side(1, false) => low < self.planes[i] + MARGIN,
                 Bucket::Side(axis, false) => eye[axis] < self.planes[i] + MARGIN,
                 Bucket::Other => true,
             };

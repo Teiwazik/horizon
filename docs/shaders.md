@@ -9,7 +9,7 @@ Horizon's own format.
 
 | Part | Where | State |
 |---|---|---|
-| Format, stages, check | `crates/horizon-shader-api` | API 0.1, experimental |
+| Format, stages, check | `crates/horizon-shader-api` | API 0.5, experimental |
 | Authoring tool | `horizon-shader` (same crate) | `new`, `check`, `pack` |
 | Templates | `crates/horizon-shader-api/templates/` | post, sky, material |
 | Example pack | `crates/horizon-shader-api/packs/golden_hour` | a warm sky and two post passes |
@@ -28,7 +28,7 @@ horizon-shader pack my_pack                         # check, then write my_pack-
 `check` prints each stage with its cost, and the pack's SHA-256:
 
 ```
-golden_hour 1.0.0 (shader API 0.1): ok
+golden_hour 1.0.0 (shader API 0.5): ok
   sky       Warm horizon                     99 expressions, 0 texture reads
   post      Glow                            192 expressions, 3 texture reads
   post      Colour grade                    201 expressions, 2 texture reads
@@ -38,7 +38,7 @@ golden_hour 1.0.0 (shader API 0.1): ok
 or every problem, at its file, line and column:
 
 ```
-my_pack 0.1.0 (shader API 0.1): FAILED
+my_pack 0.1.0 (shader API 0.5): FAILED
   post.wgsl:9:1: expected `;`, found "}"
 ```
 
@@ -114,6 +114,25 @@ override saturation: f32 = 1.15;   // type = "float"; bool → bool, int → i32
 
 The game shows the options on the pack's settings screen. Branches on an option are on a constant, so the GPU
 skips the side that isn't taken.
+
+The settings screen shows every option two a row, unless the pack lays them out in `[[pages]]`: the screen opens on
+the first page, and an item `"page:<id>"` is a button opening another, so options can be grouped into categories and
+those into subcategories. `""` leaves a slot empty, and `columns = 1` gives a page full-width buttons:
+
+```toml
+[[pages]]
+id = "main"
+name = "My Pack"
+items = ["page:lighting", "page:water"]
+
+[[pages]]
+id = "lighting"
+name = "Lighting"
+description = "Shadows and the light of blocks."   # the tooltip of the button opening it
+items = ["shadow_softness", "block_light"]
+```
+
+Every page has to be reached from the first and every option has to be on a page, or the check refuses the pack.
 
 ## What the check does
 
