@@ -166,27 +166,64 @@ fn shares(budget: u64, pbr: bool) -> (u64, u64) {
         (budget, 0)
     }
 }
+/// The mean of `texels` (RGBA). A colour's texels count by their alpha: a cutout's transparent
+/// ones often hold black, which would darken what shows around them. A LabPBR map's alpha is
+/// data, so its channels (`color` false) are plain means.
+fn mean_texel<'a>(texels: impl Iterator<Item = &'a [u8]>, color: bool) -> [u8; 4] {
+    let (mut sum, mut weighted, mut n) = ([0u32; 4], [0u64; 3], 0u32);
+    for texel in texels {
+        for (s, &v) in sum.iter_mut().zip(texel) {
+            *s += u32::from(v);
+        }
+        for (w, &v) in weighted.iter_mut().zip(texel) {
+            *w += u64::from(v) * u64::from(texel[3]);
+        }
+        n += 1;
+    }
+    let mut out = sum.map(|s| ((s + n / 2) / n) as u8);
+    let alpha = u64::from(sum[3]);
+    if color && alpha > 0 {
+        for (o, w) in out.iter_mut().zip(weighted) {
+            *o = ((w + alpha / 2) / alpha) as u8;
+        }
+    }
+    out
+}
+/// Whether a colour's `pixels` are a cutout: every texel in or out. Averaged down it must stay
+/// one, or the partial alphas of the mean would send it to the translucent pass.
+fn is_cutout(pixels: &[u8], color: bool) -> bool {
+    color && pixels.chunks_exact(4).all(|p| p[3] == 0 || p[3] == 255)
+}
+/// A cutout's averaged alpha at texel (`x`, `y`) through an ordered dither: in or out, about as
+/// many in as the texels it stands for, however sparse they are.
+fn cutout_alpha(alpha: u8, x: usize, y: usize) -> u8 {
+    const BAYER: [[u16; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    if u16::from(alpha) * 16 > (BAYER[y % 4][x % 4] * 2 + 1) * 255 / 2 {
+        255
+    } else {
+        0
+    }
+}
 /// `frame` (a square RGBA `side`) averaged down by whole powers of two to at most `max`.
-fn shrink(frame: Vec<u8>, side: u32, max: u32) -> (u32, Vec<u8>) {
+fn shrink(frame: Vec<u8>, side: u32, max: u32, color: bool) -> (u32, Vec<u8>) {
     if side <= max || !side.is_power_of_two() || !max.is_power_of_two() {
         return (side, frame);
     }
     let (out_side, f) = (max as usize, (side / max) as usize);
     let side = side as usize;
+    let cutout = is_cutout(&frame, color);
     let mut out = Vec::with_capacity(out_side * out_side * 4);
     for y in 0..out_side {
         for x in 0..out_side {
-            let mut sum = [0u32; 4];
-            for dy in 0..f {
+            let texels = (0..f).flat_map(|dy| {
                 let row = ((y * f + dy) * side + x * f) * 4;
-                for texel in frame[row..row + f * 4].chunks_exact(4) {
-                    for (s, &v) in sum.iter_mut().zip(texel) {
-                        *s += u32::from(v);
-                    }
-                }
+                frame[row..row + f * 4].chunks_exact(4)
+            });
+            let mut texel = mean_texel(texels, color);
+            if cutout {
+                texel[3] = cutout_alpha(texel[3], x, y);
             }
-            let n = (f * f) as u32;
-            out.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+            out.extend(texel);
         }
     }
     (max, out)
@@ -270,6 +307,7 @@ impl Sprites {
                                     shrink_image(
                                         image,
                                         if is_map(path) { map_cap } else { color_cap },
+                                        !is_map(path),
                                     )
                                 };
                                 Some((path.clone(), image))
@@ -384,7 +422,7 @@ impl Sprites {
                 ]) {
                     match map {
                         Some((from, pixels)) => {
-                            let (from, pixels) = shrink(pixels, from, pbr_size);
+                            let (from, pixels) = shrink(pixels, from, pbr_size, false);
                             out.extend(resample(&pixels, from, pbr_size));
                         }
                         None => out.extend(flat(default)),
@@ -557,7 +595,10 @@ impl Sprites {
         let (color_bytes, _) = shares(texture_budget(), pbr.iter().any(Option::is_some));
         let cap = side_within(side, LAYERS_AT_LEAST, color_bytes);
         let (side, frames) = if side > cap && side.is_power_of_two() {
-            let frames: Vec<_> = frames.into_iter().map(|f| shrink(f, side, cap).1).collect();
+            let frames: Vec<_> = frames
+                .into_iter()
+                .map(|f| shrink(f, side, cap, true).1)
+                .collect();
             (cap, frames)
         } else {
             (side, frames)
@@ -647,6 +688,7 @@ impl Sprites {
             frame,
             side,
             side_within(side, LAYERS_AT_LEAST, map_bytes),
+            false,
         ))
     }
 }
@@ -690,7 +732,7 @@ fn decode(path: &Path) -> Result<Image> {
 
 /// `image` averaged down by the largest power of two that keeps its shorter side at least
 /// `max` and divides both sides.
-fn shrink_image(image: Image, max: u32) -> Image {
+fn shrink_image(image: Image, max: u32, color: bool) -> Image {
     let short = image.width.min(image.height);
     let mut f = 1;
     while short / (f * 2) >= max.max(1)
@@ -705,20 +747,19 @@ fn shrink_image(image: Image, max: u32) -> Image {
     }
     let (w, h, f) = (image.width as usize, image.height as usize, f as usize);
     let (ow, oh) = (w / f, h / f);
+    let cutout = is_cutout(&image.pixels, color);
     let mut out = Vec::with_capacity(ow * oh * 4);
     for y in 0..oh {
         for x in 0..ow {
-            let mut sum = [0u32; 4];
-            for dy in 0..f {
+            let texels = (0..f).flat_map(|dy| {
                 let row = ((y * f + dy) * w + x * f) * 4;
-                for texel in image.pixels[row..row + f * 4].chunks_exact(4) {
-                    for (s, &v) in sum.iter_mut().zip(texel) {
-                        *s += u32::from(v);
-                    }
-                }
+                image.pixels[row..row + f * 4].chunks_exact(4)
+            });
+            let mut texel = mean_texel(texels, color);
+            if cutout {
+                texel[3] = cutout_alpha(texel[3], x, y);
             }
-            let n = (f * f) as u32;
-            out.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+            out.extend(texel);
         }
     }
     Image {
@@ -786,6 +827,41 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cutouts_black_transparent_texels_do_not_darken_it_when_shrunk() {
+        let frame = [
+            [200, 180, 100, 255],
+            [0, 0, 0, 0],
+            [200, 180, 100, 255],
+            [0, 0, 0, 0],
+        ]
+        .concat();
+        let (side, color) = super::shrink(frame.clone(), 2, 1, true);
+        assert_eq!((side, color), (1, vec![200, 180, 100, 255]));
+        // A map's alpha is data: its channels stay plain means.
+        assert_eq!(super::shrink(frame, 2, 1, false).1, vec![100, 90, 50, 128]);
+    }
+    #[test]
+    fn a_cutout_stays_one_when_shrunk_and_keeps_its_coverage() {
+        // One texel in four solid, as sparse as redstone dust: 64 texels to 16 of them.
+        let side = 64usize;
+        let mut frame = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                if x % 2 == 0 && y % 2 == 0 {
+                    frame[(y * side + x) * 4..][..4].copy_from_slice(&[120, 20, 20, 255]);
+                }
+            }
+        }
+        let (_, small) = super::shrink(frame, 64, 16, true);
+        let alphas: Vec<u8> = small.chunks_exact(4).map(|p| p[3]).collect();
+        assert!(alphas.iter().all(|&a| a == 0 || a == 255));
+        let solid = alphas.iter().filter(|&&a| a == 255).count();
+        assert_eq!(solid, alphas.len() / 4);
+        // Real partial alpha (glass) is not a cutout and stays partial.
+        let glass = [120u8, 120, 120, 100].repeat(4);
+        assert_eq!(super::shrink(glass, 2, 1, true).1[3], 100);
+    }
     use super::*;
     #[test]
     fn mipmap_option_keeps_real_16px_reductions() {
