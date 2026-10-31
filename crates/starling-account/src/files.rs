@@ -96,12 +96,23 @@ struct Item {
     size: u64,
 }
 
+/// One agent for every download of the run: its connections stay open and are used again, so
+/// the thousands of small asset files go over the download workers' few connections instead of
+/// a connection and a TLS handshake each, which a phone's network (and its router) does not
+/// keep up with for long.
 pub(crate) fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(20))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent(&format!("starling/{}", env!("CARGO_PKG_VERSION")))
-        .build()
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(20))
+                .timeout_read(Duration::from_secs(60))
+                // A connection kept for each download worker, and some to spare.
+                .max_idle_connections_per_host(8)
+                .user_agent(&format!("starling/{}", env!("CARGO_PKG_VERSION")))
+                .build()
+        })
+        .clone()
 }
 
 pub(crate) fn sha1_hex(data: &[u8]) -> String {
@@ -129,20 +140,58 @@ fn sha1_file(path: &Path) -> Option<String> {
     )
 }
 
+/// How a try at a download failed: worth another (the network dropped for a moment, as a
+/// phone's does when it changes networks, or the server was busy), or not.
+pub(crate) enum Failure {
+    Again(String),
+    Final(String),
+}
+
+/// Tries before a download's error is the player's.
+const TRIES: u32 = 5;
+/// The wait before the second try; it doubles before each one after.
+const FIRST_WAIT: Duration = Duration::from_secs(1);
+
+/// `attempt` until it succeeds, a final failure, or [`TRIES`] tries.
+pub(crate) fn retrying<T>(mut attempt: impl FnMut() -> Result<T, Failure>) -> Result<T, String> {
+    let mut wait = FIRST_WAIT;
+    for _ in 1..TRIES {
+        match attempt() {
+            Ok(done) => return Ok(done),
+            Err(Failure::Final(e)) => return Err(e),
+            Err(Failure::Again(_)) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+        }
+    }
+    attempt().map_err(|(Failure::Again(e) | Failure::Final(e))| e)
+}
+
 /// `url`'s body, which must hash to `sha1`; the error names the file, never more of the URL.
 fn fetch_checked(url: &str, sha1: &str, name: &str) -> Result<Vec<u8>, String> {
-    let response = agent().get(url).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => format!("Mojang's server refused {name} ({code})."),
-        ureq::Error::Transport(t) => format!(
-            "Could not download {name} ({}). Check your internet connection.",
-            crate::transport_detail(&t)
-        ),
+    let body = retrying(|| {
+        let response = agent().get(url).call().map_err(|e| match e {
+            ureq::Error::Status(code, _) => {
+                let e = format!("Mojang's server refused {name} ({code}).");
+                if code >= 500 {
+                    Failure::Again(e)
+                } else {
+                    Failure::Final(e)
+                }
+            }
+            ureq::Error::Transport(t) => Failure::Again(format!(
+                "Could not download {name} ({}). Check your internet connection.",
+                crate::transport_detail(&t)
+            )),
+        })?;
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut body)
+            .map_err(|_| Failure::Again(format!("The download of {name} was cut off.")))?;
+        Ok(body)
     })?;
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut body)
-        .map_err(|_| format!("The download of {name} was cut off."))?;
     match sha1_hex(&body) {
         actual if actual == sha1 => Ok(body),
         _ => Err(format!(

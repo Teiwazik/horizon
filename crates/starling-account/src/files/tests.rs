@@ -6,13 +6,23 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::sync::Arc;
 
-/// A one-thread HTTP/1.1 server answering GETs from `files` (path → body); it counts requests.
-fn serve(files: Arc<Mutex<HashMap<String, Vec<u8>>>>, hits: Arc<AtomicU64>) -> String {
+/// A one-thread HTTP/1.1 server answering GETs from `files` (path → body); it counts requests,
+/// and closes the next `drops` connections unanswered, as a network that drops.
+fn serve(
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    hits: Arc<AtomicU64>,
+    drops: Arc<AtomicU64>,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
+            // One thread serves: nothing else changes `drops` between these two.
+            if drops.load(Ordering::Relaxed) > 0 {
+                drops.fetch_sub(1, Ordering::Relaxed);
+                continue;
+            }
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             if reader.read_line(&mut line).is_err() {
@@ -46,6 +56,7 @@ struct Fake {
     base: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     hits: Arc<AtomicU64>,
+    drops: Arc<AtomicU64>,
     pins: Pins,
 }
 
@@ -54,7 +65,8 @@ struct Fake {
 fn fake() -> Fake {
     let files = Arc::new(Mutex::new(HashMap::new()));
     let hits = Arc::new(AtomicU64::new(0));
-    let base = serve(files.clone(), hits.clone());
+    let drops = Arc::new(AtomicU64::new(0));
+    let base = serve(files.clone(), hits.clone(), drops.clone());
     let put = |path: &str, body: Vec<u8>| -> String {
         let sha1 = sha1_hex(&body);
         files.lock().unwrap().insert(path.to_owned(), body);
@@ -104,7 +116,24 @@ fn fake() -> Fake {
         base,
         files,
         hits,
+        drops,
     }
+}
+
+#[test]
+fn a_network_that_drops_for_a_moment_is_tried_again() {
+    let f = fake();
+    let root = std::env::temp_dir().join(format!("starling-files-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // Two connections closed unanswered: the file they were for comes on the third try.
+    f.drops.store(2, Ordering::Relaxed);
+    let got = download(&sources(&f), &f.pins, &root, ALL, &|_| {}, &|| false).unwrap();
+    assert_eq!(f.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        std::fs::read(&got.client_jar).unwrap(),
+        b"made-up client jar"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn sources(f: &Fake) -> Sources {

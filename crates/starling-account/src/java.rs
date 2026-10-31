@@ -3,6 +3,7 @@
 //! Classpath Exception; sources and build scripts at github.com/AngelAuraMC/angelauramc-openjdk-build).
 //! It is fetched once, checked against the hash pinned here, and unpacked in a folder of its own;
 //! the preparer runs Mojang's code in it (horizon-prepare's exporters), and it can go afterwards.
+use crate::files::Failure;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -50,28 +51,47 @@ pub fn install(
     std::fs::write(dir.join(INSTALLED), runtime.sha256).map_err(|e| e.to_string())
 }
 
-/// The archive into `path`, through a `.part` file, checked as it streams.
+/// The archive into `path`, through a `.part` file, checked as it streams; tried again from the
+/// start when the network drops ([`crate::files::retrying`]).
 fn fetch(
     runtime: &Runtime,
     path: &Path,
     progress: &dyn Fn(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
+    crate::files::retrying(|| fetch_once(runtime, path, progress, cancelled))
+}
+
+fn fetch_once(
+    runtime: &Runtime,
+    path: &Path,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), Failure> {
     const NAME: &str = "the Java runtime";
     let response = crate::files::agent()
         .get(runtime.url)
         .call()
         .map_err(|e| match e {
-            ureq::Error::Status(code, _) => format!("GitHub refused {NAME} ({code})."),
-            ureq::Error::Transport(t) => format!(
+            ureq::Error::Status(code, _) => {
+                let e = format!("GitHub refused {NAME} ({code}).");
+                if code >= 500 {
+                    Failure::Again(e)
+                } else {
+                    Failure::Final(e)
+                }
+            }
+            ureq::Error::Transport(t) => Failure::Again(format!(
                 "Could not download {NAME} ({}). Check your internet connection.",
                 crate::transport_detail(&t)
-            ),
+            )),
         })?;
+    let disk = |e: String| Failure::Final(e);
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    let mut file = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+    let mut file =
+        std::fs::File::create(&part).map_err(|e| disk(format!("{}: {e}", part.display())))?;
     let mut reader = response.into_reader();
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 1 << 16];
@@ -80,11 +100,11 @@ fn fetch(
         if cancelled() {
             drop(file);
             let _ = std::fs::remove_file(&part);
-            return Err("Stopped.".into());
+            return Err(Failure::Final("Stopped.".into()));
         }
         let n = reader
             .read(&mut buffer)
-            .map_err(|_| format!("The download of {NAME} was cut off."))?;
+            .map_err(|_| Failure::Again(format!("The download of {NAME} was cut off.")))?;
         if n == 0 {
             break;
         }
@@ -94,10 +114,17 @@ fn fetch(
         }
         hasher.update(&buffer[..n]);
         file.write_all(&buffer[..n])
-            .map_err(|e| format!("{}: {e}", part.display()))?;
+            .map_err(|e| disk(format!("{}: {e}", part.display())))?;
         progress(fetched, runtime.size);
     }
     drop(file);
+    // Short: cut off on the way, worth another try. Whole but another file: never.
+    if fetched < runtime.size {
+        let _ = std::fs::remove_file(&part);
+        return Err(Failure::Again(format!(
+            "The download of {NAME} was cut off."
+        )));
+    }
     let digest: String = hasher
         .finalize()
         .iter()
@@ -105,11 +132,11 @@ fn fetch(
         .collect();
     if fetched != runtime.size || digest != runtime.sha256 {
         let _ = std::fs::remove_file(&part);
-        return Err(format!(
+        return Err(Failure::Final(format!(
             "{NAME} is not the file Starling expects (its hash differs)."
-        ));
+        )));
     }
-    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::rename(&part, path).map_err(|e| disk(format!("{}: {e}", path.display())))
 }
 
 /// A `.tar.xz` into `dir`, through a sibling folder renamed once whole. Entries stay inside it;
