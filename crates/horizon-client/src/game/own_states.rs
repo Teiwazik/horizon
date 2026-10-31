@@ -1,15 +1,21 @@
 //! A content mod's block with states of its own being placed (Starling; mod_content's `states`):
-//! the properties its template does not place are set as Create places its blocks. An `axis`
-//! follows the face clicked (RotatedPillarKineticBlock); a `facing` with up and down, the way
-//! the player looks, turned round unless they sneak (DirectionalKineticBlock); a `facing` or
-//! `horizontal_facing` of four, the way they face, turned round (HorizontalKineticBlock); an
-//! `axis_along_first` by the shafts beside it (DirectionalAxisKineticBlock) and a saw's
-//! `flipped`.
+//! the properties its template does not place are set as Create places its blocks. A kinetic
+//! part's `axis` is Create's even where its template (a chain's, by the face clicked) placed one
+//! ([`Game::kinetic_axis`]); a `facing` with up and down, the way the player looks, turned round
+//! unless they sneak (DirectionalKineticBlock); a `facing` or `horizontal_facing` of four, the
+//! way they face, turned round (HorizontalKineticBlock); an `axis_along_first` by the shafts
+//! beside it (DirectionalAxisKineticBlock) and a saw's `flipped`.
 use super::Game;
+use horizon_client::kinetics::KineticPart;
 use horizon_core::geometry::Direction;
 use horizon_core::position::BlockPos;
 use horizon_world::level::PlaceContext;
 use horizon_world::registry::BlockStateId;
+
+/// The axis (0 x, 1 y, 2 z) a direction is along.
+fn axis_of(d: [i32; 3]) -> usize {
+    d.iter().position(|v| *v != 0).unwrap_or(1)
+}
 
 /// `Direction.orderedByNearest(entity)[0]`: the way a look at `yaw` and `pitch` (degrees) points
 /// most along.
@@ -49,18 +55,6 @@ impl Game<'_> {
         ctx: &PlaceContext,
     ) -> BlockStateId {
         let name = self.res.facts().get(state).name.clone();
-        let Some(props) = self
-            .res
-            .kinetics()
-            .own_placement(&name)
-            .map(<[String]>::to_vec)
-        else {
-            return state;
-        };
-        let registry = self.pack.assets.registry;
-        let Some(mut s) = registry.state(state).cloned() else {
-            return state;
-        };
         let clicked: [i32; 3] = match ctx.face {
             Direction::Up => [0, 1, 0],
             Direction::Down => [0, -1, 0],
@@ -78,13 +72,30 @@ impl Game<'_> {
             flat
         };
         let horizontal = back(flat);
+        let axis = self.kinetic_axis(pos, &name, state, ctx, clicked, look);
+        let props = self
+            .res
+            .kinetics()
+            .own_placement(&name)
+            .map(<[String]>::to_vec);
+        if props.is_none() && axis.is_none() {
+            return state;
+        }
+        let registry = self.pack.assets.registry;
+        let Some(mut s) = registry.state(state).cloned() else {
+            return state;
+        };
+        // The template placed it by the face clicked: Create's instead.
+        if let Some(axis) = axis
+            && s.properties.contains_key("axis")
+        {
+            s.properties
+                .insert("axis".to_owned(), ["x", "y", "z"][axis].to_owned());
+        }
         let chute = name.ends_with("chute");
-        for p in &props {
+        for p in props.iter().flatten() {
             let candidates: Vec<&str> = match p.as_str() {
-                "axis" => {
-                    let axis = clicked.iter().position(|v| *v != 0).unwrap_or(1);
-                    vec![["x", "y", "z"][axis]]
-                }
+                "axis" => vec![["x", "y", "z"][axis.unwrap_or_else(|| axis_of(clicked))]],
                 // ChuteBlock.getStateForPlacement and updateChuteState: on a side, not
                 // sneaking, a diagonal one when a chute is below and behind; else straight down.
                 "facing" if chute => {
@@ -154,6 +165,84 @@ impl Game<'_> {
             self.with_level(|b, level, ticks| b.set_block(level, ticks, at, new, 3));
         }
         new
+    }
+
+    /// The axis Create places a kinetic part `state` (block `name`) about at `pos`, when its
+    /// class sets one: `RotatedPillarKineticBlock` and `AbstractEncasedShaftBlock` the axis of
+    /// the parts beside it with a shaft towards it, else the way the player looks (sneaking
+    /// beside such parts, the face clicked's); `CogWheelBlock.getAxisForPlacement` sneaking the
+    /// face clicked's, placed on a small cogwheel that one's, else the parts beside it, else the
+    /// face clicked's; `GearboxBlock` upright.
+    fn kinetic_axis(
+        &self,
+        pos: [i32; 3],
+        name: &str,
+        state: BlockStateId,
+        ctx: &PlaceContext,
+        clicked: [i32; 3],
+        look: [i32; 3],
+    ) -> Option<usize> {
+        let kinetics = self.res.kinetics();
+        match kinetics.get(state)?.kind {
+            KineticPart::Gearbox => Some(1),
+            // EncasedCogwheelBlock places its own way.
+            KineticPart::Cogwheel | KineticPart::LargeCogwheel if !name.contains("encased") => {
+                if ctx.sneaking {
+                    return Some(axis_of(clicked));
+                }
+                let on = [
+                    pos[0] - clicked[0],
+                    pos[1] - clicked[1],
+                    pos[2] - clicked[2],
+                ];
+                if let Some(cog) = kinetics
+                    .get(self.world.block(on[0], on[1], on[2]))
+                    .filter(|p| p.kind == KineticPart::Cogwheel)
+                {
+                    return Some(cog.axis);
+                }
+                Some(self.preferred_axis(pos).unwrap_or_else(|| axis_of(clicked)))
+            }
+            KineticPart::Shaft
+            | KineticPart::CrushingWheel
+            | KineticPart::Clutch
+            | KineticPart::Gearshift => Some(match self.preferred_axis(pos) {
+                Some(axis) if !ctx.sneaking => axis,
+                Some(_) => axis_of(clicked),
+                None => axis_of(look),
+            }),
+            _ => None,
+        }
+    }
+
+    /// `RotatedPillarKineticBlock.getPreferredAxis`: the axis of the parts beside `pos` with a
+    /// shaft towards it, none when two of them lie on different axes.
+    fn preferred_axis(&self, pos: [i32; 3]) -> Option<usize> {
+        let mut preferred = None;
+        // Iterate.directions: down, up, north, south, west, east.
+        for side in [
+            [0, -1, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+            [0, 0, 1],
+            [-1, 0, 0],
+            [1, 0, 0],
+        ] {
+            let at = [pos[0] + side[0], pos[1] + side[1], pos[2] + side[2]];
+            let towards = self
+                .res
+                .kinetics()
+                .get(self.world.block(at[0], at[1], at[2]))
+                .is_some_and(|p| p.ends().iter().any(|(face, _)| *face == side.map(|v| -v)));
+            if !towards {
+                continue;
+            }
+            if preferred.is_some_and(|p| p != axis_of(side)) {
+                return None;
+            }
+            preferred = Some(axis_of(side));
+        }
+        preferred
     }
 
     /// `DirectionalAxisKineticBlock.getStateForPlacement`'s `AXIS_ALONG_FIRST_COORDINATE` for a
