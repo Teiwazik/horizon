@@ -107,6 +107,10 @@ impl TextDisplayData {
         out.right_rotation = glam::Quat::from_array(from.right_rotation)
             .slerp(glam::Quat::from_array(self.right_rotation), t)
             .to_array();
+        // Display$LinearFloatInterpolator: Mth.lerp(t, previous, current).
+        out.shadow_radius = from.shadow_radius + t * (self.shadow_radius - from.shadow_radius);
+        out.shadow_strength =
+            from.shadow_strength + t * (self.shadow_strength - from.shadow_strength);
         let int = |a: i32, b: i32| a + (t * (b as f32 - a as f32)).floor() as i32;
         out.opacity = int(i32::from(from.opacity), i32::from(self.opacity)) as i8;
         out.background = (0..4).fold(0, |color, channel| {
@@ -540,5 +544,21 @@ mod tests {
         let (lo, hi) = culling_box(glam::DVec3::new(10.0, 64.0, -3.0), 2.0, 1.0);
         assert_eq!(lo, glam::DVec3::new(9.0, 64.0, -4.0));
         assert_eq!(hi, glam::DVec3::new(11.0, 65.0, -2.0));
+    }
+
+    /// `Display$LinearFloatInterpolator`: the shadow radius and strength blend
+    /// across the interpolation duration with the transformation's progress.
+    #[test]
+    fn the_blend_interpolates_shadow_radius_and_strength() {
+        let from = TextDisplayData::default();
+        let shown = TextDisplayData {
+            shadow_radius: 2.0,
+            shadow_strength: 0.25,
+            ..TextDisplayData::default()
+        };
+        let half = shown.blend(&from, 0.5);
+        assert_eq!((half.shadow_radius, half.shadow_strength), (1.0, 0.625));
+        assert_eq!(shown.blend(&from, 0.0).shadow_radius, 0.0);
+        assert_eq!(shown.blend(&from, 1.0).shadow_strength, 0.25);
     }
 }

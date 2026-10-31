@@ -372,6 +372,7 @@ pub enum Action {
     },
     Connect {
         address: String,
+        lan: bool,
     },
     /// Create World's Data Packs screen on the new world's pack folder.
     DataPacks {
@@ -2732,7 +2733,9 @@ impl Title {
                     self.mode = Mode::Main;
                     Action::None
                 }
-                crate::multiplayer::Outcome::Connect(address) => Action::Connect { address },
+                crate::multiplayer::Outcome::Connect { address, lan } => {
+                    Action::Connect { address, lan }
+                }
                 crate::multiplayer::Outcome::None => Action::None,
             },
             (Mode::Main, Some(5)) => {
@@ -3185,7 +3188,9 @@ impl Title {
         match &self.mode {
             Mode::Create { .. } => self.create_action(),
             Mode::Multiplayer(screen) => match screen.confirm() {
-                crate::multiplayer::Outcome::Connect(address) => Action::Connect { address },
+                crate::multiplayer::Outcome::Connect { address, lan } => {
+                    Action::Connect { address, lan }
+                }
                 _ => Action::None,
             },
             _ => Action::None,

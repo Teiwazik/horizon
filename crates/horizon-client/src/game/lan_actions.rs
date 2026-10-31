@@ -147,6 +147,9 @@ pub(super) struct GuestSwap {
     selected: usize,
     mode: horizon_client::command::args::GameMode,
     creative: bool,
+    /// The host's cached interaction ranges, restored after the guest turn.
+    entity_reach: f64,
+    block_reach: f64,
     /// The host's command permission, swapped for the guest's for its turn.
     permission: u8,
     xp: Experience,
@@ -405,6 +408,7 @@ impl Game<'_> {
         std::mem::swap(&mut self.carried, &mut g.carried);
         let selected = std::mem::replace(&mut self.selected, g.selected);
         let (mode, creative) = (self.mode, self.creative);
+        let (entity_reach, block_reach) = (self.entity_reach, self.block_reach);
         self.set_mode_raw(g.game_mode);
         let xp = std::mem::replace(
             &mut self.experience,
@@ -516,6 +520,8 @@ impl Game<'_> {
             self.apply_effect_status();
         }
         self.update_totem_ready();
+        self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
+        self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
         Some(GuestSwap {
             conn,
             i,
@@ -527,6 +533,8 @@ impl Game<'_> {
             selected,
             mode,
             creative,
+            entity_reach,
+            block_reach,
             permission,
             xp,
             host_keys,
@@ -599,6 +607,8 @@ impl Game<'_> {
             selected,
             mode,
             creative,
+            entity_reach,
+            block_reach,
             permission,
             xp,
             host_keys,
@@ -795,6 +805,8 @@ impl Game<'_> {
         let new_mode = self.mode_id();
         self.mode = mode;
         self.creative = creative;
+        self.entity_reach = entity_reach;
+        self.block_reach = block_reach;
         g.selected = std::mem::replace(&mut self.selected, selected);
         std::mem::swap(&mut self.inventory, &mut g.inventory);
         std::mem::swap(&mut self.armor, &mut g.armor);

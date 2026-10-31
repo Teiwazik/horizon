@@ -1579,3 +1579,79 @@ fn shapes_reject_unknown_or_missing_template_values() {
     }
     fs::remove_dir_all(scratch).unwrap();
 }
+
+/// A recipe's `result` is a stack's fields or a bare item id, as vanilla's `ItemStackTemplate`
+/// codec reads it (#4904): a mod's recipes make its own items either way.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn mod_recipe_results_are_an_item_stack_or_a_bare_item_id() {
+    if prepared().is_none() {
+        return;
+    }
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-results-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("ruby");
+    let _ = ruby_mod(&dir);
+    // Each recipe takes one item no vanilla recipe crafts alone and makes one of the mod's.
+    let cases = [
+        (
+            "stack",
+            "minecraft:diamond",
+            r#"{"id": "ruby:ruby"}"#,
+            "ruby:ruby",
+            1,
+        ),
+        (
+            "bare_id",
+            "minecraft:flint",
+            r#""ruby:ruby""#,
+            "ruby:ruby",
+            1,
+        ),
+        (
+            "bare_block_item",
+            "minecraft:ghast_tear",
+            r#""ruby:ruby_block""#,
+            "ruby:ruby_block",
+            1,
+        ),
+        (
+            "counted",
+            "minecraft:ender_pearl",
+            r#"{"id": "ruby:ruby_block", "count": 3}"#,
+            "ruby:ruby_block",
+            3,
+        ),
+    ];
+    for (name, input, result, _, _) in cases {
+        let recipe = format!(
+            r#"{{"type": "minecraft:crafting_shapeless", "ingredients": ["{input}"], "result": {result}}}"#
+        );
+        fs::write(dir.join(format!("data/ruby/recipe/{name}.json")), recipe).unwrap();
+    }
+    let package = horizon_mods::Package::read(&dir).unwrap();
+    let m = ContentMod {
+        id: "ruby".into(),
+        content: Content::read(&dir, &package.manifest).unwrap(),
+    };
+    let relative = Path::new("../../.local/horizon-client/26.3");
+    let root = resource_root(relative, std::slice::from_ref(&m), &scratch.join("cache")).unwrap();
+    let assets = Assets::load(&root).unwrap();
+    let new = assets.registry;
+    let facts = BlockFacts::load(&root, new).unwrap();
+    let items = Items::load(&root, new, &facts, &PackOverlay::NONE).unwrap();
+    let recipes = crate::crafting::Recipes::load(&root, &items, &PackOverlay::NONE).unwrap();
+    for (name, input, _, item, count) in cases {
+        let grid = [
+            Some(crate::items::ItemStack::new(input, 1)),
+            None,
+            None,
+            None,
+        ];
+        let (_, made) = recipes
+            .find(&grid, 2)
+            .unwrap_or_else(|| panic!("{name}: no recipe"));
+        assert_eq!((&*made.item, made.count), (item, count), "{name}");
+    }
+    fs::remove_dir_all(&scratch).unwrap();
+}

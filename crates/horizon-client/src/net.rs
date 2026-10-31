@@ -115,7 +115,22 @@ impl Session {
         lang: Arc<Language>,
         resources: PathBuf,
     ) -> Self {
-        Self::start(address, name, auth, info, lang, None, None, resources)
+        Self::start(
+            address, name, auth, info, lang, None, None, resources, false,
+        )
+    }
+    /// `ClientHandshakePacketListenerImpl.handleHello`: LAN entries can continue
+    /// after session authentication fails; the server still decides whether to admit them.
+    /// Only for entries selected from LAN discovery, not addresses classified by IP.
+    pub fn connect_lan(
+        address: &str,
+        name: &str,
+        auth: Option<Arc<AuthSession>>,
+        info: cfg::ClientInformation,
+        lang: Arc<Language>,
+        resources: PathBuf,
+    ) -> Self {
+        Self::start(address, name, auth, info, lang, None, None, resources, true)
     }
     /// `ConnectScreen.startConnecting` for a `transfer`: the cookies the
     /// server stored carry to the new connection (`TransferState`).
@@ -137,6 +152,7 @@ impl Session {
             None,
             Some(cookies),
             resources,
+            false,
         )
     }
     /// Join an integrated server through memory (`Connection.connectToLocalServer`).
@@ -147,7 +163,17 @@ impl Session {
         lang: Arc<Language>,
         resources: PathBuf,
     ) -> Self {
-        Self::start("local", name, None, info, lang, Some(pipe), None, resources)
+        Self::start(
+            "local",
+            name,
+            None,
+            info,
+            lang,
+            Some(pipe),
+            None,
+            resources,
+            false,
+        )
     }
     fn start(
         address: &str,
@@ -158,6 +184,7 @@ impl Session {
         local: Option<horizon_protocol::connection::Pipe>,
         cookies: Option<Cookies>,
         resources: PathBuf,
+        lan: bool,
     ) -> Self {
         let (send, events) = channel();
         let writer = Arc::new(Mutex::new(None));
@@ -188,6 +215,7 @@ impl Session {
                     &thread_cookies,
                     transferred,
                     &resources,
+                    lan,
                 );
                 let from_server = result.is_ok();
                 let reason = result.unwrap_or_else(|e| e);
@@ -426,7 +454,8 @@ fn connection_lost(e: horizon_protocol::Error, lang: &Language) -> String {
     }
 }
 
-/// The whole connection. Ok: why it ended for good (the server's reason, or
+/// `ClientHandshakePacketListenerImpl.handleHello`: the whole connection.
+/// Ok: why it ended for good (the server's reason, or
 /// a refusal no retry fixes); Err: the connection failed.
 fn run(
     local: Option<horizon_protocol::connection::Pipe>,
@@ -442,6 +471,7 @@ fn run(
     cookies: &Cookies,
     transferred: bool,
     resources: &Path,
+    lan: bool,
 ) -> Result<String, String> {
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
@@ -506,17 +536,27 @@ fn run(
                     .map_err(|err| format!("Protocol error: {err}"))?;
                 let secret = generate_secret().map_err(e)?;
                 if hello.should_authenticate {
-                    let account = auth.ok_or_else(|| NOT_SIGNED_IN.to_owned())?;
-                    let hash = server_hash(&hello.server_id, &secret, &hello.public_key);
-                    if let Err(err) = crate::auth::join_server(account, &hash) {
-                        let reason = match err.reason() {
-                            Ok(key) => tr(lang, key),
-                            Err(message) => message.to_owned(),
-                        };
-                        return Err(plain(
-                            &translatable("disconnect.loginFailedInfo", &[&reason]),
-                            lang,
-                        ));
+                    let authenticated =
+                        auth.ok_or_else(|| NOT_SIGNED_IN.to_owned())
+                            .and_then(|account| {
+                                let hash =
+                                    server_hash(&hello.server_id, &secret, &hello.public_key);
+                                crate::auth::join_server(account, &hash).map_err(|err| {
+                                    let reason = match err.reason() {
+                                        Ok(key) => tr(lang, key),
+                                        Err(message) => message.to_owned(),
+                                    };
+                                    plain(
+                                        &translatable("disconnect.loginFailedInfo", &[&reason]),
+                                        lang,
+                                    )
+                                })
+                            });
+                    if let Err(reason) = authenticated {
+                        if !lan {
+                            return Err(reason);
+                        }
+                        log::warn!("Authentication failed: {reason}");
                     }
                 }
                 status(send, &tr(lang, "connect.encrypting"));
@@ -1405,5 +1445,93 @@ mod tests {
         payload.data = vec![0xff];
         receive_brand(&payload, &send);
         assert!(events.try_recv().is_err());
+    }
+    /// Compared with the real client login listener by test_lan_auth_parity.py.
+    #[test]
+    fn lan_login_continues_after_authentication_failure() {
+        for lan in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut server = Connection::from_stream(stream).unwrap();
+                server.recv().unwrap(); // intention
+                server.recv().unwrap(); // profile
+                let key = horizon_protocol::rsa::RsaPrivateKey::generate(1024).unwrap();
+                let challenge = vec![1, 2, 3, 4];
+                server
+                    .send(
+                        &login::Clientbound::Hello(login::Hello {
+                            server_id: String::new(),
+                            public_key: key.public_der(),
+                            challenge: challenge.clone(),
+                            should_authenticate: true,
+                        })
+                        .encode(),
+                    )
+                    .unwrap();
+                let Ok((id, body)) = server.recv() else {
+                    return false;
+                };
+                let login::Serverbound::Key(reply) = login::Serverbound::decode(id, &body).unwrap()
+                else {
+                    panic!("client did not send encryption reply")
+                };
+                assert_eq!(key.decrypt(&reply.challenge).unwrap(), challenge);
+                let secret: [u8; 16] = key.decrypt(&reply.key).unwrap().try_into().unwrap();
+                server.enable_encryption(&secret);
+                server
+                    .send(
+                        &login::Clientbound::Disconnect(login::Disconnect {
+                            reason_json: r#"{"text":"LAN fixture accepted"}"#.into(),
+                        })
+                        .encode(),
+                    )
+                    .unwrap();
+                true
+            });
+            let address = format!("127.0.0.1:{port}");
+            let connect = if lan {
+                Session::connect_lan
+            } else {
+                Session::connect
+            };
+            let session = connect(
+                &address,
+                "Tester",
+                None,
+                cfg::ClientInformation::new(8),
+                Arc::new(Language::new()),
+                PathBuf::new(),
+            );
+            let reason = loop {
+                if let Event::Disconnected { reason, .. } = session
+                    .events
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap()
+                {
+                    break reason;
+                }
+            };
+            let sent_key = worker.join().unwrap();
+            assert_eq!(sent_key, lan);
+            assert_eq!(
+                reason,
+                if lan {
+                    "LAN fixture accepted"
+                } else {
+                    NOT_SIGNED_IN
+                }
+            );
+            println!(
+                "lan_auth={}:{}:{}",
+                if lan { "LAN" } else { "OTHER" },
+                sent_key,
+                !sent_key
+            );
+        }
     }
 }

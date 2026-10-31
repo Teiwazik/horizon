@@ -247,7 +247,7 @@ impl Content {
             let mut out = Vec::new();
             for i in 0..zip.len() {
                 let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
-                let name = entry.name();
+                let name = entry.name().map_err(|e| e.to_string())?.into_owned();
                 if (name.starts_with("assets/") || name.starts_with("data/")) && !entry.is_dir() {
                     out.push((name.to_owned(), entry.size()));
                 }

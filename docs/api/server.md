@@ -12,7 +12,7 @@ address), op and deop, the whitelist, and metrics as Prometheus text.
 
 | | Count |
 | --- | --- |
-| Commands | 29 (`init`, `run`, `start`, `stop`, `restart`, `status`, `cmd`, `logs`, `console`, `backup`, `backups`, `restore`, `service`, `panel`, `update`, `rollback`, `config`, `config set`, `import`, `op`, `deop`, `whitelist`, `players`, `kick`, `ban`, `pardon`, `ban-ip`, `pardon-ip`, `version`) |
+| Commands | 30 (`init`, `run`, `start`, `stop`, `restart`, `status`, `cmd`, `logs`, `console`, `backup`, `backups`, `restore`, `service`, `panel`, `update`, `rollback`, `config`, `config set`, `import`, `mcp`, `op`, `deop`, `whitelist`, `players`, `kick`, `ban`, `pardon`, `ban-ip`, `pardon-ip`, `version`) |
 | `server.toml` keys | 25 in 7 sections, plus `[properties]` for any other vanilla key |
 | Control API endpoints | 28 under `/api/v1` |
 
@@ -21,6 +21,8 @@ address), op and deop, the whitelist, and metrics as Prometheus text.
 1. `horizon-server init` in an empty folder, then `horizon-server start` ([hosting.md](../hosting.md)).
 2. From a script: `horizon-server status --json`, `horizon-server cmd say hi`, `horizon-server backup`. By hand:
    `horizon-server console` attaches to the running server (live log, status header, command line).
+   From an AI agent: `horizon-server --dir /srv/minecraft mcp` is an MCP server on stdio with a tool per endpoint
+   (`players`, `ban`, `events`, `set_config`...); add it to the agent's MCP servers, run as the server's user.
 3. From a program: read `.horizon/api.json` (address and token), then `GET /api/v1/status` with
    `Authorization: Bearer <token>`. A program that runs elsewhere or keeps its settings (a Discord bot) uses a
    fixed address and token: `[api] bind` and `[api] token` in `server.toml` ([hosting.md](../hosting.md#a-bot-or-a-tool-of-your-own)).
@@ -70,7 +72,6 @@ addition; a change to one starts `/api/v2`, served beside `/api/v1`.
 - **Backups**: restore a single dimension.
 - **Mods on a dedicated server**: list, turn on and off, and their settings, once native mods can be built for the
   server ([mods.md](../mods.md), [native-mods.md](../native-mods.md#multiplayer)).
-- **An MCP server** for the same endpoints, so a host's agent manages the server as it manages the game.
 - **Compatibility tests**: golden replies per endpoint, and a `server.toml` from each release line.
 
 ## Changelog

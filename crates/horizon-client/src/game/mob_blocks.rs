@@ -431,10 +431,10 @@ impl Game<'_> {
                 // The stack the equipment packet (or the mob's own AI) left:
                 // its components are what the item model reads, a loaded
                 // crossbow's `charged_projectiles` included.
-                mob.extra
-                    .main_hand_stack()
-                    .cloned()
-                    .unwrap_or_else(|| ItemStack::new(item, 1))
+                let Some(stack) = render::held_item_stack(&mob.extra, off_hand) else {
+                    continue;
+                };
+                stack
             };
             if !local_player && horizon_client::mobs::gear::enchanted(mob, slot) {
                 // The gear's enchantments are not tracked, only that it has some.

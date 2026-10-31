@@ -56,6 +56,19 @@ impl Launcher {
                 None => div().child(label).into_any_element(),
             }
         });
+        // The official server's own count, from its status ping: opens the Servers page, where
+        // it is listed.
+        let official = self.official_players.map(|count| {
+            div()
+                .id("official-players")
+                .cursor_pointer()
+                .hover(move |s| s.text_color(ink))
+                .child(format!("· {} on the official SMP", thousands(count)))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.go(Page::Servers);
+                    cx.notify();
+                }))
+        });
         let state = div()
             .flex()
             .items_center()
@@ -72,7 +85,8 @@ impl Launcher {
                     .flex()
                     .gap(px(4.))
                     .child(what.join(" · "))
-                    .children(playing),
+                    .children(playing)
+                    .children(official),
             );
         // Never squeezed by the rows below: the ping notice can make it tall.
         let mut hero = div()

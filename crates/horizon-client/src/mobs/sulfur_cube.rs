@@ -740,6 +740,25 @@ mod fuse_anim_tests {
     }
 
     #[test]
+    fn a_primed_cube_is_still_knocked_about() {
+        // SulfurCube.hurtServer runs the immune knockback before
+        // LivingEntity's invulnerability check, and priming makes it invulnerable.
+        load_archetype_items(&HashMap::from([(
+            "minecraft:sulfur_cube_archetype/explosive".to_owned(),
+            HashSet::from(["minecraft:tnt".to_owned()]),
+        )]));
+        let mut m = cube();
+        m.extra.head = Some("minecraft:tnt".into());
+        assert!(prime(&mut m, false));
+        assert!(m.invulnerable_flag);
+        let (health, fuse_left) = (m.health, fuse(&m));
+        m.damage(5.0, crate::mobs::Damage::player([2.0, 0.0, 0.0]));
+        assert!(m.velocity.x < 0.0, "velocity {:?}", m.velocity);
+        assert_eq!(m.health, health);
+        assert_eq!(fuse(&m), fuse_left);
+    }
+
+    #[test]
     fn client_fuse_counts_down_without_going_negative() {
         let mut m = cube();
         m.extra.counter2 = 5; // fuse() == 4

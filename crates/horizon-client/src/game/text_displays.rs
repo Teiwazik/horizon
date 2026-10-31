@@ -114,6 +114,17 @@ impl RemoteTextDisplay {
             (((self.age - self.start) as f32 + partial) / self.duration as f32).clamp(0.0, 1.0)
         }
     }
+    /// The casters this display adds to the shadow pass: its interpolated
+    /// shadow radius and strength (`DisplayRenderer.getShadowRadius` and
+    /// `DisplayRenderer.getShadowStrength`), if it has any.
+    pub(super) fn shadow(&self, partial: f64) -> Option<(glam::DVec3, f32, f32)> {
+        horizon_client::shadows::display_caster(
+            self.previous.lerp(self.position, partial),
+            &self.from,
+            &self.shown,
+            self.progress(partial as f32),
+        )
+    }
     /// The entries after `Display`'s: a block state, or an item with its
     /// display context (the stack comes converted by the caller).
     pub fn show(&mut self, values: &[(u8, i32, Value)], item: Option<Option<ItemStack>>) {

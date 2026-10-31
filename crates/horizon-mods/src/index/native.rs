@@ -103,7 +103,7 @@ impl Bundle {
         let mut total = 0u64;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-            let name = entry.name().to_owned();
+            let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             if entry.is_dir() {
                 continue;
             }

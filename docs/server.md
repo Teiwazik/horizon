@@ -337,10 +337,10 @@ horizon-server service install|uninstall|print [--system]
 horizon-server panel                     the panel's address and a one-time login link
 horizon-server update [--check] [--version vX.Y.Z] [--timeout S]     rollback [--timeout S]
 horizon-server update --archive FILE --version NAME     an archive you have (your own build)
+horizon-server mcp                       MCP server on stdio (section 8)
 
 Planned:
 horizon-server import-resources <dir>      prepare --server-jar PATH
-horizon-server mcp                       MCP server on stdio (section 8)
 ```
 
 - Every command takes `--dir` (the server folder; default: the current folder).
@@ -462,10 +462,12 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   `Host` header must name the address it listens on (as the panel's). `[api] bind` and `[api] token` fix the
   address and the token for a program that runs elsewhere (a moderation bot); `bind` takes loopback or a
   tailnet address unless `allow_public = true`, which drops the Host check and warns at every start.
-- **MCP.** `horizon-server mcp` is an MCP server on stdio, for Claude Code or any MCP client run as the same OS
-  user. It reads the token itself, and its tools map one to one onto the API: `status`, `players`,
-  `run_command`, `logs`, `backup`, `list_backups`, `restore` (needs `confirm: true`), `start`, `stop`,
-  `restart`, `get_config` and `set_config`. It's the same idea as the game's `horizon-ctl`
+- **MCP** (built, `mcp.rs`). `horizon-server mcp` is an MCP server on stdio, for Claude Code or any MCP client
+  run as the same OS user. It reads the token itself, and its tools map one to one onto the API: `status`,
+  `players`, `run_command`, `logs`, `events`, `kick`, `ban`, `pardon`, `ban_ip`, `pardon_ip`, `op`, `deop`,
+  `whitelist`, `list_backups`, `backup`, `delete_backup` and `restore` (both need `confirm: true`), `get_config`,
+  `set_config`, `start`, `restart` and `stop` (needs `confirm: true`). Tools that send someone away or can't be
+  undone carry MCP's `destructiveHint`. It's the same idea as the game's `horizon-ctl`
   (docs/agent-control.md): an AI can run and diagnose a server, and every action it takes shows in the log.
 - **Vanilla's own management protocol.** Vanilla 26.3 has a server management protocol: JSON-RPC over a
   WebSocket, set up by the `management-server-*` keys in server.properties. Horizon's engine already parses

@@ -484,7 +484,7 @@ fn mob_meta(
         hub.effect_meta(
             (m.extra.effects.iter())
                 .filter(|e| !m.extra.hidden_effects.contains(&e.0))
-                .map(|e| (e.0, false)),
+                .map(|e| (e.0, m.extra.ambient_effects.contains(&e.0))),
         ),
     );
     defaults.push((10, serializer::PARTICLES, Value::Particles(Vec::new())));

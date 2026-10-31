@@ -236,16 +236,18 @@ pub(crate) fn zip_text(
 }
 
 /// The archive's member names in its own order (Python's `namelist`).
-fn zip_names(archive: &zip::ZipArchive<fs::File>) -> Vec<String> {
-    (0..archive.len())
-        .filter_map(|i| archive.name_for_index(i).map(str::to_string))
-        .collect()
+fn zip_names(archive: &zip::ZipArchive<fs::File>) -> Result<Vec<String>, String> {
+    archive
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// `{"minecraft:<path>": text}` for every `<prefix><path>.json`, sorted by member name
 /// (the comprehension the Python preparer used for tags, worldgen and damage resources).
 fn json_resources(archive: &mut zip::ZipArchive<fs::File>, prefix: &str) -> Result<Value, String> {
-    let mut names: Vec<String> = zip_names(archive)
+    let mut names: Vec<String> = zip_names(archive)?
         .into_iter()
         .filter(|n| n.starts_with(prefix) && n.ends_with(".json"))
         .collect();
@@ -968,7 +970,7 @@ fn extract_client_resources(
     let mut client = open_zip(jar)?;
     let version = pyjson::loads(&zip_text(&mut client, "version.json")?)?;
     let mut count = 0;
-    for name in zip_names(&client) {
+    for name in zip_names(&client)? {
         if !(name.starts_with("assets/") || name.starts_with("data/") || name == "pack.png")
             || name.ends_with('/')
         {
@@ -1093,7 +1095,7 @@ fn prepare_worldgen(run: &Run) -> Result<(), String> {
     // Structure templates: gzip NBT files under structure/<namespace>/<path>.nbt.
     let mut server = open_zip(&run.server)?;
     let prefix = "data/minecraft/structure/";
-    for name in zip_names(&server) {
+    for name in zip_names(&server)? {
         if name.starts_with(prefix) && name.ends_with(".nbt") {
             let relative = member_path(&name[prefix.len()..], "Invalid structure path")?;
             let data = zip_bytes(&mut server, &name)?;

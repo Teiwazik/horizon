@@ -402,9 +402,16 @@ impl Mob {
     /// `Pose.LONG_JUMPING` (what `LongJumpUtil` checks an arc with).
     pub fn awake_dims_in(&self, long_jumping: bool) -> (f64, f64, f64) {
         let k = &self.kind;
-        // Avatar.POSES: a player's or mannequin's box follows its pose.
+        // Avatar.POSES: a player's or mannequin's box follows its pose, and
+        // LivingEntity.getDimensions scales it by `minecraft:scale`
+        // (`getScale`): a fake player's giant NPC is clickable on its body.
         if matches!(&*k.id, "minecraft:player" | "minecraft:mannequin") {
-            let d = self.extra.avatar_pose.dimensions(1.0);
+            let scale = if self.extra.model_scale > 0.0 {
+                self.extra.model_scale
+            } else {
+                1.0
+            };
+            let d = self.extra.avatar_pose.dimensions(scale);
             return (
                 f64::from(d.width),
                 f64::from(d.height),

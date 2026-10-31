@@ -418,11 +418,15 @@ pub fn mob_to_nbt(
             .iter()
             .map(|&(effect, duration, amplifier)| {
                 let shown = !m.extra.hidden_effects.contains(&effect);
+                let ambient = m.extra.ambient_effects.contains(&effect);
                 let mut e = vec![
                     ("id", string(crate::brewing::namespaced(effect))),
                     ("amplifier", Tag::Byte(amplifier.clamp(0, 255) as u8 as i8)),
                     ("duration", Tag::Int(duration)),
                 ];
+                if ambient {
+                    e.push(("ambient", Tag::Byte(1)));
+                }
                 if !shown {
                     e.push(("show_particles", Tag::Byte(0)));
                 }
@@ -1413,6 +1417,11 @@ pub fn mob_from_nbt(
             m.extra.hidden_effects.retain(|h| *h != effect);
             if number(e.get("show_particles")) == Some(0) {
                 m.extra.hidden_effects.push(effect);
+            }
+            // Details.CODEC: `ambient` defaults to false.
+            m.extra.ambient_effects.retain(|h| *h != effect);
+            if number(e.get("ambient")).is_some_and(|a| a != 0) {
+                m.extra.ambient_effects.push(effect);
             }
         }
     }
@@ -3769,8 +3778,8 @@ mod item_component_tests {
             else {
                 return m;
             };
-            let tag = crate::data_cmd::merged(&mob_to_nbt(&m, [1, 2, 3, 4], None), data);
-            mob_from_nbt(&tag, &types, 2).unwrap()
+            let tag = crate::data_cmd::merged(&mob_to_nbt(&m, [1, 2, 3, 4], None, None), data);
+            mob_from_nbt(&tag, &types, 2, None).unwrap()
         };
         // `entity_data={NoAI:1b}`: no id, so the egg's own type holds the data.
         assert!(spawn(&egg(Some(Tag::compound([("NoAI", Tag::Byte(1))])))).no_ai);

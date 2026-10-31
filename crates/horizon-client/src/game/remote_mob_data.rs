@@ -889,6 +889,29 @@ mod tests {
         assert_eq!(m.profile, Some(profile));
     }
 
+    /// `LivingEntity.getDimensions`: the pose's box times `minecraft:scale` —
+    /// a lobby's giant fake player is clickable on its visible body, not only
+    /// on the unscaled box at its feet.
+    #[test]
+    fn a_scaled_fake_player_gets_a_scaled_box() {
+        for kind in ["minecraft:player", "minecraft:mannequin"] {
+            let Some(mut m) = mob(kind) else {
+                continue;
+            };
+            let (w, h, e) = m.dims();
+            assert!(
+                (w - 0.6).abs() < 1e-6 && (h - 1.8).abs() < 1e-6 && (e - 1.62).abs() < 1e-5,
+                "{kind}: {w}x{h}x{e}"
+            );
+            m.extra.model_scale = 4.0;
+            let (w, h, e) = m.dims();
+            assert!(
+                (w - 2.4).abs() < 1e-6 && (h - 7.2).abs() < 1e-6 && (e - 6.48).abs() < 1e-5,
+                "{kind} scaled: {w}x{h}x{e}"
+            );
+        }
+    }
+
     /// #4548: SulfurCube.MAX_FUSE copies into the fuse the client ticks for swell.
     #[test]
     fn sulfur_cube_max_fuse_sets_the_client_fuse() {

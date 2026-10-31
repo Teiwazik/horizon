@@ -1781,8 +1781,23 @@ fn equipment_modifier_applies(group: &str, slot: &str) -> bool {
 /// A chunk whose ticking future can complete (`ChunkMap.prepareTickingChunk`):
 /// lit, with its neighbours loaded, as `postprocess_chunks` waits for.
 fn ticking_chunk(world: &World, x: i32, z: i32) -> bool {
-    world.chunks.get(&(x, z)).is_some_and(|c| c.lit)
-        && (-1..=1).all(|dz| (-1..=1).all(|dx| world.chunks.contains_key(&(x + dx, z + dz))))
+    let Some(center) = world.chunks.get(&(x, z)) else {
+        return false;
+    };
+    if !center.lit {
+        return false;
+    }
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            if !world.chunks.contains_key(&(x + dx, z + dz)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 /// Key events carry the scancode's US-layout code, which ignores XKB options like
 /// `caps:swapescape`. For the keys whose meaning the keymap may remap, take the code
@@ -2417,6 +2432,11 @@ struct Game<'a> {
     /// `remote_handle_input`): picked once, so a creative break does not
     /// move the use that follows it past the broken block.
     tick_hit: Option<Option<Hit>>,
+    /// `Player.entityInteractionRange` and `blockInteractionRange`, refreshed
+    /// each tick from the attribute (a server's reach modifier, creative's
+    /// +2): the pick helpers' `&self` reach.
+    entity_reach: f64,
+    block_reach: f64,
     /// The part of a right click a guest's packet asks for (game/lan_actions.rs).
     guest_use: Option<GuestUse>,
     /// The last `use_hand` that ended the click did so with `FAIL`, which
@@ -2626,8 +2646,9 @@ impl Game<'_> {
         }
         Some((self.eye_position()?, view_vector(self.yaw, self.pitch)))
     }
+    /// `Player.blockInteractionRange`: the block pick's and mining's reach.
     fn reach(&self) -> f64 {
-        if self.creative { 5.0 } else { 4.5 }
+        self.block_reach
     }
     /// Outline shapes that depend on more than the block state, as one box
     /// in block space: `LightBlock` and `ScaffoldingBlock.getShape` are a full
@@ -2700,7 +2721,24 @@ impl Game<'_> {
             return hit;
         }
         let (origin, dir) = self.aim()?;
-        self.clip_ray(origin, dir, self.reach())
+        // GameRenderer.pick: the block ray runs out to the larger of the two
+        // interaction ranges; filterHitResult then drops a hit past the
+        // block's.
+        self.clip_ray(origin, dir, self.block_reach.max(self.entity_reach))
+            .filter(|hit| {
+                let distance: [f64; 3] = std::array::from_fn(|i| hit.point[i] - origin[i]);
+                distance.iter().map(|v| v * v).sum::<f64>() <= self.block_reach.powi(2)
+            })
+    }
+    /// The same traversal without `filterHitResult`: the block hit that
+    /// bounds the entity ray in `GameRenderer.pick`, out to the larger
+    /// interaction range — a wall between the two still hides the entity.
+    fn pick_unfiltered(&self) -> Option<Hit> {
+        if let Some(hit) = self.forced_hit {
+            return Some(hit);
+        }
+        let (origin, dir) = self.aim()?;
+        self.clip_ray(origin, dir, self.block_reach.max(self.entity_reach))
     }
     /// The first block outline hit within `reach` along the unit `dir`.
     fn clip_ray(&self, origin: [f64; 3], dir: [f64; 3], reach: f64) -> Option<Hit> {
@@ -3792,6 +3830,7 @@ impl Game<'_> {
         self.sync_tick_chunks();
         self.start_ticking_chunks();
         let levels = self.tickets.levels();
+        let bounds = levels.random_tick_bounds();
         // Keep the world map's chunk order, including empty chunks
         // (tick_chunk_random still draws for precipitation in those).
         let ticking: Vec<_> = self
@@ -3799,7 +3838,14 @@ impl Game<'_> {
             .chunks
             .keys()
             .copied()
-            .filter(|&(x, z)| levels.random_ticking(x, z) && ticking_chunk(&self.world, x, z))
+            .filter(|&(x, z)| {
+                if let Some((min_x, min_z, max_x, max_z)) = bounds
+                    && (x < min_x || x > max_x || z < min_z || z > max_z)
+                {
+                    return false;
+                }
+                levels.random_ticking(x, z) && ticking_chunk(&self.world, x, z)
+            })
             .collect();
         // Entity.checkInsideBlocks for the plates, tripwires, detector rails and
         // buttons under the players (the host and the LAN guests), the minecarts
@@ -6209,6 +6255,10 @@ impl Game<'_> {
         if self.agent.hold_server {
             return Ok(());
         }
+        // `Player.entityInteractionRange`/`blockInteractionRange` for the tick's
+        // picks: the attribute carries creative's and a server's modifiers.
+        self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
+        self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
         self.tick_debug_keys()?;
         self.tick_debug_charts();
         self.tick_tutorial();
@@ -7213,6 +7263,11 @@ impl Game<'_> {
             + self.clock.fraction() as f32)
             / 24000.0;
         let (w, h) = (batch.width, batch.height);
+        // HDR calibration ends when its page does, whatever moved the screen
+        // off Options (a death screen opened by a server, say).
+        if self.screen != Screen::Options && self.ui.options.calibration_fullscreen.is_some() {
+            self.show_calibration(h);
+        }
         if self.screen == Screen::Win {
             self.draw_win_screen(&mut batch);
             return batch;
@@ -9476,23 +9531,23 @@ impl Game<'_> {
                     p.z + (q.z - p.z) * a,
                 )
             };
-            let mut casters: Vec<(glam::DVec3, &str, f32)> =
+            let mut casters: Vec<(glam::DVec3, f32, f32)> =
                 horizon_client::shadows::mob_casters(&self.mobs, a).collect();
-            let fixed = |id: &'static str| (id, horizon_client::shadows::shadow_params(id).0);
-            let (item, item_radius) = fixed("minecraft:item");
+            let item = horizon_client::shadows::shadow_params("minecraft:item");
             casters.extend(
                 self.dropped
                     .iter()
-                    .map(|i| (lerp(i.previous, i.position), item, item_radius)),
+                    .map(|i| (lerp(i.previous, i.position), item.0, item.1)),
             );
-            let (orb, orb_radius) = fixed("minecraft:experience_orb");
+            let orb = horizon_client::shadows::shadow_params("minecraft:experience_orb");
             casters.extend(
                 self.orbs
                     .iter()
-                    .map(|o| (lerp(o.previous, o.position), orb, orb_radius)),
+                    .map(|o| (lerp(o.previous, o.position), orb.0, orb.1)),
             );
-            for (pos, id, radius) in casters {
-                let strength = horizon_client::shadows::shadow_params(id).1;
+            // Text, block and item displays (DisplayRenderer's shadow radius).
+            casters.extend(self.text_displays.values().filter_map(|d| d.shadow(a)));
+            for (pos, radius, strength) in casters {
                 horizon_client::shadows::shadow(
                     &self.world,
                     self.res.facts(),
@@ -9860,13 +9915,15 @@ impl Game<'_> {
     }
     fn mob_hit(&self) -> Option<(usize, f64)> {
         let (eye, dir) = self.aim()?;
-        let reach: f64 = if self.creative { 5.0 } else { 3.0 };
+        let reach: f64 = self.entity_reach;
         let mut best: Option<(usize, f64)> = None;
         for (i, m) in self.mobs.iter().enumerate() {
             // ProjectileUtil.getEntityHitResult: the mob the player rides
             // shares its root vehicle and is never the hit, nor is the
-            // camera entity the pick starts from.
-            if !m.alive() || Some(m.id) == self.riding || Some(m.id) == self.remote_camera_id() {
+            // camera entity the pick starts from. EntitySelector.CAN_BE_PICKED
+            // is isPickable — `!isRemoved`, not alive: a health-0 fake player
+            // still answers a click.
+            if m.removed || Some(m.id) == self.riding || Some(m.id) == self.remote_camera_id() {
                 continue;
             }
             if let Some(t) = ray_box(eye, dir, reach, m.bounds())
@@ -10057,14 +10114,7 @@ impl Game<'_> {
         // A painting nearer than the targeted block and mob breaks instead.
         if let Some((i, d)) = self.painting_hit()
             && self.mob_hit().is_none_or(|m| d < m.1)
-            && self.pick().is_none_or(|h| {
-                let eye = self.eye_position().unwrap_or_default();
-                (0..3)
-                    .map(|a| (h.point[a] - eye[a]).powi(2))
-                    .sum::<f64>()
-                    .sqrt()
-                    > d
-            })
+            && self.before_block(d)
         {
             self.break_painting(i, true);
             return true;
@@ -10086,15 +10136,8 @@ impl Game<'_> {
         let Some((index, distance)) = self.mob_hit() else {
             return false;
         };
-        if let Some(hit) = self.pick() {
-            let eye = self.eye_position().unwrap_or_default();
-            let d = ((hit.point[0] - eye[0]).powi(2)
-                + (hit.point[1] - eye[1]).powi(2)
-                + (hit.point[2] - eye[2]).powi(2))
-            .sqrt();
-            if d < distance {
-                return false;
-            }
+        if !self.before_block(distance) {
+            return false;
         }
         self.attack_mob(index);
         // Minecraft.startAttack swings after the attack.
@@ -10410,8 +10453,8 @@ impl Game<'_> {
                 creative,
                 options,
             } => self.open_world(&folder, Some(&name), seed, creative, Some(&options))?,
-            Action::Connect { address } => {
-                self.connect_server(&address, &self.options.player_name())?
+            Action::Connect { address, lan } => {
+                self.connect_server_with_options(&address, &self.options.player_name(), None, lan)?
             }
             Action::DataPacks { dir, selected } => {
                 self.keys.clear();
@@ -16132,6 +16175,8 @@ impl<'a> Game<'a> {
             world_icon: None,
             forced_hit: None,
             tick_hit: None,
+            entity_reach: 3.0,
+            block_reach: 4.5,
             guest_use: None,
             use_failed: false,
             lan_events: Vec::new(),
@@ -16267,6 +16312,7 @@ enum PendingWorldEntry {
     Server {
         address: String,
         name: String,
+        lan: bool,
         /// A transfer's carried-over server cookies (`TransferState`).
         cookies: Option<horizon_client::net::Cookies>,
     },
@@ -16364,8 +16410,9 @@ impl Game<'_> {
                 address,
                 name,
                 cookies,
+                lan,
             }) => {
-                self.connect_server_with_cookies(&address, &name, cookies)?;
+                self.connect_server_with_options(&address, &name, cookies, lan)?;
             }
             None => {}
         }

@@ -1,5 +1,6 @@
 //! `horizon-telemetry-server`: serves on `PORT` (default 8080), keeps its data in
-//! `HORIZON_TELEMETRY_DB` (default `telemetry.sqlite3`), writes the live count down every minute
+//! `HORIZON_TELEMETRY_DB` (default `telemetry.sqlite3`), writes the live count and the official
+//! server's down every minute
 //! and does its upkeep every ten minutes.
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -42,6 +43,13 @@ async fn main() {
             every.tick().await;
             if let Err(e) = recorder.record_live() {
                 eprintln!("horizon-telemetry-server: could not record the live count: {e}");
+            }
+            // The official server's count: a status ping, off the async workers.
+            let official = recorder.clone();
+            if let Ok(Err(e)) =
+                tokio::task::spawn_blocking(move || official.record_official()).await
+            {
+                eprintln!("horizon-telemetry-server: could not record the official server: {e}");
             }
         }
     });

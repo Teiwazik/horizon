@@ -65,6 +65,7 @@ pub fn single(from: &Mob, to: &mut Mob, params: Params) {
     // convertCommon.
     to.extra.effects = from.extra.effects.clone();
     to.extra.hidden_effects = from.extra.hidden_effects.clone();
+    to.extra.ambient_effects = from.extra.ambient_effects.clone();
     if from.is_baby() {
         // setBaby(true); an ageable pair keeps the exact age.
         to.extra.age = from.extra.age;

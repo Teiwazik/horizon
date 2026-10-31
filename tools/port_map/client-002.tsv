@@ -92,7 +92,7 @@ ClientPacketListener.handleSetSimulationDistance	missing		minor: the server's si
 ClientPacketListener.handleSetChunkCacheCenter	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	SetChunkCacheCenter arm
 ClientPacketListener.handleBlockChangedAck	port	crates/horizon-client/src/game/remote.rs::Game::end_predictions	
 ClientPacketListener.handleBundlePacket	inline	crates/horizon-client/src/net.rs::receive_play	bundle delimiters are dropped; the packets inside arrive as a stream and are handled one by one, in order
-ClientPacketListener.handleProjectilePowerPacket	missing		minor: the projectile's acceleration power is not read (ProjectilePower has no arm)
+ClientPacketListener.handleProjectilePowerPacket	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	ProjectilePower arm: a hurting projectile's acceleration power, by id
 ClientPacketListener.handleChunkBatchFinished	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	ChunkBatchFinished arm; gap: minor: answers with a fixed 64 chunks per tick, not a measured rate
 ClientPacketListener.handleTestInstanceBlockStatus	skip:debug		status for the test instance block editor (developer blocks); Horizon has no editor
 ClientPacketListener.handleDebugChunkValue	skip:debug		debug overlay values from the server

@@ -457,6 +457,11 @@ impl Game<'_> {
     /// `Window.updateFullscreenState`: a fullscreen change made by the window
     /// system is adopted by the option (`Minecraft.fullscreenStateChanged`).
     pub(super) fn observe_fullscreen(&mut self) {
+        // HDR calibration's own fullscreen is not the player's option: it
+        // goes back to what it was when the calibration ends.
+        if self.ui.options.calibration_fullscreen.is_some() {
+            return;
+        }
         let Some(w) = &self.window else { return };
         if let Some(now) = self.fullscreen.observe(w.fullscreen().is_some())
             && self.settings.fullscreen != now

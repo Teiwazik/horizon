@@ -83,7 +83,7 @@ impl Game<'_> {
     pub(super) fn guest_hit(&self) -> Option<(u32, f64)> {
         let host = self.lan.as_ref()?;
         let (eye, dir) = self.aim()?;
-        let reach = if self.creative { 5.0 } else { 3.0 };
+        let reach = self.entity_reach;
         host.hub
             .guests
             .iter()

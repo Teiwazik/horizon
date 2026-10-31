@@ -2123,9 +2123,49 @@ pub fn held_item_transform(
     Some(t)
 }
 
+/// `ArmedEntityRenderState.extractArmedEntityRenderState`: each arm's item
+/// model reads the stack held by that arm. Only the main hand currently
+/// retains a full stack; the off hand must not inherit its item or components.
+pub fn held_item_stack(extra: &super::Extra, off_hand: bool) -> Option<crate::items::ItemStack> {
+    let item = if off_hand {
+        extra.off_hand.as_ref()?
+    } else {
+        if let Some(stack) = extra.main_hand_stack() {
+            return Some(stack.clone());
+        }
+        extra.main_hand.as_ref()?
+    };
+    Some(crate::items::ItemStack::new(item, 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offhand_does_not_inherit_mainhand_components() {
+        use crate::items::ItemStack;
+        let mut extra = super::super::Extra::default();
+        let mut main = ItemStack::new("minecraft:crossbow", 1);
+        main.data_mut().custom_name = Some(horizon_world::nbt::Tag::String("Main hand".into()));
+        extra.set_main_hand_stack(Some(main));
+        extra.off_hand = Some("minecraft:crossbow".into());
+        assert_eq!(
+            held_item_stack(&extra, false)
+                .unwrap()
+                .custom_name()
+                .as_deref(),
+            Some("Main hand")
+        );
+        assert!(
+            held_item_stack(&extra, true)
+                .unwrap()
+                .custom_name()
+                .is_none()
+        );
+        extra.off_hand = None;
+        assert!(held_item_stack(&extra, true).is_none());
+    }
 
     /// The elytra's flight yaw (`AvatarRenderer.extractFlightData`) lerps
     /// the velocity of the previous tick towards this tick's, so the model

@@ -104,7 +104,12 @@ impl Game<'_> {
     /// `getAttributeValue` of an interaction range of the player in place (a
     /// guest swapped in on a server): creative's modifiers are on it
     /// (`update_player_attributes`), as are `/attribute`'s and the items'.
-    fn interaction_range(&mut self, attribute: &str, survival: f64, creative: f64) -> f64 {
+    pub(super) fn interaction_range(
+        &mut self,
+        attribute: &str,
+        survival: f64,
+        creative: f64,
+    ) -> f64 {
         let otherwise = if self.creative { creative } else { survival };
         self.player
             .as_mut()

@@ -1190,7 +1190,7 @@ impl Game<'_> {
     /// The dragon part under the crosshair within reach: its id and distance.
     pub(super) fn dragon_hit(&self) -> Option<(u32, f64)> {
         let (eye, dir) = self.aim()?;
-        let reach: f64 = if self.creative { 5.0 } else { 3.0 };
+        let reach: f64 = self.entity_reach;
         let mut best: Option<(u32, f64)> = None;
         for (id, b) in self.special_targets() {
             let (lo, hi) = (b.min_position(), b.max_position());

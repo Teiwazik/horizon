@@ -525,8 +525,7 @@ impl StationRecipes {
                     template: ingredient(&v["template"], items),
                     base: ingredient(&v["base"], items),
                     addition: ingredient(&v["addition"], items),
-                    result: v["result"]["id"]
-                        .as_str()
+                    result: horizon_world::loot::recipe_result_id(&v["result"])
                         .unwrap_or("minecraft:air")
                         .to_owned(),
                 }),
@@ -544,7 +543,8 @@ impl StationRecipes {
                             id,
                             input: ingredient(&v["ingredient"], items),
                             result: ItemStack::new(
-                                v["result"]["id"].as_str().unwrap_or("minecraft:air"),
+                                horizon_world::loot::recipe_result_id(&v["result"])
+                                    .unwrap_or("minecraft:air"),
                                 count,
                             ),
                         });

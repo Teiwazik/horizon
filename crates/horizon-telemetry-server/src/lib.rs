@@ -7,8 +7,9 @@
 //!   least 3 installs only (`summary`), cached; the website's Benchmarks page reads it.
 //! - `POST /v1/live`: a game's anonymous "I'm playing" ping (`live`, in memory only).
 //! - `GET /v1/live`: how many play now, exactly, cached briefly.
-//! - `GET /v1/live/history?range=24h|7d|30d|all`: that count over time, written down once a minute
-//!   (`history`: totals only), cached a minute.
+//! - `GET /v1/live/history?range=24h|7d|30d|all&series=players|official`: that count, or the
+//!   official server's (its status ping), over time, written down once a minute (`history`:
+//!   totals only), cached a minute.
 //! - `/hub/…`: the hub's votes (`hub`) and bug reports (`intake`).
 //! - `GET /healthz`.
 //!
@@ -69,6 +70,9 @@ pub struct Config {
     pub live_minute_days: u32,
     /// Days its hourly totals are kept; at least 31, for the 30-day view. Daily ones stay.
     pub live_hour_days: u32,
+    /// The official server, asked for its player count every minute (`history`'s `official`
+    /// series); None asks nothing.
+    pub official_server: Option<String>,
     /// The hub's votes and reads of their counts an IP address may make an hour.
     pub hub_per_hour: f64,
     /// Bug reports an IP address may send an hour.
@@ -97,6 +101,7 @@ impl Default for Config {
             live_max_sessions: 200_000,
             live_minute_days: 7,
             live_hour_days: 90,
+            official_server: Some(horizon_telemetry::server_status::OFFICIAL_ADDRESS.into()),
             hub_per_hour: 600.0,
             hub_posts_per_hour: 20.0,
             hub_reports_per_day: 30,
@@ -111,7 +116,7 @@ impl Config {
     /// The defaults, with `HORIZON_TELEMETRY_RETENTION_DAYS`, `…_MIN_INSTALL_DAYS`,
     /// `…_REQUESTS_PER_HOUR`, `…_ITEMS_PER_DAY`, `…_TRUST_PROXY` (1), `…_ALLOW_ORIGIN`,
     /// `…_LIVE_PER_HOUR`, `…_LIVE_WINDOW_SECONDS`, `…_LIVE_MAX_SESSIONS`, `…_LIVE_MINUTE_DAYS`,
-    /// `…_LIVE_HOUR_DAYS`, `…_HUB_PER_HOUR`,
+    /// `…_LIVE_HOUR_DAYS`, `…_OFFICIAL_SERVER` (`off` for none), `…_HUB_PER_HOUR`,
     /// `…_HUB_POSTS_PER_HOUR`, `…_HUB_REPORTS_PER_DAY`, `…_HUB_KEEP_DAYS`, `…_GITHUB_TOKEN` and
     /// `…_GITHUB_REPO`. An empty token counts as unset.
     pub fn from_env() -> Self {
@@ -152,6 +157,11 @@ impl Config {
             live_hour_days: var("LIVE_HOUR_DAYS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.live_hour_days),
+            official_server: match var("OFFICIAL_SERVER").as_deref().map(str::trim) {
+                Some("" | "off") => None,
+                Some(address) => Some(address.to_owned()),
+                None => d.official_server,
+            },
             hub_per_hour: var("HUB_PER_HOUR")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.hub_per_hour),
@@ -182,7 +192,7 @@ pub struct App {
     /// `GET /v1/live`'s answer and when it was made.
     live_cache: Mutex<Option<(Instant, String)>>,
     /// `GET /v1/live/history`'s answers by range, with when they were made.
-    history_cache: Mutex<HashMap<history::Range, (Instant, String)>>,
+    history_cache: Mutex<HashMap<(history::Series, history::Range), (Instant, String)>>,
     /// When the server started: the live count is whole only a window later.
     started: Instant,
     /// `/v1/aggregate` answers by `days`, with when they were made.
@@ -321,13 +331,42 @@ impl App {
             return Ok(false);
         }
         let count = self.live().count(Instant::now());
-        self.record_sample(unix_now(), &history::Sample::of(&count))
+        self.record_sample(
+            history::Series::Players,
+            unix_now(),
+            &history::Sample::of(&count),
+        )
     }
 
-    /// Writes down `sample` as the count of the minute holding `unix` (seconds). False when that
-    /// minute has one already.
-    pub fn record_sample(&self, unix: i64, sample: &history::Sample) -> rusqlite::Result<bool> {
-        self.store().record_live(unix, sample)
+    /// Asks the official server for its player count (a status ping, blocking, at most 5 seconds
+    /// a step) and writes it down as this minute's. False when there is no official server or it
+    /// didn't answer: that minute stays empty.
+    pub fn record_official(&self) -> rusqlite::Result<bool> {
+        let Some(address) = &self.config.official_server else {
+            return Ok(false);
+        };
+        let unix = unix_now();
+        match horizon_telemetry::server_status::players(address, Duration::from_secs(5)) {
+            Ok(players) => {
+                let sample = history::Sample {
+                    playing: players.online,
+                    ..history::Sample::default()
+                };
+                self.record_sample(history::Series::Official, unix, &sample)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Writes down `sample` as `series`' count of the minute holding `unix` (seconds). False when
+    /// that minute has one already.
+    pub fn record_sample(
+        &self,
+        series: history::Series,
+        unix: i64,
+        sample: &history::Sample,
+    ) -> rusqlite::Result<bool> {
+        self.store().record_live(series, unix, sample)
     }
 
     /// Daily upkeep: totals rebuilt, expired rows removed, idle rate-limit entries and live
@@ -602,13 +641,15 @@ async fn playing(State(app): State<Arc<App>>, req: Request) -> Response {
 #[derive(serde::Deserialize)]
 struct HistoryQuery {
     range: Option<String>,
+    series: Option<String>,
 }
 
 /// How long a history answer is reused: a new sample comes each minute.
 const HISTORY_FOR: Duration = Duration::from_secs(60);
 
-/// `GET /v1/live/history?range=24h|7d|30d|all` (default 24h): the live count over time
-/// (`history::History`), made again at most every minute. 400 for another range.
+/// `GET /v1/live/history?range=24h|7d|30d|all&series=players|official` (default 24h, players):
+/// the live count, or the official server's, over time (`history::History`), made again at most
+/// every minute. 400 for another range or series.
 async fn live_history(
     State(app): State<Arc<App>>,
     Query(query): Query<HistoryQuery>,
@@ -620,22 +661,25 @@ async fn live_history(
     let Some(range) = history::Range::parse(query.range.as_deref().unwrap_or("24h")) else {
         return status(StatusCode::BAD_REQUEST, "range: 24h, 7d, 30d or all");
     };
+    let Some(series) = history::Series::parse(query.series.as_deref().unwrap_or("players")) else {
+        return status(StatusCode::BAD_REQUEST, "series: players or official");
+    };
     let cached = app
         .history_cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&range)
+        .get(&(series, range))
         .filter(|(at, _)| at.elapsed() < HISTORY_FOR)
         .map(|(_, json)| json.clone());
     let json = match cached {
         Some(json) => json,
-        None => match app.store().live_history(range, unix_now()) {
+        None => match app.store().live_history(series, range, unix_now()) {
             Ok(history) => {
                 let json = serde_json::to_string(&history).unwrap_or_default();
                 app.history_cache
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(range, (Instant::now(), json.clone()));
+                    .insert((series, range), (Instant::now(), json.clone()));
                 json
             }
             Err(e) => {

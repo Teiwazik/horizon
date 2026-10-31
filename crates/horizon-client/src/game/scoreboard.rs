@@ -18,7 +18,7 @@ use horizon_client::{
     text::Text,
 };
 use horizon_world::nbt::Tag;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// What `ServerPlayer` last recorded for the criteria that follow the player.
 #[derive(Default)]
@@ -51,6 +51,10 @@ fn pet_team<'a>(board: &'a Scoreboard, own: &str, owner: Option<&str>) -> Option
     board
         .players_team(own)
         .or_else(|| board.players_team(owner?))
+}
+/// A tamed pet's owner (`TamableAnimal.getOwnerReference` while `isTame`).
+fn tame_owner(m: &horizon_client::mobs::Mob) -> Option<[i32; 4]> {
+    m.extra.tame.then_some(m.extra.owner).flatten()
 }
 /// `TamableAnimal.getRootOwner`: the owner, or that owner's own root owner
 /// while it is a tamed pet itself. `pet_owner` is the owner of the tamed pet
@@ -496,13 +500,34 @@ impl Game<'_> {
     /// `TamableAnimal.getTeam` of a mob or another player: its own team, else,
     /// when it is a tamed pet, its root owner's.
     pub(super) fn mob_team(&self, id: u32) -> Option<&sb::Team> {
+        if self.score.board.teams.is_empty() {
+            return None;
+        }
+        // The mob is looked up only when its own name has no team: the
+        // owner's team is the fallback.
+        self.team_with_owner(id, || {
+            self.mobs.iter().find(|m| m.id == id).and_then(tame_owner)
+        })
+    }
+    /// [`mob_team`](Self::mob_team) of a mob at hand, without looking it up.
+    pub(super) fn mob_team_of(&self, m: &horizon_client::mobs::Mob) -> Option<&sb::Team> {
+        if self.score.board.teams.is_empty() {
+            return None;
+        }
+        self.team_with_owner(m.id, || tame_owner(m))
+    }
+    /// A mob's own team, else its tamed owner's (`owner` is asked only then).
+    fn team_with_owner(
+        &self,
+        id: u32,
+        owner: impl FnOnce() -> Option<[i32; 4]>,
+    ) -> Option<&sb::Team> {
         let uuid = *self.persist.uuids.get(&id)?;
         let own = self.scoreboard_name(id, uuid);
-        let owner = self
-            .mobs
-            .iter()
-            .find(|m| m.id == id && m.extra.tame)
-            .and_then(|m| self.root_owner_name(m.extra.owner?));
+        if let Some(team) = self.score.board.players_team(&own) {
+            return Some(team);
+        }
+        let owner = owner().and_then(|o| self.root_owner_name(o));
         pet_team(&self.score.board, &own, owner.as_deref())
     }
     /// `TamableAnimal.getRootOwner().getScoreboardName`: a pet's owner, through
@@ -534,13 +559,22 @@ impl Game<'_> {
         if self.score.board.teams.is_empty() {
             return Default::default();
         }
+        // One pass over the mobs, not one per mob.
+        let tame_owners: HashMap<u32, [i32; 4]> = self
+            .mobs
+            .iter()
+            .filter_map(|m| Some((m.id, tame_owner(m)?)))
+            .collect();
         horizon_client::mobs::Teams {
             player: self.player_team(),
             mobs: self
                 .persist
                 .uuids
                 .keys()
-                .filter_map(|id| Some((*id, self.mob_team(*id)?)))
+                .filter_map(|id| {
+                    let owner = || tame_owners.get(id).copied();
+                    Some((*id, self.team_with_owner(*id, owner)?))
+                })
                 .collect(),
         }
     }

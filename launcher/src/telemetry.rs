@@ -74,6 +74,32 @@ pub fn watch_playing(tx: std::sync::mpsc::Sender<backend::Msg>) {
     });
 }
 
+/// How many play on the official server now: its server-list status ping, as the game's
+/// Multiplayer list sends it, with a 3-second timeout. None when it doesn't answer.
+pub fn official_players() -> Option<u64> {
+    let address = crate::server_list::OFFICIAL.1;
+    horizon_telemetry::server_status::players(address, std::time::Duration::from_secs(3))
+        .ok()
+        .map(|players| players.online)
+}
+
+/// Sends [`official_players`] to the window as `Msg::OfficialPlayers` now and every minute, on
+/// its own thread. Nothing when `HORIZON_TELEMETRY_URL=off` (tests and automated runs) turns the
+/// live count off too.
+pub fn watch_official(tx: std::sync::mpsc::Sender<backend::Msg>) {
+    if horizon_telemetry::endpoint().is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        while tx
+            .send(backend::Msg::OfficialPlayers(official_players()))
+            .is_ok()
+        {
+            std::thread::sleep(horizon_telemetry::live::INTERVAL);
+        }
+    });
+}
+
 pub fn home() -> PathBuf {
     backend::game_home()
 }

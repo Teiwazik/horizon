@@ -85,8 +85,9 @@ impl Placement {
         self.slots.is_empty()
     }
 }
-/// A recipe result: `ItemStackTemplate` (`id`, `count`, `components`), with the
-/// id optional for the transmuting recipes that keep the input's item.
+/// A recipe result: `ItemStackTemplate` (`id`, `count`, `components`), or a bare item id
+/// (`ItemStackTemplate.CODEC` falls back to `Item.CODEC`), with the id optional for the
+/// transmuting recipes that keep the input's item.
 #[derive(Clone, Debug)]
 pub struct Template {
     pub item: Option<Arc<str>>,
@@ -113,7 +114,7 @@ impl Template {
             None => (0, None),
         };
         Some(Self {
-            item: v["id"].as_str().map(Arc::from),
+            item: horizon_world::loot::recipe_result_id(v).map(Arc::from),
             count: template_count(v)?,
             damage,
             extra,
@@ -1361,7 +1362,7 @@ impl Recipes {
                 }
                 "minecraft:crafting_special_bannerduplicate" => special(
                     ing("banner")
-                        .zip(v["result"]["id"].as_str())
+                        .zip(horizon_world::loot::recipe_result_id(&v["result"]))
                         .map(|(banner, id)| Special::BannerDuplicate {
                             banner,
                             result: id.to_owned(),
@@ -1370,7 +1371,7 @@ impl Recipes {
                 "minecraft:crafting_special_shielddecoration" => special(
                     ing("banner")
                         .zip(ing("target"))
-                        .zip(v["result"]["id"].as_str())
+                        .zip(horizon_world::loot::recipe_result_id(&v["result"]))
                         .map(|((banner, target), id)| Special::ShieldDecoration {
                             banner,
                             target,
@@ -1899,6 +1900,33 @@ mod tests {
         assert_eq!(result(r#"{"id":"minecraft:iron_ingot"}"#).unwrap().count, 1);
         assert!(result(r#"{"count":2}"#).is_none());
         assert!(result(r#"{"id":"minecraft:iron_ingot","count":0}"#).is_none());
+    }
+    #[test]
+    fn a_recipe_result_can_be_a_bare_item_id() {
+        // `ItemStackTemplate.CODEC` falls back to `Item.CODEC`: `"result": "mod:item"` is one item.
+        let result = |json: &str| recipe_result(&serde_json::from_str(json).unwrap());
+        let stack = result(r#""ruby:ruby""#).unwrap();
+        assert_eq!((&*stack.item, stack.count), ("ruby:ruby", 1));
+        // The `item` key of older versions is no `id`, and a number names no item.
+        assert!(result(r#"{"item":"ruby:ruby"}"#).is_none());
+        assert!(result("42").is_none());
+    }
+    #[test]
+    fn a_shapeless_recipe_makes_the_item_its_bare_result_names() {
+        let root = std::env::temp_dir().join(format!("horizon-bare-result-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        fs::write(
+            root.join("data/minecraft/recipe/bare.json"),
+            br#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:flint"],"result":"minecraft:stick"}"#,
+        )
+        .unwrap();
+        let items = Items::for_tests(HashMap::new());
+        let recipes = Recipes::load(&root, &items, &PackOverlay::NONE).unwrap();
+        let grid = [Some(ItemStack::new("minecraft:flint", 1)), None, None, None];
+        let (_, made) = recipes.find(&grid, 2).unwrap();
+        assert_eq!((&*made.item, made.count), ("minecraft:stick", 1));
+        let _ = fs::remove_dir_all(&root);
     }
     #[test]
     fn cook_finds_the_first_recipe_the_scan_finds() {

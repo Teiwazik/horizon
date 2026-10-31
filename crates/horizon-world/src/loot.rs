@@ -247,6 +247,18 @@ fn slot_in_group(slot: &str, group: &str) -> bool {
         _ => slot == group,
     }
 }
+/// The item a recipe's `result` names. `ItemStackTemplate.CODEC` and `TransmuteResult.CODEC`
+/// read a stack's fields (`id`, `count`, `components`) or, as their alternative, a bare item id
+/// (`Item.CODEC`): `"result": {"id": "mod:item"}` and `"result": "mod:item"` are the same item.
+/// None for a stack without an `id` and for anything else, such as the `item` key of older
+/// versions.
+pub fn recipe_result_id(result: &Value) -> Option<&str> {
+    match result {
+        Value::String(id) => Some(id),
+        Value::Object(fields) => fields.get("id")?.as_str(),
+        _ => None,
+    }
+}
 /// `LevelBasedValue.calculate`.
 pub fn level_value(v: &Value, level: i32) -> f32 {
     match v {
@@ -542,7 +554,7 @@ impl LootData {
             .map(|id| &recipes[id])
             .filter(|r| r["type"] == "minecraft:smelting")
             .filter_map(|r| {
-                let result = r["result"]["id"].as_str()?.to_owned();
+                let result = recipe_result_id(&r["result"])?.to_owned();
                 let count = r["result"]["count"].as_i64().unwrap_or(1) as i32;
                 Some((r["ingredient"].clone(), result, count))
             })
@@ -1787,5 +1799,31 @@ mod namespace_tests {
             ["minecraft:ponder_goat_horn", "minecraft:sing_goat_horn"]
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod recipe_result_tests {
+    use super::*;
+
+    /// `ItemStackTemplate.CODEC` reads a stack's fields or a bare item id.
+    #[test]
+    fn a_result_is_an_object_with_an_id_or_a_bare_item_id() {
+        let id = |json: &str| {
+            let v: Value = serde_json::from_str(json).unwrap();
+            recipe_result_id(&v).map(str::to_owned)
+        };
+        assert_eq!(
+            id(r#"{"id": "ruby:ruby", "count": 3}"#).as_deref(),
+            Some("ruby:ruby")
+        );
+        assert_eq!(id(r#""ruby:ruby""#).as_deref(), Some("ruby:ruby"));
+        // No `id` (a transmuting recipe keeps its input's item), the `item` key of older
+        // versions and anything that is neither an object nor a string name no item.
+        assert_eq!(id(r#"{"count": 2}"#), None);
+        assert_eq!(id(r#"{"item": "minecraft:stick"}"#), None);
+        assert_eq!(id(r#"{"id": 7}"#), None);
+        assert_eq!(id("null"), None);
+        assert_eq!(id("[]"), None);
     }
 }

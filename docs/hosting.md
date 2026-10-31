@@ -224,6 +224,7 @@ horizon-server status [--json]           up or not, TPS, MSPT, players, chunks, 
 horizon-server cmd COMMAND...            one console command, and what it answers
 horizon-server logs [-f] [-n N]          the log; -f follows it
 horizon-server console                   attach: the live log, TPS/players at the top, type commands; Ctrl-D detaches
+horizon-server mcp                       an MCP server on stdio, so an AI agent can run and moderate the server
 horizon-server report [SECONDS]          record a performance report (below)
 horizon-server op|deop NAME
 horizon-server whitelist on|off|list

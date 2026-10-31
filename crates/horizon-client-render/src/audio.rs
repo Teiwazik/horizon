@@ -1074,6 +1074,15 @@ impl Audio {
             heard: Default::default(),
             stopped: Default::default(),
             preview: Default::default(),
+            // The device belongs to the first player's output, which looks after it.
+            #[cfg(feature = "audio")]
+            default_seen: self.default_seen.clone(),
+            #[cfg(feature = "audio")]
+            cards_seen: self.cards_seen.clone(),
+            #[cfg(feature = "audio")]
+            devices_seen: self.devices_seen.clone(),
+            #[cfg(feature = "audio")]
+            device_ticks: 0,
         }
     }
     /// Sync the volume options, refreshing the categories that changed
@@ -1098,6 +1107,11 @@ impl Audio {
     /// at once a second.
     #[cfg(feature = "audio")]
     fn should_change_device(&mut self) -> bool {
+        // A splitscreen share plays through the first player's output: it leaves the device,
+        // and the mixer's lost flag, to that output.
+        if self.backend.owner != 0 {
+            return false;
+        }
         let (current, lost) = match self.backend.mixer.lock() {
             Ok(mut m) => (m.device_name.clone(), std::mem::take(&mut m.device_lost)),
             Err(_) => return false,

@@ -122,6 +122,9 @@ address. The script then checks, from both sides, what a guest's game used to ge
              pushes it, as in vanilla), not ever faster across the ground.
 - eat:       holding right click with bread, the guest's own screen plays the eating (the item in use
              counts up) and the server eats one loaf and feeds the guest.
+- eat-on-block: sweet berries clicked on a block they can't be planted on: the guest's own screen
+             plays the eating and the server eats one, a click released early eats nothing, and on
+             dirt they are planted and not eaten (BlockItem.useOn).
 - consume-release: the host and the guest each cancel eating a golden apple and drinking milk from
               either hand: use ends on client and server, the item and effects stay, and holding
               use to completion still consumes the item (#1293).
@@ -342,7 +345,7 @@ CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'menu-transfer'
           'flow-push', 'bubble-column', 'arrows', 'kills', 'looting', 'leave', 'hurt', 'looks', 'leads', 'respawn', 'containers', 'names', 'feedback', 'titles', 'chat', 'styles',
           'commands', 'recipes', 'machines', 'brewing', 'loom', 'stonecutter', 'grindstone', 'anvil', 'smithing',
           'enchanting', 'beacon', 'crafter', 'lectern', 'cartography', 'trials', 'clicks', 'wheel', 'sleep', 'sleep-villager', 'bed-occupied', 'sleep-reload', 'predict', 'push',
-          'piston-push', 'piston-slime', 'eat', 'eating', 'xp', 'objects', 'projectiles', 'thrown', 'sparks', 'hud', 'sidebar', 'border', 'particles',
+          'piston-push', 'piston-slime', 'eat', 'eat-on-block', 'eating', 'xp', 'objects', 'projectiles', 'thrown', 'sparks', 'hud', 'sidebar', 'border', 'particles',
           'worn', 'blast', 'barter', 'deflect', 'fireball', 'light', 'time', 'swings', 'cracks', 'plates', 'effects',
           'portals', 'distance', 'growth', 'doors', 'flight', 'ladder', 'boats', 'boat_shoved', 'minecarts', 'frames', 'hands',
           'lightning', 'riding', 'occupied_horse', 'mounts', 'worldspawn', 'beds', 'shield', 'deathmining', 'contacts', 'absorption',
@@ -3454,6 +3457,62 @@ def check_eat(host, guest, out):
     return detail
 
 
+def check_eat_on_block(host, guest, out):
+    guest('command', command='gamemode survival')
+    guest('command', command='clear @s')
+    guest('command', command='effect give @s minecraft:hunger 3 255')
+    guest.wait(70)
+    guest('command', command='effect clear @s')
+    guest('command', command='give @s minecraft:sweet_berries 4')
+    x, y, z = (int(v // 1) for v in pos_of(guest))
+    stone, dirt = (x, y - 1, z + 1), (x + 1, y - 1, z)
+    guest('command', command=f'fill {x - 1} {y} {z - 1} {x + 1} {y + 2} {z + 1} minecraft:air')
+    guest('command', command=f'setblock {stone[0]} {stone[1]} {stone[2]} minecraft:stone')
+    guest('command', command=f'setblock {dirt[0]} {dirt[1]} {dirt[2]} minecraft:dirt')
+    guest.wait(10)
+    guest.raw('select', 'minecraft:sweet_berries')
+    berries = lambda: guest('inventory')['counts'].get('minecraft:sweet_berries', 0)
+    hungry = guest('state')['player']['food']
+
+    # Held on stone: the use runs on this client as well as on the server.
+    guest.raw('look-at-block', *stone, 'up')
+    guest.wait(2)
+    guest.raw('mouse', 'right', 'down')
+    using = []
+    for _ in range(4):
+        time.sleep(0.2)
+        using.append(guest('state').get('using'))
+    time.sleep(0.8)
+    guest.raw('mouse', 'right', 'up')
+    guest.wait(10)
+    held = {'using': using, 'after': guest('state').get('using'), 'left': berries(),
+            'food': guest('state')['player']['food']}
+
+    # Let go at once: the release stops the server's use too.
+    guest.raw('mouse', 'right', 'down')
+    guest.wait(2)
+    started = guest('state').get('using')
+    guest.raw('mouse', 'right', 'up')
+    guest.wait(50)
+    short = {'started': started, 'after': guest('state').get('using'), 'left': berries()}
+
+    # Dirt is where they are planted, and a planted berry isn't eaten.
+    guest.raw('look-at-block', *dirt, 'up')
+    guest.wait(2)
+    guest.raw('mouse', 'right', 'click')
+    guest.wait(50)
+    planted = {'block': guest('block', x=dirt[0], y=y, z=dirt[2]), 'using': guest('state').get('using'),
+               'left': berries()}
+    detail = {'hungry': hungry, 'held': held, 'short': short, 'planted': planted}
+    ticks = [u['ticks'] for u in using if u]
+    assert hungry < 20, f'the guest is not hungry: {detail}'
+    assert len(ticks) >= 3 and ticks == sorted(ticks) and ticks[-1] > ticks[0], f"no eating on the guest's screen: {detail}"
+    assert held['left'] == 3 and held['food'] > hungry and held['after'] is None, f'the server did not eat one berry: {detail}'
+    assert short['started'] and short['after'] is None and short['left'] == 3, f'an early release still ate: {detail}'
+    assert 'sweet_berry_bush' in str(planted['block']) and planted['left'] == 2 and planted['using'] is None, f'not planted on dirt: {detail}'
+    return detail
+
+
 def watch_mining(miner, pos, seen):
     """Mine the block at `pos` (by hand, for seconds) and sample `seen()` meanwhile."""
     dig = threading.Thread(target=miner.raw, args=('break', *pos))
@@ -5889,7 +5948,7 @@ CHECK_FNS = {'tab': check_tab, 'self': check_self, 'armour': check_armour,
              'bed-occupied': check_bed_occupied, 'sleep-reload': check_sleep_reload,
              'push': check_push, 'piston-push': check_piston_push,
              'piston-slime': check_piston_slime,
-             'eat': check_eat, 'eating': check_eating, 'xp': check_xp,
+             'eat': check_eat, 'eat-on-block': check_eat_on_block, 'eating': check_eating, 'xp': check_xp,
              'objects': check_objects, 'projectiles': check_projectiles, 'blast': check_blast,
              'light': check_light, 'plates': check_plates, 'swings': check_swings,
              'cracks': check_cracks, 'time': check_time, 'growth': check_growth, 'doors': check_doors,
