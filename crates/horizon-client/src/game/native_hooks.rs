@@ -6,6 +6,9 @@
 //! Horizon's own HUD extras do, and keep a mod's settings where the
 //! WebAssembly mod of the same id kept them.
 //!
+//! API 44 adds the server starting and stopping (`native_server_about_to_start`,
+//! `native_server_stopping`).
+//!
 //! API 43 adds the server level's random (`native_level_random`).
 //!
 //! API 42 adds the item entities near a block (`native_item_entities`,
@@ -199,7 +202,7 @@ pub(super) use horizon_world::level::flags;
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 43;
+pub(crate) const NATIVE_HOOKS_API: u32 = 44;
 
 impl GameLevel<'_> {
     /// An authoritative server committed a changed state through `Level.setBlock`.
@@ -666,6 +669,26 @@ impl Game<'_> {
     ) {
         let _ = (context, phase, error_text);
     }
+    /// The server is about to open its worlds: nothing of the world is
+    /// loaded yet (NeoForge's `ServerAboutToStartEvent`, "called before the
+    /// server begins loading anything"). Vanilla's `MinecraftServer.loadLevel`
+    /// start. Server-side: the single player server thread once Play is
+    /// pressed, a dedicated server once its settings are read. Each is
+    /// followed by `native_world_lifecycle`'s `WorldOpenReady` or
+    /// `WorldOpenFailed`. `dedicated` tells a dedicated server from the single
+    /// player one. API 44.
+    pub(super) fn native_server_about_to_start(&mut self, dedicated: bool) {
+        let _ = dedicated;
+    }
+    /// The server begins an orderly stop (NeoForge's `ServerStoppingEvent`):
+    /// the start of vanilla's `MinecraftServer.stopServer`, with the worlds
+    /// still loaded and the players still connected and not yet saved, so a
+    /// mod can save its own data or tell them. `native_world_lifecycle`'s
+    /// `WorldCloseFinal` follows once the worlds are saved. A server whose loop
+    /// fails stops without this (`WorldCloseFailed` reports it). API 44.
+    pub(super) fn native_server_stopping(&mut self, dedicated: bool) {
+        let _ = dedicated;
+    }
     /// The authoritative server tick's phases: `ServerTickStart` before any
     /// level is ticked (NeoForge's `ServerTickEvent.Pre`), `ServerTickEnd`
     /// after the last (`.Post`). Read blocks with `native_server_block`, by
@@ -730,7 +753,8 @@ impl Game<'_> {
     /// A living player's server tick ends (`ServerPlayer.tick`): once a tick
     /// for every player in the world, after their digging, item use,
     /// cooldowns, statistics and advancements. The helpers read that player.
-    /// API 31.
+    /// Players still tick under `/tick freeze`; a dead player doesn't, nor
+    /// does one killed earlier in the same tick. API 31.
     pub(super) fn native_player_tick(&mut self) {}
     /// The player-health HUD rows, once a frame the HUD draws them
     /// (`HealthHud::layout`, not under F1): `inputs` carries the health,
@@ -1106,7 +1130,8 @@ impl Game<'_> {
         let _ = (player, entity, kind);
     }
     /// `player` threw `count` of `item` (`Player.drop`: the drop key, a
-    /// menu's throw...). It only hears. Server-side. API 40.
+    /// menu's throw...), not what scatters when they die. It only hears.
+    /// Server-side. API 40.
     pub(super) fn native_item_dropped(&mut self, player: u128, item: &str, count: u32) {
         let _ = (player, item, count);
     }
@@ -1144,7 +1169,7 @@ impl Game<'_> {
         let _ = (slot, selected);
     }
     /// A player's equipment slot `slot` (`head`, `chest`, `legs`, `feet`,
-    /// `offhand`, and `mainhand` on a swap of the hands) took a different
+    /// `offhand`, and `mainhand` on a swap of the hands or `/item`) took a different
     /// item, `new` (none when it was emptied): `LivingEntity.onEquipItem`,
     /// before the equip sound. It only hears. Never for a spectator.
     /// Server-side, for every player of the world (the helpers read the

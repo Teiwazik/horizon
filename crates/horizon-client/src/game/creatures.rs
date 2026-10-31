@@ -17,6 +17,7 @@ use horizon_client::{
         farm::Climate,
         spawning::{self, BiomeFacts},
     },
+    particles::{ParticleOptions, ParticleType},
     projectiles::{Hit, Projectile, ProjectileKind, ProjectileWorld},
     text::Text,
 };
@@ -390,6 +391,7 @@ impl Game<'_> {
         self.mobs.push(mob);
         self.native_mobs_joined(self.mobs.len() - 1, false);
         self.enchant_spawn_equipment(id);
+        self.halloween_spawn_head(id);
         if !persistent && !scripted {
             self.spawn_jockeys(id, true);
         }
@@ -571,6 +573,7 @@ impl Game<'_> {
             block_tags: &self.items().block_tags,
             biomes: self.res.biomes(),
             mob_griefing: self.ui.rules.bool("mob_griefing"),
+            universal_anger: self.ui.rules.bool("universal_anger"),
             mob_drops: self.ui.rules.bool("mob_drops"),
             max_entity_cramming: self.ui.rules.int("max_entity_cramming"),
             end: self.dim == Dim::End,
@@ -888,6 +891,7 @@ impl Game<'_> {
         self.tick_fangs();
         self.tick_allays();
         self.tick_pandas();
+        self.tick_mob_looting();
         self.tick_breeze_effects();
         self.tick_sniffer_effects();
         self.piglin_pickups();
@@ -1053,6 +1057,7 @@ impl Game<'_> {
         let projectile = match d.kind {
             DamageKind::Arrow => Some("minecraft:arrow"),
             DamageKind::Fireball => Some("minecraft:fireball"),
+            DamageKind::Fireworks => Some("minecraft:firework_rocket"),
             _ => None,
         };
         let direct = match projectile {
@@ -1152,6 +1157,10 @@ impl Game<'_> {
                 }),
                 DamageKind::Fireball => Some(LootEntity {
                     kind: "minecraft:fireball".into(),
+                    ..LootEntity::default()
+                }),
+                DamageKind::Fireworks => Some(LootEntity {
+                    kind: "minecraft:firework_rocket".into(),
                     ..LootEntity::default()
                 }),
                 _ => source.clone(),
@@ -1538,8 +1547,7 @@ impl Game<'_> {
                     self.combat.explosion_source = Some(mob);
                     // The creeper causes the blast's damage, but it is out of
                     // the mob list already: its name comes with the event.
-                    self.combat.exploded.push((mob, name.clone()));
-                    self.note_named_attacker("minecraft:explosion", mob, name);
+                    self.combat.exploded.push((mob, name));
                     if charged {
                         self.combat.charged_exploders.push(mob);
                     }
@@ -1557,9 +1565,6 @@ impl Game<'_> {
                             .map(|m| m.id)
                             .next()
                     });
-                    if !noted && let Some(id) = source_mob {
-                        self.note_attacker("minecraft:explosion", id);
-                    }
                     self.combat.explosion_source = source_mob;
                     self.combat.explosion_source_named = noted;
                     self.combat.explosion_cause = match species {
@@ -2675,17 +2680,21 @@ impl Game<'_> {
         damage_type: &str,
         known: Option<Option<u32>>,
     ) -> bool {
+        let rocket = std::mem::take(&mut self.combat.rocket_hit);
         // ServerPlayer.canHarmPlayer refused another player's projectile.
         if self.creative || self.combat.refuse_player_hit {
             return false;
         }
-        let projectile = self
-            .res
-            .stations()
-            .enchantments
-            .damage_tags
-            .get("minecraft:is_projectile")
-            .is_some_and(|t| t.contains(damage_type));
+        // A projectile entity dealt it: `#is_projectile`, or a firework
+        // rocket (its `fireworks` type is not in the tag).
+        let projectile = rocket
+            || self
+                .res
+                .stations()
+                .enchantments
+                .damage_tags
+                .get("minecraft:is_projectile")
+                .is_some_and(|t| t.contains(damage_type));
         let blocking = self.player_blocking(from, damage_type, false);
         let raised = blocking.is_some();
         // Melee: the attacker stands at `from` (another player's hit has no mob behind it).
@@ -2766,7 +2775,17 @@ impl Game<'_> {
                 .map(|m| self.mob_entity(m));
             self.trigger_entity_hurt_player(&horizon_client::advancements::DamageView {
                 kind: damage_type.to_owned(),
-                direct: source.clone().filter(|_| !projectile),
+                // Arrows and the like name no direct entity here; a
+                // rocket's burst names the rocket.
+                direct: if rocket {
+                    Some(horizon_client::advancements::EntityView {
+                        kind: "minecraft:firework_rocket".to_owned(),
+                        position: from.unwrap_or_default(),
+                        ..Default::default()
+                    })
+                } else {
+                    source.clone().filter(|_| !projectile)
+                },
                 is_direct: !projectile,
                 source,
                 original: amount,
@@ -3934,6 +3953,13 @@ impl Game<'_> {
                 Hit::None => {}
             },
             (ProjectileKind::LargeFireball { power }, hit) => {
+                // Fireball explosions are caused by the shooter. A direct hit
+                // on the player takes `projectile_owner`, so read the owner
+                // from the fireball.
+                let owner = match p.owner {
+                    Some(Who::Mob(id)) => Some(id),
+                    _ => None,
+                };
                 if let Hit::Entity { who, .. } = hit {
                     match who {
                         Who::Player => {
@@ -3955,11 +3981,7 @@ impl Game<'_> {
                         }
                     }
                 }
-                // Fireball explosions are caused by the shooter.
-                if let Some(owner) = self.combat.projectile_owner {
-                    self.note_attacker("minecraft:explosion", owner);
-                }
-                self.combat.explosion_owner = self.combat.projectile_owner;
+                self.combat.explosion_owner = owner;
                 // The blast's source names the owner, so a dragon it kills
                 // remembers the player who shot it.
                 self.set_blast_by_player(p.owner == Some(Who::Player));
@@ -4395,6 +4417,16 @@ impl Game<'_> {
         let mut drops: Vec<(String, u32)> = Vec::new();
         let is_food = m.kind.food.contains(&item);
         let baby_turtle = species == Species::Turtle && m.is_baby();
+        // MushroomCow.getEffectsFromItemStack: the item's block supplies them.
+        let flower = if species == Species::Mooshroom {
+            horizon_client::flowers::stew_effect(&item)
+        } else {
+            None
+        };
+        let mut give_stew: Option<Vec<(Arc<str>, i32)>> = None;
+        // `Some(true)` for the four spell particles, `Some(false)` for the two
+        // smoke puffs of a cow that already holds effects.
+        let mut stew_particles: Option<bool> = None;
         match species {
             Species::Cow | Species::Mooshroom if item == "minecraft:bucket" && !m.is_baby() => {
                 give = Some("minecraft:milk_bucket");
@@ -4411,10 +4443,22 @@ impl Game<'_> {
                     "entity.goat.milk"
                 });
             }
+            // MushroomCow.mobInteract: a bowl gives back what a flower left as
+            // a suspicious stew, or plain stew when it holds no effects.
             Species::Mooshroom if item == "minecraft:bowl" && !m.is_baby() => {
-                give = Some("minecraft:mushroom_stew");
                 consume = true;
-                sound = Some("entity.mooshroom.milk");
+                match m.extra.stew_effects.take() {
+                    Some(effects) => {
+                        give = Some("minecraft:suspicious_stew");
+                        give_stew = Some(effects);
+                        // `playSound(.., 1.0F, 1.0F)` at the feet.
+                        eat = Some(("entity.mooshroom.suspicious_milk", 1.0, 1.0));
+                    }
+                    None => {
+                        give = Some("minecraft:mushroom_stew");
+                        sound = Some("entity.mooshroom.milk");
+                    }
+                }
             }
             Species::Mooshroom if item == "minecraft:shears" && !m.is_baby() => {
                 // MushroomCow.shear: becomes a cow and drops five mushrooms.
@@ -4438,6 +4482,19 @@ impl Game<'_> {
                     setup,
                 }])?;
                 self.damage_held_tool();
+            }
+            // MushroomCow.mobInteract: a brown adult takes the flower's effects
+            // unless it holds some already, when it only puffs smoke.
+            Species::Mooshroom if m.extra.variant == 1 && !m.is_baby() && flower.is_some() => {
+                if m.extra.stew_effects.is_some() {
+                    stew_particles = Some(false);
+                } else {
+                    let (effect, ticks) = flower.expect("the guard checked");
+                    m.extra.stew_effects = Some(vec![(Arc::from(effect), ticks)]);
+                    consume = true;
+                    eat = Some(("entity.mooshroom.eat", 2.0, 1.0));
+                    stew_particles = Some(true);
+                }
             }
             Species::Sheep if item == "minecraft:shears" && !m.extra.sheared && !m.is_baby() => {
                 m.extra.sheared = true;
@@ -4830,6 +4887,23 @@ impl Game<'_> {
         if !handled {
             return Ok(false);
         }
+        if let Some(fresh) = stew_particles {
+            // `SpellParticleOption.create(EFFECT, -1, 1)` is the plain white
+            // effect particle; the smoke is the already-fed answer.
+            let ty = if fresh {
+                ParticleType::Effect
+            } else {
+                ParticleType::Smoke
+            };
+            let options = ParticleOptions::simple(ty);
+            let at = [feet[0], feet[1] + 0.5, feet[2]];
+            let (spread, count) = ([0.5, 0.0, 0.5], if fresh { 4 } else { 2 });
+            // shortcut: scalar speed models DEFAULT randomization; 26.3 sends
+            // ALTERNATIVE_WITH_SPEED with a per-axis maximum speed.
+            self.particles
+                .send_particles(&options, at, spread, 0.2, count);
+            self.lan_send_particles(&options, at, spread, 0.2, count);
+        }
         // PlayerInteractTrigger: the item used on the mob, once the interaction took.
         if let Some(stack) = &held {
             let target = self.mob_entity(&self.mobs[index]);
@@ -4864,12 +4938,18 @@ impl Game<'_> {
             }
         }
         if let Some(g) = give {
-            let stack = ItemStack {
+            let mut stack = ItemStack {
                 item: g.into(),
                 count: 1,
                 damage: 0,
                 extra: None,
             };
+            if let Some(effects) = give_stew {
+                stack.extra = Some(Box::new(horizon_client::item_data::StackData {
+                    stew_effects: effects,
+                    ..Default::default()
+                }));
+            }
             if self.stack_in(selected).is_none() {
                 *self.stack_in_mut(selected) = Some(stack);
             } else if let Some(rest) = self.give(stack) {
@@ -5120,6 +5200,7 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::entity_nbt::apply_item_components(m, stack);
         }
+        self.apply_spawn_egg_entity_data(id, stack);
         self.swing_arm();
         if !self.creative
             && let Some(s) = self.held_mut().as_mut()
@@ -5130,6 +5211,25 @@ impl Game<'_> {
             }
         }
         Ok(true)
+    }
+    /// `EntityType.updateCustomEntityTag`: the egg's `minecraft:entity_data` on
+    /// the mob it spawned, once the guards let it through, as
+    /// `TypedEntityData.loadInto`: the mob's own compound, the data merged over
+    /// it, loaded back into the same mob (`/data merge entity`'s loader).
+    fn apply_spawn_egg_entity_data(&mut self, id: u32, stack: &ItemStack) {
+        let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+            return;
+        };
+        let kind = self.mobs[i].kind.id.clone();
+        let op = self.acting_player_is_op();
+        let Some(data) = horizon_client::block_entity_item::spawn_egg_entity_data(stack, &kind, op)
+        else {
+            return;
+        };
+        let own = self.mob_tree_nbt(i);
+        let tag = horizon_client::data_cmd::merged(&own, data);
+        // Nothing to report: the mob's own compound always loads back.
+        let _ = self.apply_entity_nbt(super::commands::Target::Mob(id), tag);
     }
     /// A beam target's centre (half its height), interpolated.
     fn beam_target(&self, who: Option<Who>, alpha: f64) -> Option<glam::DVec3> {
@@ -6035,6 +6135,7 @@ mod pearl_tests {
             block_tags: &items.block_tags,
             biomes: &biomes,
             mob_griefing: true,
+            universal_anger: false,
             mob_drops: true,
             max_entity_cramming: 24,
             difficulty: spawning::LocalDifficulty::new(2, 1000, 0, 0.0),

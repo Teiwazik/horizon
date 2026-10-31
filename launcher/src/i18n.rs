@@ -29,10 +29,12 @@ pub enum Language {
     Ukrainian,
     #[serde(rename = "pl")]
     Polish,
+    #[serde(rename = "pt-br")]
+    PortugueseBrazil,
 }
 
 impl Language {
-    pub const ALL: [Language; 8] = [
+    pub const ALL: [Language; 9] = [
         Self::English,
         Self::French,
         Self::Russian,
@@ -41,6 +43,7 @@ impl Language {
         Self::Spanish,
         Self::Ukrainian,
         Self::Polish,
+        Self::PortugueseBrazil,
     ];
 
     /// Its code in `settings.json` and on the command line.
@@ -54,6 +57,7 @@ impl Language {
             Self::Spanish => "es",
             Self::Ukrainian => "uk",
             Self::Polish => "pl",
+            Self::PortugueseBrazil => "pt-br",
         }
     }
 
@@ -68,14 +72,31 @@ impl Language {
             Self::Spanish => "Español",
             Self::Ukrainian => "Українська",
             Self::Polish => "Polski",
+            Self::PortugueseBrazil => "Português (Brasil)",
         }
     }
 
-    /// A language code (`fr`, `fr-CH`, `fr_FR.UTF-8`), if the launcher has it.
+    /// Parses a language code (e.g. `fr`, `fr-CH`, `pt-BR`, or `pt_BR.UTF-8`)
+    /// if the launcher supports it.
+    ///
+    /// Underscores are normalized to hyphens to support locale formats commonly
+    /// returned by operating systems. Brazilian Portuguese (`pt-BR`) is matched
+    /// explicitly, while other Portuguese variants (such as `pt-PT`) are not
+    /// mapped to it.
     pub fn parse(code: &str) -> Option<Self> {
         let lower = code.trim().to_ascii_lowercase();
-        let base = lower.split(['-', '_', '.', '@']).next().unwrap_or("");
-        Self::ALL.into_iter().find(|l| l.code() == base)
+        let clean = lower.split(['.', '@']).next().unwrap_or("");
+        let normalized = clean.replace('_', "-");
+
+        if normalized == "pt-br" {
+            return Some(Self::PortugueseBrazil);
+        }
+
+        let base = normalized.split('-').next().unwrap_or("");
+
+        Self::ALL
+            .into_iter()
+            .find(|language| language.code() == base)
     }
 
     /// The first of the system's preferred languages the launcher has, else English.
@@ -103,6 +124,7 @@ impl Language {
             Self::Spanish => include_str!("../lang/es.json"),
             Self::Ukrainian => include_str!("../lang/uk.json"),
             Self::Polish => include_str!("../lang/pl.json"),
+            Self::PortugueseBrazil => include_str!("../lang/pt-br.json"),
         }
     }
 }

@@ -33,6 +33,7 @@ pub mod doors;
 pub mod drops;
 pub mod enderman;
 pub mod equine;
+pub mod equip;
 pub mod farm;
 pub mod finalize;
 pub mod fox;
@@ -639,6 +640,16 @@ impl Damage {
             from: Some(from),
         }
     }
+    /// `DamageSources.fireworks(rocket, owner)`: `attacker` is the owner
+    /// (none for a rocket nobody fired), `from` the rocket's position, which
+    /// the knockback pushes away from (`calculateHorizontalHurtKnockbackDirection`).
+    pub fn fireworks(attacker: Option<Who>, from: [f64; 3]) -> Self {
+        Self {
+            kind: DamageKind::Fireworks,
+            attacker,
+            from: Some(from),
+        }
+    }
     pub fn mob(id: u32, from: [f64; 3]) -> Self {
         Self {
             kind: DamageKind::MobAttack,
@@ -798,6 +809,9 @@ pub struct Extra {
     /// Secondary variant (horse markings, tropical fish pattern colours, panda hidden gene).
     pub variant2: u8,
     pub variant3: u8,
+    /// `MushroomCow.stewEffects`: what a brown one took from a flower, given
+    /// back in its next bowl of stew. `None` is vanilla's null.
+    pub stew_effects: Option<Vec<(Arc<str>, i32)>>,
     /// Dye colour id (sheep wool, collars).
     pub color: u8,
     pub sheared: bool,
@@ -2191,6 +2205,8 @@ pub struct MobWorld<'a> {
     pub biomes: &'a crate::biome::Biomes,
     /// The `mob_griefing` game rule.
     pub mob_griefing: bool,
+    /// The `universal_anger` game rule (`NeutralMob.isAngryAtAllPlayers`).
+    pub universal_anger: bool,
     /// The `mob_drops` game rule (`shouldDropLoot`).
     pub mob_drops: bool,
     /// The `max_entity_cramming` game rule.

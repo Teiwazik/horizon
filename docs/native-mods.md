@@ -154,7 +154,9 @@ gets it back. The clicking player's own client still predicts the crack until th
 Bundles that use it need `"hooks": 30`.
 
 API 31 adds a player's server tick: `native_player_tick` runs once a tick for every living player in the world, at the
-end of their `ServerPlayer.tick`, with the helpers reading that player. Bundles that use it need `"hooks": 31`.
+end of their `ServerPlayer.tick`, with the helpers reading that player. Players still tick while the game is frozen
+(`/tick freeze`), as in vanilla. A dead player isn't called, and neither is one killed earlier in the same tick; it
+runs again once they respawn. Bundles that use it need `"hooks": 31`.
 
 API 32 adds shape updates a mod can answer through `native_update_shape`: on an authoritative server, each time a
 block's state is worked out from a neighbour (`BlockBehaviour.updateShape`): neighbour shape updates after a
@@ -241,6 +243,13 @@ API 43 adds `native_level_random(dimension)`, the server level's own random (van
 as a Java mod's would. It is `None` on a client of a server and for a level that isn't open: the Nether and the End
 open when someone first goes there and close after 300 ticks with nobody in them. Bundles
 that use it need `"hooks": 43`.
+
+API 44 adds the server starting and stopping, on the single player server thread and on a dedicated server:
+`native_server_about_to_start(dedicated)` before the worlds load (NeoForge's `ServerAboutToStartEvent`), and
+`native_server_stopping(dedicated)` when an orderly stop begins, with the players still connected and not yet saved
+(`ServerStoppingEvent`). Each start is followed by `native_world_lifecycle`'s `WorldOpenReady` or `WorldOpenFailed`,
+and each stop by `WorldCloseFinal`; a server whose loop fails reports `WorldCloseFailed` instead of stopping. Bundles
+that use them need `"hooks": 44`.
 
 ## A bundle
 

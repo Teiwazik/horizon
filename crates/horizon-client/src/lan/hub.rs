@@ -33,6 +33,7 @@ use horizon_world::{
     block_collision_scan::BlockCollisionScan,
     collision_context::CollisionContext,
     nbt::{JavaString, Tag},
+    world_movement::in_range_of_ground,
 };
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
@@ -40,6 +41,7 @@ use std::sync::{Arc, Mutex, atomic::Ordering};
 pub mod chat;
 
 pub mod game_event {
+    pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 0;
     pub const START_RAINING: u8 = 1;
     pub const STOP_RAINING: u8 = 2;
     pub const CHANGE_GAME_MODE: u8 = 3;
@@ -3116,7 +3118,13 @@ impl Hub {
     }
 
     /// Set a guest's game mode and tell everyone (ServerPlayer.setGameMode).
-    pub fn set_game_mode(&mut self, conn: u32, mode: i32) {
+    pub fn set_game_mode(
+        &mut self,
+        conn: u32,
+        mode: i32,
+        world: &World,
+        collision: Option<&BlockCollisionRegistry<'_>>,
+    ) {
         let Some(g) = self.guest_mut(conn) else {
             return;
         };
@@ -3127,6 +3135,21 @@ impl Hub {
             g.flying = true;
         } else if !g.creative() {
             g.flying = false;
+        }
+        // ServerPlayerGameMode.changeGameModeForPlayer: a player left flying
+        // by the change lands when the ground is within a block.
+        if !g.spectator()
+            && g.flying
+            && let Some(binding) = collision
+        {
+            let mut scene = SceneCollisions {
+                world,
+                binding,
+                subject: None,
+            };
+            if in_range_of_ground(&mut scene, g.bounds()) {
+                g.flying = false;
+            }
         }
         let uuid = g.uuid;
         g.send(&C::GameEvent(play::GameEvent {
@@ -3198,6 +3221,19 @@ impl Hub {
                 g.send(&C::RemoveEntities(play::RemoveEntities { ids: vec![id] }));
             }
         }
+    }
+
+    /// A respawn point whose block is gone or blocked: the respawning player
+    /// is sent NO_RESPAWN_BLOCK_AVAILABLE and says
+    /// `block.minecraft.spawn.not_valid` in its chat.
+    pub fn missing_respawn_block(&self, conn: u32) {
+        self.send_to(
+            conn,
+            &C::GameEvent(play::GameEvent {
+                event: game_event::NO_RESPAWN_BLOCK_AVAILABLE,
+                param: 0.0,
+            }),
+        );
     }
 
     /// PlayerList.respawn: back to `at` with a fresh start. The vanilla client waits on its

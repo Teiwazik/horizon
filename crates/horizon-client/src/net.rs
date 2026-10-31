@@ -341,12 +341,12 @@ pub fn save_friends_relay(relay: &str) {
 
 /// Reach the friend's world from the code (directly, or through a relay)
 /// and open the tunnel: the loopback address to connect to.
-fn join_friend(code: &str, send: &Sender<Event>) -> Result<(String, u16), String> {
+fn join_friend(code: &str, lang: &Language, send: &Sender<Event>) -> Result<(String, u16), String> {
     use horizon_friends::{
         PathMode,
         guest::{self, GuestConfig},
     };
-    status(send, "Finding your friend's world...");
+    status(send, &tr(lang, "horizon.multiplayer.finding_friend"));
     let tunnel = guest::join(&GuestConfig {
         code: code.to_owned(),
         relay: friends_relay_setting(),
@@ -384,25 +384,26 @@ fn tr(lang: &Language, key: &str) -> String {
 /// that sends nothing for 30 s has frozen or dropped off the network.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `Connection.connect`: the socket to a server, with `read_timeout`
+/// `ConnectScreen.startConnecting`: the socket to a server, with `read_timeout`
 /// ([`READ_TIMEOUT`]) on every read. The friends relay supplies a concrete
-/// endpoint, not a Minecraft hostname, so it skips the SRV lookup.
+/// endpoint, not a Minecraft hostname, so it skips the SRV lookup. Returns the
+/// resolved host and port for `ConnectScreen`'s login handshake.
 fn connect_tcp(
     host: &str,
     port: u16,
     relayed: bool,
     read_timeout: Duration,
-) -> Result<Connection, String> {
-    let c = if relayed {
-        Connection::connect(host, port, Duration::from_secs(10))
+) -> Result<(Connection, String, u16), String> {
+    let (c, host, port) = if relayed {
+        Connection::connect(host, port, Duration::from_secs(10)).map(|c| (c, host.to_owned(), port))
     } else {
-        Connection::connect_server(host, port, Duration::from_secs(10))
+        Connection::connect_server_with_address(host, port, Duration::from_secs(10))
     }
     .map_err(|e| e.to_string())?;
     c.reader
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
-    Ok(c)
+    Ok((c, host, port))
 }
 
 /// `Connection.exceptionCaught`: a read that timed out ends with
@@ -446,16 +447,16 @@ fn run(
         (address.to_owned(), 0, Connection::local(pipe))
     } else {
         let (host, port) = match address.strip_prefix(FRIEND) {
-            Some(code) => join_friend(code, send)?,
+            Some(code) => join_friend(code, lang, send)?,
             None => {
                 let Some(target) = parse_address(address) else {
                     return Ok(format!("Invalid server address: {address}"));
                 };
-                status(send, "Connecting to the server...");
+                status(send, &tr(lang, "connect.connecting"));
                 target
             }
         };
-        let c = connect_tcp(&host, port, address.starts_with(FRIEND), READ_TIMEOUT)?;
+        let (c, host, port) = connect_tcp(&host, port, address.starts_with(FRIEND), READ_TIMEOUT)?;
         (host, port, c)
     };
     *shared_counters.lock().unwrap() = Some(c.reader.counters.clone());
@@ -555,7 +556,7 @@ fn run(
             login::Clientbound::Unknown(..) => {}
         }
     };
-    status(send, "Joining world...");
+    status(send, &tr(lang, "connect.joining"));
     c.send(&cfg::Serverbound::ClientInformation(info).encode())
         .map_err(e)?;
     c.send(
@@ -969,6 +970,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_login_keeps_the_hostname_in_the_handshake() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let session = Session::connect(
+            &format!("localhost:{port}"),
+            "Probe",
+            None,
+            cfg::ClientInformation::new(8),
+            Arc::new(Language::new()),
+            PathBuf::new(),
+        );
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut server = Connection::from_stream(stream).unwrap();
+        let (id, body) = server.recv().unwrap();
+        let handshake::Serverbound::Intention(packet) =
+            handshake::Serverbound::decode(id, &body).unwrap()
+        else {
+            panic!("expected login handshake")
+        };
+        assert_eq!((packet.host.as_str(), packet.port), ("localhost", port));
+        assert_eq!(packet.intent, handshake::LOGIN);
+        drop(server);
+        drop(session);
+    }
+
+    #[test]
     fn legacy_ping_request_is_the_1_6_ping_host_packet() {
         let bytes = legacy_ping_request("a.b", 25565);
         assert_eq!(&bytes[..3], &[254, 1, 250]);
@@ -1024,7 +1054,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
-        let c = connect_tcp("127.0.0.1", port, true, Duration::from_millis(300)).unwrap();
+        let (c, _, _) = connect_tcp("127.0.0.1", port, true, Duration::from_millis(300)).unwrap();
         let _server = held.join().unwrap().unwrap();
         let (mut reader, writer) = c.split();
         let (done, result) = channel();

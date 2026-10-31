@@ -1011,7 +1011,7 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), 
             s.language = match value.trim() {
                 "system" | "default" => None,
                 code => Some(Language::parse(code).ok_or_else(|| {
-                    format!("{value}: say system, en, fr, ru, de, zh, es, uk or pl")
+                    format!("{value}: say system, en, fr, ru, de, zh, es, uk, pl or pt-br")
                 })?),
             }
         }
@@ -3440,7 +3440,7 @@ mod tests {
         }
         assert_eq!(
             set_setting(&mut settings, "language", "xx").unwrap_err(),
-            "xx: say system, en, fr, ru, de, zh, es, uk or pl"
+            "xx: say system, en, fr, ru, de, zh, es, uk, pl or pt-br"
         );
         set_setting(&mut settings, "language", "system").unwrap();
         assert_eq!(settings.language, None);

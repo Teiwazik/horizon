@@ -309,14 +309,21 @@ impl VanillaTerrain {
             if base + 16 <= lo || base >= hi {
                 continue;
             }
-            values.fill(0);
             let mut any = false;
-            for y in base.max(lo)..(base + 16).min(hi) {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        let id = chunk.block(bx + x, y, bz + z).0;
-                        values[((y & 15) << 8 | z << 4 | x) as usize] = id;
-                        any |= id != 0;
+            // A whole generated section is read in one pass (it runs on the
+            // server thread for every light view); a partly generated one
+            // block by block.
+            if base >= lo && base + 16 <= hi && chunk.terrain.section_states(base, &mut values) {
+                any = values.iter().any(|&id| id != 0);
+            } else {
+                values.fill(0);
+                for y in base.max(lo)..(base + 16).min(hi) {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let id = chunk.block(bx + x, y, bz + z).0;
+                            values[((y & 15) << 8 | z << 4 | x) as usize] = id;
+                            any |= id != 0;
+                        }
                     }
                 }
             }

@@ -490,26 +490,19 @@ impl StationRecipes {
         let namespaces =
             std::iter::once("minecraft".to_owned()).chain(crate::mod_content::namespaces(root));
         for namespace in namespaces {
-            let mut more: Vec<_> = fs::read_dir(root.join(format!("data/{namespace}/recipe")))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "json"))
-                .collect();
-            more.sort();
-            files.extend(more.into_iter().map(|p| (namespace.clone(), p)));
+            let dir = root.join(format!("data/{namespace}/recipe"));
+            let more = crate::crafting::recipe_files(&dir).unwrap_or_default();
+            files.extend(
+                more.into_iter()
+                    .map(|(name, p)| (namespace.clone(), name, p)),
+            );
         }
         let mut sources: Vec<(String, Value)> = files
             .iter()
-            .filter_map(|(namespace, p)| {
+            .filter_map(|(namespace, name, p)| {
                 let bytes = fs::read(p).ok()?;
                 let v = serde_json::from_slice::<Value>(&bytes).ok()?;
-                let id = format!(
-                    "{namespace}:{}",
-                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("")
-                );
-                Some((id, v))
+                Some((format!("{namespace}:{name}"), v))
             })
             .collect();
         // The world's packs' recipes over the game's own: the top pack's

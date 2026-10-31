@@ -206,6 +206,15 @@ impl<B: TerrainBlockStates> TerrainBlocks<'_, B> {
         }
         self.sections[section].state(local_index(x, y, z))
     }
+    /// Every state of section `index` in `local_index` order, as `block`
+    /// reads them one by one.
+    fn section_states(&self, index: usize, out: &mut [u32; 4096]) {
+        if self.non_air[index] == 0 {
+            out.fill(self.air.0);
+        } else {
+            self.sections[index].fill_states(out);
+        }
+    }
 }
 #[inline]
 fn local_index(x: i32, y: i32, z: i32) -> usize {
@@ -362,6 +371,18 @@ impl<'r, B: TerrainBlockStates> TerrainChunk<'r, B> {
     #[inline]
     pub fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         self.blocks.block(x, y, z)
+    }
+    /// The states of the 16-block section starting at block `y` (a multiple
+    /// of 16 inside this chunk), in `(y << 8) | (z << 4) | x` order, read in
+    /// one pass; false (and `out` untouched) when `y` is not such a start.
+    pub fn section_states(&self, y: i32, out: &mut [u32; 4096]) -> bool {
+        match self.blocks.section_index(y) {
+            Some(index) if y & 15 == 0 => {
+                self.blocks.section_states(index, out);
+                true
+            }
+            _ => false,
+        }
     }
     /// `FeatureWorld::scan_column` in this chunk: an all-air section is
     /// tested once, a mixed one read without looking the section up per block.

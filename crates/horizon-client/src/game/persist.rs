@@ -15,7 +15,7 @@ use horizon_core::{
     random::RandomSource,
     ticks::ChunkTicks,
 };
-use horizon_world::{chunk::BlockState, level::MovingPiston, nbt::Tag, registry::BlockStateId};
+use horizon_world::{level::MovingPiston, nbt::Tag, registry::BlockStateId};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -494,7 +494,12 @@ impl Game<'_> {
             finalize = c.remove(&"horizon:finalize".into()).is_some();
         }
         let riders = self.take_mob_passengers(&mut tag);
-        let mut m = entity_nbt::mob_from_nbt(&tag, self.res.mob_types(), self.next_entity)?;
+        let mut m = entity_nbt::mob_from_nbt(
+            &tag,
+            self.res.mob_types(),
+            self.next_entity,
+            Some(self.pack.assets.registry),
+        )?;
         if horizon_client::mobs::camel::is_camel(m.species()) {
             horizon_client::mobs::camel::finish_load(&mut m, self.world.game_time);
         }
@@ -534,6 +539,7 @@ impl Game<'_> {
         self.mobs.push(m);
         if finalize {
             self.enchant_spawn_equipment(id);
+            self.halloween_spawn_head(id);
         }
         for rider in riders {
             if let Some(r) = self.load_mob(rider, Some(id))
@@ -761,7 +767,12 @@ impl Game<'_> {
         } else {
             None
         };
-        let mut tag = entity_nbt::mob_to_nbt(&self.mobs[i], uuid, self.persist.raw.get(&id));
+        let mut tag = entity_nbt::mob_to_nbt(
+            &self.mobs[i],
+            uuid,
+            self.persist.raw.get(&id),
+            Some(self.pack.assets.registry),
+        );
         if horizon_client::mobs::camel::is_camel(self.mobs[i].species())
             && let Tag::Compound(c) = &mut tag
         {
@@ -841,36 +852,10 @@ impl Game<'_> {
     }
     /// `BlockState.CODEC`: a block name or `{id, properties}` (or legacy `{Name, Properties}`).
     pub(super) fn state_from_nbt(&self, tag: &Tag) -> Option<BlockStateId> {
-        let registry = self.pack.assets.registry;
-        let state = match tag.get("Name") {
-            Some(Tag::String(name)) => BlockState {
-                name: name.to_string_lossy(),
-                properties: match tag.get("Properties") {
-                    Some(Tag::Compound(p)) => p
-                        .iter()
-                        .filter_map(|(k, v)| match v {
-                            Tag::String(v) => Some((k.to_string_lossy(), v.to_string_lossy())),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Default::default(),
-                },
-            },
-            _ => BlockState::from_nbt(tag).ok()?,
-        };
-        registry
-            .id(&state)
-            .or_else(|| registry.default_state(&state.name))
+        entity_nbt::state_from_nbt(self.pack.assets.registry, tag)
     }
     pub(in crate::game) fn state_to_nbt(&self, state: BlockStateId) -> Tag {
-        let registry = self.pack.assets.registry;
-        match registry.state(state) {
-            Some(s) if registry.default_state(&s.name) == Some(state) => {
-                Tag::String(s.name.as_str().into())
-            }
-            Some(s) => s.to_nbt(),
-            None => Tag::String("minecraft:air".into()),
-        }
+        entity_nbt::state_to_nbt(self.pack.assets.registry, state)
     }
     /// The entity NBT of every simulated entity in `keys`, plus the unknown
     /// entities kept for them. With `remove`, the entities leave the world

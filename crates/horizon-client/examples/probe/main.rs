@@ -101,6 +101,7 @@ mod tooltip_display_fixture;
 mod trading_fixture;
 mod translucency_fixture;
 mod trident_probe;
+mod vehicle_container_fixture;
 mod weather_fixture;
 mod world_border_render_fixture;
 mod world_options_fixture;
@@ -196,6 +197,7 @@ probes! {
     trading_fixture,
     trident_probe,
     translucency_fixture,
+    vehicle_container_fixture,
     weather_fixture,
     world_border_render_fixture,
     world_options_fixture,

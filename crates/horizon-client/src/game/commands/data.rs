@@ -149,8 +149,9 @@ impl Game<'_> {
         })
     }
     /// `Entity.load` of new data (`EntityDataAccessor.setData`): the entity is
-    /// rebuilt from its compound, keeping its id and UUID.
-    fn apply_entity_nbt(&mut self, t: Target, mut tag: Tag) -> R<()> {
+    /// rebuilt from its compound, keeping its id and UUID. Also what
+    /// `TypedEntityData.loadInto` is: a spawn egg's data on the mob it spawned.
+    pub(in crate::game) fn apply_entity_nbt(&mut self, t: Target, mut tag: Tag) -> R<()> {
         let stale = || err("commands.data.merge.failed", &[]);
         match t {
             Target::Player => return Err(err("commands.data.entity.invalid", &[])),
@@ -165,8 +166,13 @@ impl Game<'_> {
                 if let Some(k) = kind {
                     set_key(&mut tag, "id", Tag::String(k.as_str().into()));
                 }
-                let new =
-                    entity_nbt::mob_from_nbt(&tag, self.res.mob_types(), id).ok_or_else(stale)?;
+                let new = entity_nbt::mob_from_nbt(
+                    &tag,
+                    self.res.mob_types(),
+                    id,
+                    Some(self.pack.assets.registry),
+                )
+                .ok_or_else(stale)?;
                 if let Some(slot) = self.mobs.iter_mut().find(|m| m.id == id) {
                     // Runtime-only state (AI, animation) carries over.
                     let old = std::mem::replace(slot, new);

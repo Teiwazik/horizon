@@ -16,6 +16,22 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_world_lifecycle"
     },
     {
+      "name": "server_about_to_start",
+      "version": 1,
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_server_about_to_start",
+      "neoforge": "ServerAboutToStartEvent",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "server_stopping",
+      "version": 1,
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_server_stopping",
+      "neoforge": "ServerStoppingEvent",
+      "side": "server",
+      "cancellable": false
+    },
+    {
       "name": "server_tick",
       "version": 1,
       "target": "horizon_client::game::native_hooks::Game<'_>::native_server_tick"

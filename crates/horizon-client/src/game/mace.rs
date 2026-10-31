@@ -456,8 +456,7 @@ impl Game<'_> {
         let attribute = if spin > 0.0 {
             spin
         } else {
-            1.0 + self.attack_item_info().map_or(0.0, |i| i.attack_damage)
-                + self.effect_attack_bonus()
+            self.attack_damage()
         };
         let base = sweep_base_damage(ratio, attribute, scale);
         let (xd, zd) = self.extra_knockback_direction();

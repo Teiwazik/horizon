@@ -160,8 +160,6 @@ fn every_language_has_every_string_the_code_asks_for() {
 fn the_system_language_is_the_first_one_the_launcher_has() {
     assert_eq!(Language::pick(["pl-PL", "en-US"]), Language::Polish);
     assert_eq!(Language::parse("pl_PL.UTF-8"), Some(Language::Polish));
-    assert_eq!(Language::pick(["pl-PL", "en-US"]), Language::Polish);
-    assert_eq!(Language::parse("pl_PL.UTF-8"), Some(Language::Polish));
     assert_eq!(Language::pick(["fr-CH", "en-US"]), Language::French);
     assert_eq!(Language::pick(["it-IT", "ru_RU.UTF-8"]), Language::Russian);
     assert_eq!(Language::pick(["it-IT", "zh-Hans-CN"]), Language::Chinese);
@@ -170,9 +168,19 @@ fn the_system_language_is_the_first_one_the_launcher_has() {
     assert_eq!(Language::pick(["de-DE", "ja"]), Language::German);
     assert_eq!(Language::pick(["de-DE", "zh-Hans-CN"]), Language::German);
     assert_eq!(Language::pick(["es-ES", "en-US"]), Language::Spanish);
+    assert_eq!(
+        Language::pick(["pt-BR", "en-US"]),
+        Language::PortugueseBrazil
+    );
     assert_eq!(Language::pick(["ja", "ko"]), Language::English);
     assert_eq!(Language::pick(["uk-UA", "ru-RU"]), Language::Ukrainian);
     assert_eq!(Language::parse("uk_UA.UTF-8"), Some(Language::Ukrainian));
+    assert_eq!(
+        Language::parse("pt_BR.UTF-8"),
+        Some(Language::PortugueseBrazil)
+    );
+    assert_eq!(Language::parse("pt-BR"), Some(Language::PortugueseBrazil));
+    assert_eq!(Language::parse("pt-PT"), None); // Explicit check: pt-PT won't alias pt-BR
     assert_eq!(Language::pick([]), Language::English);
     assert_eq!(Language::parse("FR"), Some(Language::French));
     assert_eq!(Language::parse("french"), None);
@@ -184,6 +192,10 @@ fn the_system_language_is_the_first_one_the_launcher_has() {
     assert_eq!(serde_json::to_string(&Language::Chinese).unwrap(), "\"zh\"");
     assert_eq!(serde_json::to_string(&Language::Russian).unwrap(), "\"ru\"");
     assert_eq!(serde_json::to_string(&Language::Spanish).unwrap(), "\"es\"");
+    assert_eq!(
+        serde_json::to_string(&Language::PortugueseBrazil).unwrap(),
+        "\"pt-br\""
+    );
 }
 
 #[test]
@@ -197,6 +209,10 @@ fn a_missing_string_shows_in_english() {
     assert_eq!(tr_in(Language::Ukrainian, "Settings"), "Налаштування");
     assert_eq!(tr_in(Language::English, "Settings"), "Settings");
     assert_eq!(tr_in(Language::French, "No such string"), "No such string");
+    assert_eq!(
+        tr_in(Language::PortugueseBrazil, "Settings"),
+        "Configurações"
+    );
 }
 
 #[test]

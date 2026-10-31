@@ -46,6 +46,8 @@ pub enum H {
     HdrBlackLevel,
     /// Binds `Graphics::hdr_key`.
     HdrKey,
+    /// Starts HDR calibration (`crate::hdr_calibration`).
+    HdrCalibrate,
     HdrPeak,
     HdrPaperWhite,
     HdrUiBrightness,
@@ -135,6 +137,11 @@ pub fn rows(level: Level) -> Vec<Row> {
                 H::Hdr,
                 None,
                 "Lava, fire and sunlight shine brighter than white. Needs an HDR display.",
+            ),
+            h(
+                H::HdrCalibrate,
+                None,
+                "Sets the three below full screen, one test picture at a time.",
             ),
             h(
                 H::HdrBlackLevel,
@@ -384,6 +391,46 @@ fn extra_rows(level: Level, settings: &Settings) -> Vec<Row> {
     rows
 }
 
+/// Whether the system set HDR up for the display, and whether the player kept it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setup {
+    /// The system says nothing: the player calibrates.
+    Unknown,
+    /// Peak Brightness and Paper White follow the system.
+    Automatic,
+    /// The system said, and the player changed them anyway.
+    Changed,
+}
+fn setup(s: &Settings) -> Setup {
+    setup_of(&s.horizon, crate::graphics::reported().is_some())
+}
+fn setup_of(g: &crate::graphics::Graphics, reported: bool) -> Setup {
+    if !reported {
+        Setup::Unknown
+    } else if g.hdr_peak == 0 && g.hdr_paper_white == 0 {
+        Setup::Automatic
+    } else {
+        Setup::Changed
+    }
+}
+/// The description beside `item` where it depends on [`setup`]; `text` otherwise.
+fn description(item: Item, s: &Settings, text: &'static str) -> &'static str {
+    match (item, setup(s)) {
+        (Item::Horizon(H::HdrCalibrate), Setup::Unknown) => {
+            "Your display didn't say how bright it gets: calibrate to set it up."
+        }
+        (Item::Horizon(H::HdrCalibrate), Setup::Automatic) => {
+            "Already set up for your display. Only calibrate if HDR looks wrong."
+        }
+        (Item::Horizon(H::HdrCalibrate), Setup::Changed) => {
+            "Puts Peak Brightness and Paper White back to your display's setup."
+        }
+        (Item::Horizon(H::HdrPeak | H::HdrPaperWhite), Setup::Automatic | Setup::Changed) => {
+            "Set up for your display. Leave on Auto unless it looks wrong."
+        }
+        _ => text,
+    }
+}
 fn on_off(on: bool) -> String {
     lang::get(if on { "On" } else { "Off" })
 }
@@ -415,11 +462,8 @@ impl H {
             }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
             H::ResolutionScale => Some((g.resolution_scale as f32 - 50.0) / 150.0),
-            // Auto, then 80..480 by 10.
-            H::HdrPaperWhite => Some(match g.hdr_paper_white {
-                0 => 0.0,
-                n => (n as f32 - 70.0) / 410.0,
-            }),
+            // Auto, then 10..480 by 10.
+            H::HdrPaperWhite => Some(g.hdr_paper_white as f32 / 480.0),
             // Auto, then 200..2000 by 50.
             H::HdrPeak => Some(match g.hdr_peak {
                 0 => 0.0,
@@ -483,6 +527,11 @@ impl H {
             H::Upscaling => labelled("Upscaling", g.upscaling.label()),
             H::Hdr => labelled("HDR", on_off(g.hdr)),
             H::HdrSettings => Text::literal(lang::get("HDR Settings...")),
+            H::HdrCalibrate => Text::literal(lang::get(match setup(s) {
+                Setup::Unknown => "Calibrate...",
+                Setup::Automatic => "Calibrate Anyway...",
+                Setup::Changed => "Use Automatic Setup",
+            })),
             H::HdrPaperWhite => match g.hdr_paper_white {
                 0 => labelled(
                     "Paper White",
@@ -533,12 +582,7 @@ impl H {
             }
             H::Workers => g.workers = (v * max_workers() as f32).round() as u32,
             H::ResolutionScale => g.resolution_scale = (50.0 + (v * 30.0).round() * 5.0) as u32,
-            H::HdrPaperWhite => {
-                g.hdr_paper_white = match (v * 41.0).round() as u32 {
-                    0 => 0,
-                    step => 70 + step * 10,
-                }
-            }
+            H::HdrPaperWhite => g.hdr_paper_white = (v * 48.0).round() as u32 * 10,
             H::HdrPeak => {
                 g.hdr_peak = match (v * 37.0).round() as u32 {
                     0 => 0,
@@ -633,7 +677,11 @@ impl Item {
                 Some("Your display or system doesn't offer HDR output.")
             }
             Item::Horizon(
-                H::HdrBlackLevel | H::HdrPeak | H::HdrPaperWhite | H::HdrUiBrightness,
+                H::HdrCalibrate
+                | H::HdrBlackLevel
+                | H::HdrPeak
+                | H::HdrPaperWhite
+                | H::HdrUiBrightness,
             ) if !s.horizon.hdr => Some("Turn HDR on to use it."),
             _ => None,
         }
@@ -742,6 +790,8 @@ pub enum Action {
     OpenHdr,
     /// Wait for a key or mouse button to bind to this name.
     BindKey(&'static str),
+    /// Start HDR calibration.
+    Calibrate,
     Done,
 }
 
@@ -936,7 +986,7 @@ impl GraphicsUi {
                         wd.x + wd.w + STYLE.gap,
                         wd.y + 1.0,
                         cost,
-                        text,
+                        description(item, s, text),
                     );
                 }
                 Target::Button(action) => {
@@ -1028,6 +1078,14 @@ impl GraphicsUi {
                 Target::Item(item) if item.blocked(s).is_some() => Vec::new(),
                 Target::Item(Item::Horizon(H::HdrSettings)) => {
                     vec![Action::ButtonClick, Action::OpenHdr]
+                }
+                Target::Item(Item::Horizon(H::HdrCalibrate)) if setup(s) == Setup::Changed => {
+                    s.horizon.hdr_peak = 0;
+                    s.horizon.hdr_paper_white = 0;
+                    vec![Action::ButtonClick, Action::Changed]
+                }
+                Target::Item(Item::Horizon(H::HdrCalibrate)) => {
+                    vec![Action::ButtonClick, Action::Calibrate]
                 }
                 Target::Item(Item::Horizon(H::HdrKey)) => {
                     vec![
@@ -1287,8 +1345,18 @@ mod tests {
     }
 
     #[test]
+    fn hdr_setup_follows_what_the_system_reported() {
+        let mut g = crate::graphics::Graphics::default();
+        assert_eq!(setup_of(&g, false), Setup::Unknown);
+        assert_eq!(setup_of(&g, true), Setup::Automatic);
+        g.hdr_paper_white = 80;
+        assert_eq!(setup_of(&g, true), Setup::Changed);
+        assert_eq!(setup_of(&g, false), Setup::Unknown);
+    }
+
+    #[test]
     fn every_advanced_setting_has_a_description() {
-        for level in [Level::Simple, Level::Advanced] {
+        for level in [Level::Simple, Level::Advanced, Level::Hdr] {
             for row in rows(level) {
                 if let Row::Setting(s) = row {
                     assert!(!s.text.is_empty(), "{:?}", s.item);

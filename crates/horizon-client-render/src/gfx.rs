@@ -77,6 +77,7 @@ mod end_sky;
 mod flat;
 mod frame_gen;
 mod hdr;
+pub use hdr::Calibration as HdrCalibration;
 pub mod lightning;
 mod lod;
 mod native_material;
@@ -3564,7 +3565,13 @@ impl Renderer {
     ) {
         surface.configure(device, config);
         if let Some(hdr) = hdr {
-            horizon_hdr::set_metadata(device, surface, hdr.paper_white, hdr.peak, hdr.black);
+            horizon_hdr::set_metadata(
+                device,
+                surface,
+                hdr.paper_white,
+                hdr.declared_peak(),
+                hdr.black,
+            );
         }
     }
     fn configure_surface(&self) {
@@ -3577,9 +3584,29 @@ impl Renderer {
             );
         }
     }
+    /// HDR calibration's test picture (`crate::hdr_calibration`) while it runs, else None.
+    pub fn set_hdr_calibration(&mut self, calibration: Option<HdrCalibration>) {
+        let Some(hdr) = &mut self.hdr else {
+            return;
+        };
+        if hdr.calibration == calibration {
+            return;
+        }
+        let declared = hdr.declared_peak();
+        hdr.calibration = calibration;
+        if hdr.declared_peak() != declared {
+            self.send_hdr_metadata();
+        }
+    }
     fn send_hdr_metadata(&self) {
         if let (Some(surface), Some(hdr)) = (&self.surface, &self.hdr) {
-            horizon_hdr::set_metadata(&self.device, surface, hdr.paper_white, hdr.peak, hdr.black);
+            horizon_hdr::set_metadata(
+                &self.device,
+                surface,
+                hdr.paper_white,
+                hdr.declared_peak(),
+                hdr.black,
+            );
         }
     }
     /// The swapchain's configuration: `config` (what every pipeline draws in), or
@@ -3640,7 +3667,8 @@ impl Renderer {
                 DisplayWatch::default()
             };
             let format = self.config.format.remove_srgb_suffix();
-            self.hdr = output.map(|output| hdr::Hdr::new(&self.device, format, output));
+            self.hdr =
+                output.map(|output| hdr::Hdr::new(&self.device, &self.queue, format, output));
             self.configure_surface();
             match output {
                 Some(output) => log::info!(

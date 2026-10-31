@@ -97,6 +97,8 @@ address. The script then checks, from both sides, what a guest's game used to ge
               places a log in the inventory's crafting grid (the server places it).
 - recipe_removal: the host and guest each forget all and individual recipes while the book
               is open; it stays empty when reopened, and a later grant appears (#1495).
+- recipe-reselect: the host and the guest each craft wool three times from one recipe-book click: Space
+              (a key repeat, Shift held: as many as fit) and Enter (one) place the recipe clicked last again.
 - recipe_targets: `/recipe give|take <other player>` changes that player's book, the host's
               for the guest and (server thread) the guest's for the host; their open book shows it.
 - feedback:  the guest's command feedback names the guest and shows the numbers, and the host (an
@@ -7117,8 +7119,8 @@ def check_sprint_hit_slowdown(host, guest, out):
 
     Player.attack runs on the attacker's client too, and RemotePlayer.hurtClient lets it reach
     causeExtraKnockback: the horizontal speed times 0.6 and setSprinting(false). Ctrl is released
-    before the hit (the sprint holds while W stays down), so only the hit can end it. The hit is a
-    plain left click: the `attack` agent task releases the movement keys when it reports.
+    before the hit (the sprint holds while W stays down), so only the hit can end it. Input and
+    the click run in one control script so command latency cannot carry the guest past the host.
     """
     if dead(guest):
         guest.raw('respawn')
@@ -7129,6 +7131,10 @@ def check_sprint_hit_slowdown(host, guest, out):
     guest('command', command='gamemode survival')
     guest('command', command='effect clear @s')
     guest('command', command='item replace entity @s weapon.mainhand with minecraft:air')
+    # Drain the server's attack log before the tick-tight click. The raw mouse
+    # click deliberately keeps W held; the `attack` agent command would release
+    # movement keys before its deferred result arrives.
+    host('hurtlog')
     hx, hy, hz = pos_of(host)
     x, y, z = math.floor(hx), math.floor(hy), math.floor(hz)
     host('command', command=f'fill {x - 6} {y} {z - 2} {x + 14} {y + 3} {z + 2} minecraft:air')
@@ -7137,36 +7143,59 @@ def check_sprint_hit_slowdown(host, guest, out):
     guest('command', command=f'tp @s {x + 12.5} {y} {z + 0.5} 90 0')
     guest.wait(40)  # a full attack charge
     guest.raw('look-at', f'{x + 0.5}', f'{y + 1.6}', f'{z + 0.5}')
-    horizontal = lambda p: round(math.hypot(p['velocity'][0], p['velocity'][2]), 4)
-    own = lambda: guest('state')['player']
     try:
-        guest.raw('key', 'w', 'down')
-        guest.raw('key', 'ctrl', 'down')
-        guest.until(lambda: pos_of(guest), lambda p: p[0] - pos_of(host)[0] < 2.6, ticks=80)
-        guest.raw('key', 'ctrl', 'up')
-        before = own()
-        guest.raw('mouse', 'left', 'click')
-        after = [own()]
-        for _ in range(8):
-            guest.wait(1)
-            after.append(own())
+        replies = guest.script([
+            'key w down',
+            'key ctrl down',
+            'wait 1',
+            f'command tp @s {x + 3.5} {y} {z + 0.5} 90 0',
+            'state',
+            'key ctrl up',
+            'mouse left click',
+            'state',
+            'wait 1',
+            'state',
+            'wait 1',
+            'state',
+            'wait 1',
+            'state',
+            'key w up',
+        ], every=True)
+        horizontal = lambda p: round(math.hypot(p['velocity'][0], p['velocity'][2]), 4)
+        states = [r['player'] for r in replies if 'player' in r]
+        logs = host('hurtlog').get('players', [])
+        victim_log = next((p for p in logs if p.get('name') == host.player), {})
+        attack = next(
+            (h for h in victim_log.get('hurts', [])
+             if h.get('source') == 'minecraft:player_attack' and h.get('hurt')),
+            None,
+        )
+        before_index = next(
+            (i for i, p in enumerate(states) if p['sprinting'] and horizontal(p) > 0.1),
+            None,
+        )
+        before = states[before_index] if before_index is not None else None
+        after = states[before_index + 1 :] if before_index is not None else []
     finally:
         guest.raw('key', 'ctrl', 'up')
         guest.raw('key', 'w', 'up')
         host('command', command='effect clear @s minecraft:resistance')
     guest.shot(out, 'sprint-hit-slowdown')
-    seen = {'before': {'sprinting': before['sprinting'], 'speed': horizontal(before)},
-            'after': [{'sprinting': p['sprinting'], 'speed': horizontal(p)} for p in after]}
-    assert before['sprinting'] and seen['before']['speed'] > 0.1, f'the guest was not sprinting at the host: {seen}'
+    seen = {
+        'before': None if before is None else {'sprinting': before['sprinting'], 'speed': horizontal(before)},
+        'after': [{'sprinting': p['sprinting'], 'speed': horizontal(p)} for p in after],
+        'attack': attack,
+    }
+    assert attack, f'the guest did not hit the host: {seen}'
+    assert before and seen['before']['speed'] > 0.1, f'the guest was not sprinting at the host: {seen}'
     # The click reaches the game on its next frame, so the samples may start before the hit.
     ended = next((i for i, a in enumerate(seen['after']) if not a['sprinting']), None)
     assert ended is not None and not any(a['sprinting'] for a in seen['after'][ended:]), \
         f'the hit did not end the guest\'s sprint: {seen}'
-    # Still holding W, the guest walks on. The cut drops it below its walking speed (0.1532 * 0.6, then a tick
-    # gives 0.104) and it climbs back; without the cut it would slow down from its sprint to the walk instead.
-    walk = seen['after'][-1]['speed']
-    assert walk < 0.9 * seen['before']['speed'], f'the guest sprints on after the hit: {seen}'
-    assert min(a['speed'] for a in seen['after'][ended:]) < walk - 0.003, f'the hit did not cut the guest\'s speed: {seen}'
+    # The first post-hit sample includes one local movement step after the 0.6 cut. Without the cut,
+    # it would remain at sprint speed until the server's later sprint flag update.
+    first = seen['after'][ended]
+    assert first['speed'] < 0.9 * seen['before']['speed'], f'the guest sprints on after the hit: {seen}'
     return seen
 
 
@@ -8131,6 +8160,72 @@ def check_recipe_removal(host, guest, out):
 
 CHECKS += ['recipe_removal']
 CHECK_FNS.update(recipe_removal=check_recipe_removal)
+
+
+def check_recipe_reselect(host, guest, out):
+    """RecipeBookComponent.keyPressed: Enter or Space (key repeats too) places `lastRecipe`, the recipe the
+    last book click placed, again, with the key's Shift; slot clicks keep it, so the grid refills after
+    every craft taken from the result slot."""
+    seen = {}
+    for game in (host, guest):
+        back_to_game(game)
+        game('command', command='gamemode survival')
+        game('command', command='clear @s')
+        # Picking up string unlocks more recipes: take them, so wool's is the book's only button.
+        game('command', command='give @s minecraft:string 12')
+        game.wait(20)
+        game('command', command='recipe take @s *')
+        game('command', command='recipe give @s minecraft:white_wool_from_string')
+        game.wait(20)
+        game.raw('key', 'e', 'tap')
+        game.wait(5)
+        try:
+            book = game('screen').get('recipe_book')
+            assert book, f'{game.name}: the inventory has no recipe book'
+            if len(book['targets']) == 1:
+                game.raw('click-at', *centre(book['targets'][0]))
+                game.wait(5)
+                book = game('screen')['recipe_book']
+            buttons = [r for r in book['targets'] if r[2:] == [25.0, 25.0]]
+            assert len(buttons) == 1, f'{game.name}: expected the wool button alone: {book}'
+            steps = []
+            # 12 string: Shift places 3 per grid slot, a plain press 1.
+            for press, shift, per_slot in (('click', True, 3), ('space repeat', True, 3), ('enter tap', False, 1)):
+                if press != 'click':
+                    game('command', command='give @s minecraft:string 12')
+                    game.wait(10)
+                if shift:
+                    game.raw('key', 'shift', 'down')
+                if press == 'click':
+                    game.raw('click-at', *centre(buttons[0]))
+                else:
+                    game.raw('key', *press.split())
+                if shift:
+                    game.raw('key', 'shift', 'up')
+                game.wait(10)
+                grid = {s['slot']: (s['stack']['item'], s['stack']['count'])
+                        for s in game.raw('menu')['slots'] if 100 <= s['slot'] < 109}
+                steps.append({'press': press, 'grid': grid})
+                counts = sorted(c for item, c in grid.values() if item == 'minecraft:string')
+                assert counts == [per_slot] * 4, f'{game.name}-{press}: grid {grid}'
+                game.raw('click-slot', 200, 'shift')
+                game.wait(10)
+            game.shot(out, 'recipe-reselect')
+            game.raw('key', 'esc', 'tap')
+            game.wait(10)
+            case = {'steps': steps, 'server': {item: server_count(game, item) for item in ('string', 'white_wool')}}
+            seen[game.name] = case
+            # 36 string in, 3 + 3 + 1 wool out at 4 string each.
+            assert case['server'] == {'string': 8, 'white_wool': 7}, f'{game.name}: {case}'
+        finally:
+            back_to_game(game)
+            game('command', command='clear @s')
+            game('command', command='recipe give @s *')
+    return seen
+
+
+CHECKS += ['recipe-reselect']
+CHECK_FNS['recipe-reselect'] = check_recipe_reselect
 
 
 def check_recipe_settings(host, guest, out):

@@ -358,7 +358,7 @@ mod tests {
                 "{{id:\"minecraft:rabbit\",Pos:[0.0d,0.0d,0.0d],Age:{age}}}"
             ))
             .unwrap();
-            let m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2).unwrap();
+            let m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
             assert_eq!(m.extra.age, age);
             assert_eq!(m.is_baby(), baby);
             assert_eq!(
@@ -399,10 +399,10 @@ mod tests {
         // Animal.addAdditionalSaveData / readAdditionalSaveData: "InLove" (#1396).
         let mut m = rabbit();
         m.extra.in_love = 570;
-        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None);
+        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None, None);
         assert_eq!(tag.get("InLove"), Some(&horizon_world::nbt::Tag::Int(570)));
         let types = HashMap::from([(m.kind.id.clone(), m.kind.clone())]);
-        let back = crate::entity_nbt::mob_from_nbt(&tag, &types, 2).unwrap();
+        let back = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
         assert_eq!(back.extra.in_love, 570);
     }
 

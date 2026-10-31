@@ -38,15 +38,17 @@ impl ChunkRecord {
             timestamp,
         })
     }
+    /// `RegionFileStorage.read`: the root read straight off the decompressing
+    /// stream, so bytes after it, and a damaged stream past it, are never read.
     pub fn nbt(&self, limits: Limits) -> io::Result<NamedTag> {
-        let bytes = self
+        let mut bytes = Vec::new();
+        let decoded = self
             .compression
-            .decode(&self.compressed, limits.max_bytes)?;
-        let (root, used) = nbt::read_named(&bytes, limits).map_err(|e| invalid(e.to_string()))?;
-        if used != bytes.len() {
-            return Err(invalid("trailing bytes after region chunk NBT"));
+            .decode_into(&self.compressed, limits.max_bytes, &mut bytes);
+        match nbt::read_named(&bytes, limits) {
+            Ok((root, _)) => Ok(root),
+            Err(e) => Err(decoded.err().unwrap_or_else(|| invalid(e.to_string()))),
         }
-        Ok(root)
     }
 }
 

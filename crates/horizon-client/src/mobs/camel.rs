@@ -609,7 +609,7 @@ mod tests {
                 "{{id:\"minecraft:camel\",Pos:[0.0d,0.0d,0.0d],LastPoseTick:{tick}L}}"
             ))
             .unwrap();
-            let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2).unwrap();
+            let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
             finish_load(&mut m, now);
             m
         };
@@ -628,7 +628,7 @@ mod tests {
         let (tag, _) =
             horizon_world::nbt::parse_snbt("{id:\"minecraft:camel\",Pos:[0.0d,0.0d,0.0d]}")
                 .unwrap();
-        let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2).unwrap();
+        let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
         finish_load(&mut m, 5000);
         assert!(!refuse_to_move(&m));
     }

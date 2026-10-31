@@ -77,7 +77,7 @@ ClientPacketListener.applyPlayerInfoUpdate	inline	crates/horizon-client/src/game
 ClientPacketListener.initializeChatSession	missing		minor: other players' chat keys are not kept or checked, so no signature check is made on their messages
 ClientPacketListener.enforcesSecureChat	missing		minor: the Login flag enforces_secure_chat is not read
 ClientPacketListener.handleGameRuleValues	port	crates/horizon-client/src/game/lan_screen.rs::Game::remote_world_options_rules	
-ClientPacketListener.handleSoundEntityEvent	missing		unsure: no SoundEntity arm; a sound attached to an entity would be silent unless mob_sounds.rs plays it
+ClientPacketListener.handleSoundEntityEvent	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	SoundEntity arm: the sound plays where the tracked entity is
 ClientPacketListener.handleAddObjective	port	crates/horizon-client/src/game/remote.rs::Game::remote_objective	add, remove and update of an objective
 ClientPacketListener.handleSetScore	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	SetScore arm
 ClientPacketListener.handleResetScore	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	ResetScore arm

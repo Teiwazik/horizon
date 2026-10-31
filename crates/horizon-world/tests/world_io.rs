@@ -324,3 +324,61 @@ fn benchmark_saving_into_a_full_region() {
     let in_place = start.elapsed() / rounds as u32;
     println!("one chunk into a full region: rewrite {rewrite:?}, in place {in_place:?}");
 }
+
+/// `RegionFileStorage.read` reads the root straight off the decompressing
+/// stream (#5064): bytes after it and a damaged stream past it are never read,
+/// so the chunk loads. A root cut short still fails.
+#[test]
+fn a_chunk_loads_whatever_follows_its_root() {
+    let root = NamedTag {
+        name: JavaString::default(),
+        tag: Tag::compound([("x", Tag::Int(7))]),
+    };
+    let bytes = horizon_world::nbt::write_named(&root, Limits::saved()).unwrap();
+    let record = |compression: Compression, compressed: Vec<u8>| ChunkRecord {
+        compression,
+        compressed,
+        timestamp: 0,
+    };
+    let with = |tail: &[u8]| [bytes.as_slice(), tail].concat();
+    let filler: Vec<u8> = (0..70_000).map(|i| (i * 31) as u8).collect();
+    let mut zlib_tail = Compression::Zlib.encode(&with(&filler)).unwrap();
+    let end = zlib_tail.len();
+    zlib_tail[end - 4..].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let mut lz4_tail = Compression::Lz4.encode(&with(&filler)).unwrap();
+    // The second block's checksum: the first block holds the root.
+    let second = 21 + u32::from_le_bytes(lz4_tail[9..13].try_into().unwrap()) as usize;
+    lz4_tail[second + 17] ^= 0xff;
+    for (name, chunk) in [
+        (
+            "uncompressed, a byte after",
+            record(Compression::None, with(&[0xff])),
+        ),
+        (
+            "zlib, junk after",
+            record(
+                Compression::Zlib,
+                Compression::Zlib.encode(&with(b"junk")).unwrap(),
+            ),
+        ),
+        (
+            "gzip, junk after",
+            record(
+                Compression::Gzip,
+                Compression::Gzip.encode(&with(b"junk")).unwrap(),
+            ),
+        ),
+        (
+            "zlib, damaged checksum",
+            record(Compression::Zlib, zlib_tail),
+        ),
+        (
+            "lz4, damaged second block",
+            record(Compression::Lz4, lz4_tail),
+        ),
+    ] {
+        assert_eq!(chunk.nbt(Limits::saved()).unwrap(), root, "{name}");
+    }
+    let cut = Compression::Zlib.encode(&bytes[..bytes.len() - 2]).unwrap();
+    assert!(record(Compression::Zlib, cut).nbt(Limits::saved()).is_err());
+}

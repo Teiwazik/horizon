@@ -950,7 +950,7 @@ fn a_spectators_container_click_is_taken_back() {
         thread::yield_now();
     }
     let conn = s.hub.guests[0].conn;
-    s.hub.set_game_mode(conn, 3);
+    s.hub.set_game_mode(conn, 3, &s.world, None);
     let at = s.hub.guests[0].position;
     let key = (
         at[0].floor() as i32,

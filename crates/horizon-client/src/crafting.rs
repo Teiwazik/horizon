@@ -1112,6 +1112,48 @@ pub fn recipe_result(v: &Value) -> Option<ItemStack> {
     let template = Template::parse(v)?;
     template.item.is_some().then(|| template.create())
 }
+/// The `.json` files under a `recipe` folder, its subfolders' too, in id
+/// order: each one's path inside the folder without the extension (`a/b`, as a
+/// recipe id has it) and its file. An error when `dir` itself can't be read; a
+/// subfolder or an entry that can't be listed is warned and skipped, as
+/// vanilla's `PathPackResources` keeps what it found.
+pub(crate) fn recipe_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut files = Vec::new();
+    let mut stack = vec![fs::read_dir(dir)?];
+    while let Some(entries) = stack.pop() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    log::warn!("Horizon: failed to list an entry of {}: {e}", dir.display());
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.is_dir() {
+                match fs::read_dir(&path) {
+                    Ok(list) => stack.push(list),
+                    Err(e) => log::warn!("Horizon: failed to list {}: {e}", path.display()),
+                }
+            } else if path.extension().is_some_and(|e| e == "json") {
+                files.push(path);
+            }
+        }
+    }
+    let mut named: Vec<(String, PathBuf)> = files
+        .into_iter()
+        .map(|path| {
+            let inside = path.strip_prefix(dir).unwrap_or(&path).with_extension("");
+            let name: Vec<_> = inside.iter().map(|c| c.to_string_lossy()).collect();
+            (name.join("/"), path)
+        })
+        .collect();
+    // Vanilla lists resources by id, in a map keyed by it
+    // (`FallbackResourceManager`): `crushing` before `crushing/iron`, where
+    // a path's components put the subfolder's file first.
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(named)
+}
 /// The type of a recipe the game doesn't craft itself: one outside `minecraft`.
 fn custom_type(v: &Value) -> Option<&str> {
     v["type"]
@@ -1207,31 +1249,16 @@ impl Recipes {
         let mut cooking = Vec::new();
         let mut custom: HashMap<String, Vec<CustomRecipe>> = HashMap::new();
         let mut meta = HashMap::new();
-        let json_files = |dir: &Path| -> Result<Vec<PathBuf>> {
-            let mut files: Vec<_> = fs::read_dir(dir)?
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "json"))
-                .collect();
-            files.sort();
-            Ok(files)
-        };
-        let stem = |p: &Path| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_owned()
-        };
         // Vanilla's recipes by bare name, then content mods' as `<ns>:<name>`.
         let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
-        for p in json_files(&root.join("data/minecraft/recipe"))? {
-            sources.push((stem(&p), fs::read(&p)?));
+        for (name, p) in recipe_files(&root.join("data/minecraft/recipe"))? {
+            sources.push((name, fs::read(&p)?));
         }
         for namespace in crate::mod_content::namespaces(root) {
             let dir = root.join(format!("data/{namespace}/recipe"));
             if dir.is_dir() {
-                for p in json_files(&dir)? {
-                    sources.push((format!("{namespace}:{}", stem(&p)), fs::read(&p)?));
+                for (name, p) in recipe_files(&dir)? {
+                    sources.push((format!("{namespace}:{name}"), fs::read(&p)?));
                 }
             }
         }
@@ -1820,6 +1847,12 @@ mod tests {
             file("mymod:mixer", "c"),
         )
         .unwrap();
+        fs::create_dir_all(root.join("data/mymod/recipe/deep/er")).unwrap();
+        fs::write(
+            root.join("data/mymod/recipe/deep/er/d.json"),
+            file("mymod:mixer", "d"),
+        )
+        .unwrap();
         fs::write(
             root.join("data/minecraft/recipe/later.json"),
             file("minecraft:from_a_later_version", "x"),
@@ -1831,7 +1864,7 @@ mod tests {
             recipes.custom[kind].iter().map(|r| r.id.clone()).collect()
         };
         assert_eq!(ids("mymod:crusher"), ["mymod:a", "mymod:b"]);
-        assert_eq!(ids("mymod:mixer"), ["mymod:c"]);
+        assert_eq!(ids("mymod:mixer"), ["mymod:c", "mymod:deep/er/d"]);
         assert_eq!(recipes.custom.len(), 2);
         // Not crafted, and no recipe-book meta of their own.
         assert!(recipes.crafting.is_empty() && recipes.cooking.is_empty());

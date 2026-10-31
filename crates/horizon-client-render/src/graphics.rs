@@ -501,7 +501,7 @@ impl Graphics {
                 "hdrPaperWhite" => {
                     g.hdr_paper_white = match number(g.hdr_paper_white) {
                         0 => 0,
-                        n => n.clamp(80, 480),
+                        n => n.clamp(10, 480),
                     }
                 }
                 "hdrPeak" => {
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(Graphics::parse("hdrPeak:0\n").hdr_peak, 0);
         assert_eq!(Graphics::parse("hdrPeak:50\n").hdr_peak, 200);
         assert_eq!(Graphics::parse("hdrPaperWhite:0\n").hdr_paper_white, 0);
-        assert_eq!(Graphics::parse("hdrPaperWhite:5\n").hdr_paper_white, 80);
+        assert_eq!(Graphics::parse("hdrPaperWhite:5\n").hdr_paper_white, 10);
         // The old menus' Simple / Advanced choice is ignored, and so is the
         // shader pack older versions saved.
         assert_eq!(Graphics::parse("level:advanced\n"), Graphics::default());

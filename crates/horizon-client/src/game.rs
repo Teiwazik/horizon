@@ -161,6 +161,7 @@ mod maps;
 mod minecarts;
 mod mob_blocks;
 mod mob_gear;
+mod mob_looting;
 mod mob_sounds;
 mod mods;
 mod mount_menu;
@@ -2418,6 +2419,9 @@ struct Game<'a> {
     tick_hit: Option<Option<Hit>>,
     /// The part of a right click a guest's packet asks for (game/lan_actions.rs).
     guest_use: Option<GuestUse>,
+    /// The last `use_hand` that ended the click did so with `FAIL`, which
+    /// does not consume the action (handleUseItemOn's ANY_BLOCK_USE).
+    use_failed: bool,
     /// Level events of this tick for the guests, and the guest acting now.
     lan_events: Vec<(i32, [i32; 3], i32, Option<u32>)>,
     /// Jukebox level events 1010 (song name) and 1011 (`None`) for the guests;
@@ -3721,35 +3725,46 @@ impl Game<'_> {
         self.tick_chunks.recycle_added(added);
     }
     /// `DistanceManager`'s tickets of the level in place, from every player in
-    /// it (the local player, LAN guests, a server's players), its forced
-    /// chunks and its portal tickets. A game with neither a server nor a
-    /// player (the headless fixtures) ticks everywhere.
+    /// it (the local player, LAN guests, a server's players; a spectator the
+    /// rule skips holds none), its forced chunks and its portal tickets. A game
+    /// with neither a server nor a player (the headless fixtures) ticks
+    /// everywhere.
     fn update_chunk_tickets(&mut self) {
-        let mut players: Vec<(i32, i32)> = self.lan.as_ref().map_or_else(Vec::new, |h| {
+        let rule = self.ui.rules.bool("spectators_generate_chunks");
+        let mut players: Vec<((i32, i32), bool)> = self.lan.as_ref().map_or_else(Vec::new, |h| {
             h.hub
                 .guests
                 .iter()
                 .filter(|g| h.hub.here(g))
-                .map(|g| g.chunk())
+                .map(|g| (g.chunk(), g.spectator()))
                 .collect()
         });
         if let Some(p) = &self.player {
             players.push((
-                (p.position.x.floor() as i32) >> 4,
-                (p.position.z.floor() as i32) >> 4,
+                (
+                    (p.position.x.floor() as i32) >> 4,
+                    (p.position.z.floor() as i32) >> 4,
+                ),
+                self.spectator(),
             ));
         }
-        let sources =
-            (!self.options.execution_role.is_client() || !players.is_empty()).then(|| {
-                horizon_client::ticket_levels::Sources {
-                    players,
-                    forced: self.streaming.forced.iter().copied().collect(),
-                    // Filled from the `PORTAL` tickets by `update`.
-                    portal: Vec::new(),
-                    view_distance: self.settings.render_distance.clamp(2, 32),
-                    simulation_distance: self.settings.simulation_distance.max(2),
-                }
-            });
+        // A spectator the rule skips is still a player: a game that has one
+        // must not take the headless fixtures' tick-everywhere case below.
+        let any_player = !players.is_empty();
+        let sources = (!self.options.execution_role.is_client() || any_player).then(|| {
+            horizon_client::ticket_levels::Sources {
+                players: players
+                    .into_iter()
+                    .filter(|&(_, spectator)| game_mode::loads_chunks(rule, spectator))
+                    .map(|(chunk, _)| chunk)
+                    .collect(),
+                forced: self.streaming.forced.iter().copied().collect(),
+                // Filled from the `PORTAL` tickets by `update`.
+                portal: Vec::new(),
+                view_distance: self.settings.render_distance.clamp(2, 32),
+                simulation_distance: self.settings.simulation_distance.max(2),
+            }
+        });
         self.tickets.update(sources);
     }
     /// `ServerLevel.startTickingChunk`: a loaded chunk's saved ticks are
@@ -5088,6 +5103,12 @@ impl Game<'_> {
             if entity && hand == Hand::Off && self.with_hand(hand, Game::interact_entity)? {
                 return Ok(Some(hand));
             }
+            // A client of a server never hits a fence knot with its crosshair:
+            // `LeadItem.useOn` and `LeashFenceKnotEntity.interact` reach the
+            // server as a click on the fence block.
+            if on_block && self.with_hand(hand, Game::interact_knot) {
+                return Ok(Some(hand));
+            }
             if self.with_hand(hand, |game| game.use_hand(block_hit.as_ref()))? {
                 return Ok(Some(hand));
             }
@@ -5145,6 +5166,7 @@ impl Game<'_> {
     /// One hand's turn in `startUseItem`: `useItemOn` the block aimed at,
     /// then `useItem`. Whether the click ends here (it acted or failed).
     fn use_hand(&mut self, block_hit: Option<&Hit>) -> Result<bool> {
+        self.use_failed = false;
         // isSecondaryUseActive with something in either hand keeps blocks
         // from reacting.
         let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
@@ -5156,6 +5178,8 @@ impl Game<'_> {
             let mut canceled = false;
             self.native_right_click_block(hit.pos, hit.face, &mut canceled);
             if canceled {
+                // Nothing was used, so nothing consumed the action.
+                self.use_failed = true;
                 return Ok(true);
             }
         }
@@ -5271,8 +5295,8 @@ impl Game<'_> {
                 let cake = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
                 let adds_candle =
                     self.with_level(|b, _, _| b.cake_candle_state(cake, item.as_deref()).is_some());
-                let result = self.with_level(|b, level, ticks| {
-                    b.use_item_on(
+                let (result, branch) = self.with_level(|b, level, ticks| {
+                    b.use_item_on_branch(
                         level,
                         ticks,
                         BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]),
@@ -5290,7 +5314,6 @@ impl Game<'_> {
                 {
                     self.stats.add("used", &used.item, 1);
                     self.consume_held();
-                    self.trigger_block("minecraft:item_used_on_block", hit.pos, used);
                 }
                 // NoteBlock.useWithoutItem (tuned) and BellBlock.onHit (rung).
                 if result == horizon_world::level::InteractionResult::Success {
@@ -5308,6 +5331,17 @@ impl Game<'_> {
                     }
                 }
                 if result.consumes_action() {
+                    // ServerPlayerGameMode.useItemOn: ITEM_USED_ON_BLOCK with
+                    // the stack before the use, or DEFAULT_BLOCK_USE.
+                    match branch {
+                        horizon_world::level::UseBranch::ItemOn => {
+                            let used = held.unwrap_or_else(|| ItemStack::new("minecraft:air", 0));
+                            self.trigger_block("minecraft:item_used_on_block", hit.pos, &used);
+                        }
+                        horizon_world::level::UseBranch::WithoutItem => {
+                            self.trigger_default_block_use(hit.pos);
+                        }
+                    }
                     self.swing_arm();
                     return Ok(true);
                 }
@@ -5360,6 +5394,9 @@ impl Game<'_> {
                 // `ServerPlayerGameMode.useItemOn`: a consuming `useOn`
                 // triggers ITEM_USED_ON_BLOCK with the stack before the use.
                 self.trigger_block("minecraft:item_used_on_block", hit.pos, &stack);
+            } else {
+                // DebugStickItem.useOn's FAIL.
+                self.use_failed = true;
             }
             return Ok(true);
         }
@@ -5378,7 +5415,10 @@ impl Game<'_> {
                 }
                 return Ok(true);
             }
-            UseResult::Fail => return Ok(true),
+            UseResult::Fail => {
+                self.use_failed = true;
+                return Ok(true);
+            }
             UseResult::Pass => {}
         }
         // PotionItem.useOn comes before PotionItem.use's drink.
@@ -5520,6 +5560,9 @@ impl Game<'_> {
             // which ItemStack.useOn counts as a use of the item.
             if self.start_eating(&info) {
                 self.stats.add("used", &stack.item, 1);
+            } else {
+                // BlockItem.place's FAIL.
+                self.use_failed = true;
             }
             return Ok(true);
         };
@@ -9843,14 +9886,10 @@ impl Game<'_> {
         target_kind: &str,
         living: bool,
     ) -> (f32, f32, bool, bool) {
-        let hand_damage = 1.0 + self.attack_item_info().map_or(0.0, |i| i.attack_damage);
+        let hand_damage = self.attack_damage();
         // Riptide's spin replaces the attack damage attribute.
         let spin = self.player.as_ref().map_or(0.0, |p| p.auto_spin_attack_dmg);
-        let damage = if spin > 0.0 {
-            spin
-        } else {
-            hand_damage + self.effect_attack_bonus()
-        };
+        let damage = if spin > 0.0 { spin } else { hand_damage };
         let scale = self.attack_strength_scale();
         // getEnchantedDamage(target, damage, source) - damage, taken before the
         // attack strength scales the base damage.
@@ -10494,6 +10533,13 @@ impl Game<'_> {
         self.score = Default::default();
         self.fns = Default::default();
         self.world_tables = self.build_world_tables();
+        // The registries a preload or an earlier world read are not this
+        // world's packs': a world with packs sends its own (their dialogs,
+        // recipes and advancements). For a world without packs, `sync_data`
+        // drops what was read with packs.
+        if self.world_tables.is_some() {
+            lan::forget_sync_data();
+        }
         // Warm the loot data with this world's packs before chunks decode
         // (`save::roll_loaded_loot` reads the cached copy).
         let _ = horizon_client::structure_blocks::world_loot_data(
@@ -12133,12 +12179,8 @@ impl Game<'_> {
             }
         });
         let heights = self.heights.interpolated(a);
-        let view = horizon_client::camera::view_matrix(self.yaw, self.pitch);
         // The hand sway: both hands turn by a tenth of the bobs' lag.
-        let [sway_x, sway_y] = self.sway.rotation(a, self.pitch, self.yaw);
-        let to_world = view.inverse()
-            * glam::Mat4::from_rotation_x(sway_x.to_radians())
-            * glam::Mat4::from_rotation_y(sway_y.to_radians());
+        let to_world = self.sway.to_world(a, &self.view);
         let eye = self.eye_position().unwrap_or_default();
         let light = self.world.light(
             eye[0].floor() as i32,
@@ -13314,10 +13356,16 @@ impl Game<'_> {
                 horizon_client::level_loading::draw_progress(
                     &mut hud,
                     &self.gui.atlas,
-                    if loader.cancelled {
-                        "Cancelling world"
+                    &if loader.cancelled {
+                        horizon_client::lang::get_or(
+                            "horizon.loading.cancelling_world",
+                            "Cancelling world",
+                        )
                     } else {
-                        "Opening world"
+                        horizon_client::lang::get_or(
+                            "horizon.loading.opening_world",
+                            "Opening world",
+                        )
                     },
                     0.0,
                 );
@@ -15318,7 +15366,7 @@ impl ApplicationHandler for Game<'_> {
                     // Screen.keyPressed sees the physical key, repeats included.
                     if event.state == ElementState::Pressed
                         && self.screen == Screen::Inventory
-                        && self.merchant_key(key)
+                        && (self.merchant_key(key) || self.recipe_book_key(key))
                     {
                         return Ok(());
                     }
@@ -16085,6 +16133,7 @@ impl<'a> Game<'a> {
             forced_hit: None,
             tick_hit: None,
             guest_use: None,
+            use_failed: false,
             lan_events: Vec::new(),
             lan_songs: Vec::new(),
             lan_cushion_breaks: Vec::new(),
@@ -16405,18 +16454,24 @@ impl Game<'_> {
         }
         self.world_tables = self.build_world_tables();
         horizon_client::structure_blocks::forget_loot_data();
-        lan::forget_sync_data();
         // PlayerList.reloadResources: the tags and recipes go to the players
-        // and their advancements reload.
-        if self.lan.is_some() {
-            match lan::sync_data(&self.options.resources, &self.pack_files()) {
-                Ok(sync) => {
-                    if let Some(host) = self.lan.as_mut() {
-                        host.hub.reload_resources(sync);
+        // and their advancements reload. The synchronized registries (the
+        // dialogs, and the commands' ids of them) stay the hub's.
+        let kept = self.lan.as_ref().map(|host| host.hub.lan.shared.sync());
+        match kept {
+            Some(kept) => {
+                match lan::reload_sync_data(&self.options.resources, &self.pack_files(), &kept) {
+                    Ok(sync) => {
+                        if let Some(host) = self.lan.as_mut() {
+                            host.hub.reload_resources(sync);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Horizon: the players are not sent the reloaded data: {e}")
                     }
                 }
-                Err(e) => log::warn!("Horizon: the players are not sent the reloaded data: {e}"),
             }
+            None => lan::forget_sync_data(),
         }
         let overlay = pack_files(&self.world_tables);
         self.adv.tree = Arc::new(horizon_client::advancements::Tree::load_with(

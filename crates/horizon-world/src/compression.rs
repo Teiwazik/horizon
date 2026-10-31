@@ -32,27 +32,38 @@ impl TryFrom<u8> for Compression {
 
 impl Compression {
     pub fn decode(self, bytes: &[u8], max_output: usize) -> io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        self.decode_into(bytes, max_output, &mut output)?;
+        Ok(output)
+    }
+    /// [`decode`](Self::decode) into `output`, which keeps what was decoded
+    /// before an error: what a stream reader would already have handed out.
+    pub fn decode_into(
+        self,
+        bytes: &[u8],
+        max_output: usize,
+        output: &mut Vec<u8>,
+    ) -> io::Result<()> {
         match self {
             Self::None => {
                 if bytes.len() > max_output {
                     return Err(invalid("decompression limit exceeded"));
                 }
-                Ok(bytes.to_vec())
+                output.extend_from_slice(bytes);
+                Ok(())
             }
             Self::Gzip => {
                 let decoder = flate2::read::MultiGzDecoder::new(bytes);
-                let mut output = Vec::new();
                 decoder
                     .take((max_output as u64).saturating_add(1))
-                    .read_to_end(&mut output)?;
+                    .read_to_end(output)?;
                 if output.len() > max_output {
                     return Err(invalid("decompression limit exceeded"));
                 }
-                Ok(output)
+                Ok(())
             }
             Self::Zlib => {
                 let mut decoder = Decompress::new(true);
-                let mut output = Vec::new();
                 let mut block = [0; 8192];
                 loop {
                     let before_in = decoder.total_in();
@@ -70,14 +81,14 @@ impl Compression {
                     }
                     output.extend_from_slice(&block[..produced]);
                     if status == Status::StreamEnd {
-                        return Ok(output);
+                        return Ok(());
                     }
                     if decoder.total_in() == before_in && produced == 0 {
                         return Err(invalid("truncated zlib stream"));
                     }
                 }
             }
-            Self::Lz4 => decode_lz4(bytes, max_output),
+            Self::Lz4 => decode_lz4(bytes, max_output, output),
         }
     }
 
@@ -105,8 +116,7 @@ fn checksum(bytes: &[u8]) -> u32 {
     xxhash_rust::xxh32::xxh32(bytes, 0x9747_b28c) & 0x0fff_ffff
 }
 
-fn decode_lz4(mut bytes: &[u8], max_output: usize) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
+fn decode_lz4(mut bytes: &[u8], max_output: usize, output: &mut Vec<u8>) -> io::Result<()> {
     loop {
         let header = bytes
             .get(..21)
@@ -132,7 +142,7 @@ fn decode_lz4(mut bytes: &[u8], max_output: usize) -> io::Result<Vec<u8>> {
             if expected != 0 {
                 return Err(invalid("invalid LZ4 terminator checksum"));
             }
-            return Ok(output);
+            return Ok(());
         }
         if raw > max_output.saturating_sub(output.len()) {
             return Err(invalid("decompression limit exceeded"));
@@ -141,18 +151,28 @@ fn decode_lz4(mut bytes: &[u8], max_output: usize) -> io::Result<Vec<u8>> {
             .get(..compressed)
             .ok_or_else(|| invalid("truncated LZ4 payload"))?;
         let start = output.len();
-        if method == 0x10 {
+        let decoded = if method == 0x10 {
             output.extend_from_slice(block);
+            Ok(())
         } else {
             output.resize(start + raw, 0);
-            let actual = lz4_flex::block::decompress_into(block, &mut output[start..])
-                .map_err(|e| invalid(e.to_string()))?;
-            if actual != raw {
-                return Err(invalid("LZ4 decoded length mismatch"));
+            match lz4_flex::block::decompress_into(block, &mut output[start..]) {
+                Ok(actual) if actual == raw => Ok(()),
+                Ok(_) => Err(invalid("LZ4 decoded length mismatch")),
+                Err(e) => Err(invalid(e.to_string())),
             }
         }
-        if checksum(&output[start..]) != expected {
-            return Err(invalid("LZ4 checksum mismatch"));
+        .and_then(|()| {
+            if checksum(&output[start..]) == expected {
+                Ok(())
+            } else {
+                Err(invalid("LZ4 checksum mismatch"))
+            }
+        });
+        // lz4-java hands out a block only once it has decoded and checked it.
+        if let Err(e) = decoded {
+            output.truncate(start);
+            return Err(e);
         }
         bytes = &bytes[compressed..];
     }

@@ -672,8 +672,7 @@ impl Game<'_> {
             r.v1 = r.v0 + 166.0 * dv;
             batch.rect_uv(ox + SHIFT, oy, 276.0, 166.0, r, u32::MAX);
         }
-        let e = &self.stations().enchantments;
-        let tr = |k: &str, f: &str| e.translate(k).unwrap_or(f).to_owned();
+        let tr = |k: &str, f: &str| horizon_client::lang::get_or(k, f);
         let name = custom.unwrap_or_else(|| {
             if progress {
                 tr(
@@ -897,13 +896,10 @@ impl Game<'_> {
                 self.draw_stack_tooltip(batch, &stack, self.cursor.0, self.cursor.1);
             }
         } else if deprecated {
-            let text = self
-                .res
-                .stations()
-                .enchantments
-                .translate("merchant.deprecated")
-                .unwrap_or("Villagers restock up to two times per day.")
-                .to_owned();
+            let text = horizon_client::lang::get_or(
+                "merchant.deprecated",
+                "Villagers restock up to two times per day.",
+            );
             let lines: Vec<(String, u32)> =
                 text.split('\n').map(|l| (l.to_owned(), u32::MAX)).collect();
             self.draw_tooltip_lines(batch, &lines, self.cursor.0, self.cursor.1);

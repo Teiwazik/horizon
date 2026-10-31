@@ -1178,6 +1178,8 @@ pub enum Page {
     Graphics,
     GraphicsAdvanced,
     GraphicsHdr,
+    /// HDR calibration, full screen (`calibration`).
+    HdrCalibration,
     /// Horizon's controller settings and button binds.
     Controller,
     PadBinds,
@@ -1356,6 +1358,10 @@ pub struct OptionsUi {
     /// Scroll the selected language into the middle on the next layout.
     center_language: bool,
     pub graphics: crate::graphics_ui::GraphicsUi,
+    /// HDR calibration while its page is open.
+    pub calibration: Option<crate::hdr_calibration::Calibration>,
+    /// Whether the window was fullscreen before calibration made it so (the game keeps it).
+    pub calibration_fullscreen: Option<bool>,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
 }
@@ -1391,6 +1397,8 @@ impl Default for OptionsUi {
             in_world: false,
             center_language: false,
             graphics: Default::default(),
+            calibration: None,
+            calibration_fullscreen: None,
             agent_status: Vec::new(),
         }
     }
@@ -1602,7 +1610,9 @@ impl OptionsUi {
             Page::Mods => "horizon.pages.mods",
             Page::NativeMod(_) => "Mod Settings",
             Page::ShaderPacks => "horizon.pages.shader_packs",
-            Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr => "options.videoTitle",
+            Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr | Page::HdrCalibration => {
+                "options.videoTitle"
+            }
             Page::Controller => "horizon.pages.controller",
             Page::PadBinds => "horizon.pages.controller_binds",
             Page::Extras => "horizon.pages.extras",
@@ -2611,6 +2621,12 @@ impl OptionsUi {
             );
             return;
         }
+        if self.page() == Page::HdrCalibration
+            && let Some(c) = &self.calibration
+        {
+            c.draw(batch, atlas, cursor);
+            return;
+        }
         if let Some(level) = Self::graphics_level(self.page()) {
             self.graphics.binding = self.selected_key;
             self.graphics
@@ -2870,6 +2886,15 @@ impl OptionsUi {
             }
             return Vec::new();
         }
+        if self.page() == Page::HdrCalibration
+            && let Some(c) = &mut self.calibration
+        {
+            if right {
+                return Vec::new();
+            }
+            let outcome = c.click((x, y), size, drag);
+            return self.calibration_outcome(s, outcome);
+        }
         if let Some(level) = Self::graphics_level(self.page()) {
             use crate::graphics_ui::Action;
             // Waiting on a key: a mouse button binds, as on Key Binds.
@@ -2893,6 +2918,10 @@ impl OptionsUi {
                     Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
                     Action::OpenHdr => self.push(Page::GraphicsHdr),
                     Action::BindKey(name) => self.selected_key = Some(name),
+                    Action::Calibrate => {
+                        self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
+                        self.push(Page::HdrCalibration);
+                    }
                     Action::OpenSimple => {
                         if self.stack.len() >= 2
                             && self.stack[self.stack.len() - 2] == Page::Graphics
@@ -3119,7 +3148,8 @@ impl OptionsUi {
         // release, even if the pointer has left the widget or its value stayed.
         let slider = self.dragging.take().is_some();
         let graphics_slider = self.graphics.release();
-        if slider || graphics_slider {
+        let calibration_slider = self.calibration.as_mut().is_some_and(|c| c.release());
+        if slider || graphics_slider || calibration_slider {
             vec![Event::ButtonClick, Event::Changed]
         } else {
             Vec::new()
@@ -3277,6 +3307,37 @@ impl OptionsUi {
         self.pack_screen.as_mut().expect("made above")
     }
     /// Escape or Done: leave the current page, applying page results.
+    /// After an input on HDR calibration: Save keeps what it landed on, Cancel what was
+    /// set before; both go back to Graphics: HDR.
+    fn calibration_outcome(
+        &mut self,
+        s: &mut Settings,
+        outcome: crate::hdr_calibration::Outcome,
+    ) -> Vec<Event> {
+        use crate::hdr_calibration::Outcome;
+        match outcome {
+            Outcome::Nothing | Outcome::Changed => Vec::new(),
+            Outcome::Click => vec![Event::ButtonClick],
+            Outcome::Save | Outcome::Cancel => {
+                if let Some(c) = self.calibration.take()
+                    && outcome == Outcome::Save
+                {
+                    c.save(s);
+                }
+                let mut events = vec![Event::ButtonClick];
+                events.extend(self.back(s));
+                events
+            }
+        }
+    }
+    /// HDR calibration's test picture, while its page is open: the step, its nits and
+    /// where the controls start (a share of the height `h`).
+    pub fn calibration_picture(&self, h: f32) -> Option<(crate::hdr_calibration::Step, f32, f32)> {
+        self.calibration
+            .as_ref()
+            .filter(|_| self.page() == Page::HdrCalibration)
+            .map(|c| c.picture(h))
+    }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
         let mut events = Vec::new();
         let page = self.stack.pop().unwrap_or(Page::Main);
@@ -3408,6 +3469,12 @@ impl OptionsUi {
         text: Option<&str>,
     ) -> Vec<Event> {
         use winit::keyboard::KeyCode as K;
+        if self.page() == Page::HdrCalibration
+            && let Some(c) = &mut self.calibration
+        {
+            let outcome = c.key(key);
+            return self.calibration_outcome(s, outcome);
+        }
         if self.resource_error.is_some() {
             if matches!(key, K::Escape | K::Enter | K::NumpadEnter) {
                 self.resource_error = None;
