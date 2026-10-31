@@ -178,7 +178,8 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
             "minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":7},
             "minecraft:iron_block":{"protocol_id":11}}},
             "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
-            "minecraft:luck":{"protocol_id":25}}}}"#,
+            "minecraft:luck":{"protocol_id":25}}},
+            "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
     )
     .unwrap();
     fs::create_dir_all(base.join("assets/minecraft/blockstates")).unwrap();
@@ -260,7 +261,8 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
                 "minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":7},
                 "minecraft:iron_block":{"protocol_id":11}}},
                 "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
-                "minecraft:luck":{"protocol_id":25}}}}"#,
+                "minecraft:luck":{"protocol_id":25}}},
+                "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
         )
         .unwrap();
         plan.json("registries.json", &mut registry).unwrap();
@@ -281,6 +283,11 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
         assert_eq!(id("minecraft:block", "minecraft:iron_block"), 11);
         assert_eq!(id("minecraft:block", "alpha:zblock"), 12);
         assert_eq!(id("minecraft:block", "ruby:zblock"), 13);
+        // Each mod block names a block entity type, after vanilla's.
+        assert_eq!(id("minecraft:block_entity_type", "minecraft:chest"), 1);
+        assert_eq!(id("minecraft:block_entity_type", "alpha:zblock"), 2);
+        assert_eq!(id("minecraft:block_entity_type", "ruby:zblock"), 3);
+
         assert_eq!(id("minecraft:mob_effect", "minecraft:luck"), 25);
         assert_eq!(id("minecraft:mob_effect", "alpha:dull"), 26);
         assert_eq!(id("minecraft:mob_effect", "alpha:zap"), 27);

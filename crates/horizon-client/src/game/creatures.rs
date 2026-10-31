@@ -397,6 +397,84 @@ impl Game<'_> {
         }
         Some(id)
     }
+    /// `Mob.burnUndead` for a mob in daylight with an item on its sun
+    /// protection slot (the head, or the body for a zombie horse or
+    /// nautilus): `hurtAndBreak(random.nextInt(2))` on a damageable item, and
+    /// when it breaks the slot empties and `onEquippedItemBroken` broadcasts
+    /// the break event.
+    fn wear_sun_protection(&mut self, id: u32) {
+        use horizon_world::player_inventory::EquipmentSlot;
+        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+            return;
+        };
+        let body = horizon_client::mobs::drops::head_is_body(m.species());
+        let slot = if body {
+            EquipmentSlot::Body
+        } else {
+            EquipmentSlot::Head
+        };
+        let Some(mut stack) = m.item_by_slot(slot) else {
+            return;
+        };
+        if !horizon_client::stations::is_damageable(self.res.items(), &stack) {
+            return;
+        }
+        let at = [m.position.x, m.position.y, m.position.z];
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        let amount = m.random.next_int_bound(2).unwrap_or(0) as u32;
+        if amount == 0 {
+            return;
+        }
+        let loss = self.durability_loss(&stack, amount);
+        if loss == 0 {
+            return;
+        }
+        let max = self
+            .res
+            .items()
+            .get(&stack.item)
+            .map_or(0, |i| i.max_damage);
+        stack.damage += loss;
+        let broke = stack.damage >= max;
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        match (body, broke) {
+            (true, false) => m.extra.body_damage = stack.damage as i32,
+            (true, true) => {
+                m.extra.head = None;
+                m.extra.body_damage = 0;
+            }
+            (false, false) => m.extra.armor[0] = Some(stack),
+            (false, true) => {
+                m.extra.head = None;
+                m.extra.armor[0] = None;
+            }
+        }
+        if broke {
+            // LivingEntity.entityEventForEquipmentBreak: head 49, body 65.
+            self.lan_entity_event(id as i32, if body { 65 } else { 49 }, at);
+        }
+    }
+    /// What a converted frog gets once its tadpole has grown up: the spawn
+    /// finalization of a conversion, then persistence.
+    fn finalize_converted(&mut self, id: u32) {
+        let Some(at) = self.mobs.iter().find(|m| m.id == id).map(|m| m.position) else {
+            return;
+        };
+        let facts = self.biome_facts(
+            at.x.floor() as i32,
+            at.y.floor() as i32,
+            at.z.floor() as i32,
+        );
+        let difficulty = self.local_difficulty([at.x, at.y, at.z]);
+        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            spawning::finalize(m, &facts, &difficulty);
+            m.persistent = true;
+        }
+    }
     /// `Mob.convertTo(type, ConversionParams.single(...))` for a mob already
     /// removed: a new mob of `kind`, made without spawn finalization, takes
     /// its place with what `conversion::single` carries over, and the old
@@ -1410,6 +1488,7 @@ impl Game<'_> {
                         .map_or([0.0; 3], |m| [m.velocity.x, m.velocity.y, m.velocity.z]);
                     self.drown_particles(at, v);
                 }
+                MobEvent::SunProtectionWear { mob } => self.wear_sun_protection(mob),
                 MobEvent::EntityEvent { mob, event, at } => {
                     self.lan_entity_event(mob as i32, event, at)
                 }
@@ -1805,7 +1884,21 @@ impl Game<'_> {
                     }
                 }
                 MobEvent::Convert { from, kind, params } => {
-                    self.convert_to(&from, kind, params);
+                    let id = self.convert_to(&from, kind, params);
+                    // `Piglin.finishConversion` and `Hoglin.finishConversion`:
+                    // the converted mob is nauseous for 10 seconds.
+                    if matches!(kind, "minecraft:zombified_piglin" | "minecraft:zoglin")
+                        && let Some(m) = self.mobs.iter_mut().find(|m| Some(m.id) == id)
+                    {
+                        m.add_effect("minecraft:nausea", 200, 0);
+                    }
+                    // `Tadpole.ageUp`: the frog is finalized for the
+                    // conversion and made persistent.
+                    if kind == "minecraft:frog"
+                        && let Some(id) = id
+                    {
+                        self.finalize_converted(id);
+                    }
                 }
                 MobEvent::DropItem { item, count, at } => self.spawn_item(
                     ItemStack {
@@ -1822,6 +1915,23 @@ impl Game<'_> {
                     dispenser::new_item_motion(),
                     10,
                 ),
+                MobEvent::DropGoatHorn {
+                    mob,
+                    screaming,
+                    at,
+                    motion,
+                } => {
+                    let instrument =
+                        horizon_client::mobs::goat::create_horn(self.mob_uuid(mob), screaming);
+                    let mut horn = ItemStack::new("minecraft:goat_horn", 1);
+                    horn.data_mut().set_other(
+                        "minecraft:instrument",
+                        Some(horizon_world::nbt::Tag::String(instrument.into())),
+                    );
+                    // Goat.dropHorn's ItemEntity constructor leaves pickupDelay at
+                    // 0 (no setDefaultPickUpDelay).
+                    self.spawn_item(horn, at, motion, 0);
+                }
                 MobEvent::DropGift { table, at } => {
                     let stacks =
                         self.res
@@ -5388,8 +5498,20 @@ impl Game<'_> {
                 mob.position.z.floor() as i32,
             );
             let mut packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
-            if mob.fire_ticks > 0 || matches!(mob.species(), Species::Blaze | Species::MagmaCube) {
-                packed = (15 * 16) | ((15 * 16) << 8);
+            // EntityRenderer.getBlockLightLevel: a burning mob has 15 block
+            // light, and so do the Allay, Blaze, Magma Cube, Vex and Wither
+            // renderers' overrides; the sky light stays the level's.
+            if mob.fire_ticks > 0
+                || matches!(
+                    mob.species(),
+                    Species::Allay
+                        | Species::Blaze
+                        | Species::MagmaCube
+                        | Species::Vex
+                        | Species::Wither
+                )
+            {
+                packed = (packed & 0xFF) | ((15 * 16) << 8);
             }
             // GlowSquidRenderer.getBlockLightLevel: the body brightens as the
             // dark ticks run out (the block light is the second byte).

@@ -2131,6 +2131,10 @@ impl Game<'_> {
                 lines.push((random.with_color(horizon_client::text::GRAY), u32::MAX));
             }
         }
+        // TropicalFish.Pattern.addToTooltip.
+        for text in horizon_client::item_tooltip::tropical_fish_lines(stack, &display) {
+            lines.push((text, gray));
+        }
         // InstrumentComponent.addToTooltip.
         if let Some(text) =
             horizon_client::item_tooltip::instrument_line(stack, &display, &translate)

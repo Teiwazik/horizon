@@ -6690,9 +6690,12 @@ impl Game<'_> {
         // ticks; ServerLevel.tick then runs the scheduled and random block
         // ticks before any entity, so what they drop or spawn (dispensed
         // items, popped crops) moves on the tick it appears, as in vanilla.
+        // On the server thread the window is a hub guest: drain its packets
+        // here too, before falling-block schedules run (#4510).
         horizon_client::spans::time("tick_local_hand", || self.tick_local_hand())?;
         horizon_client::spans::time("postprocess_chunks", || self.postprocess_chunks())?;
         if running {
+            horizon_client::spans::time("tick_lan_packets", || self.tick_lan_packets());
             horizon_client::spans::time("tick_blocks", || self.tick_blocks())?;
         }
         if running {

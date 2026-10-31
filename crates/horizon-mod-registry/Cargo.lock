@@ -448,6 +448,7 @@ dependencies = [
  "toml",
  "tower",
  "ureq",
+ "zip",
 ]
 
 [[package]]

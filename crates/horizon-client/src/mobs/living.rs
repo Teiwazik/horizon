@@ -451,6 +451,10 @@ impl Mob {
         if self.kind.species == super::Species::Pufferfish {
             let s = super::aquatic::puff_scale(self.extra.size) as f32;
             (w, h, e) = (w * s, h * s, e * s);
+        } else if self.kind.species == super::Species::Phantom {
+            // Phantom.getDefaultDimensions: 1 + 0.15 per size.
+            let s = 1.0 + 0.15 * self.extra.size as f32;
+            (w, h, e) = (w * s, h * s, e * s);
         } else if self.extra.size > 0 {
             let s = self.extra.size as f32;
             (w, h, e) = (w * s, h * s, e * s);

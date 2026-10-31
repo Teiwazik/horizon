@@ -1170,6 +1170,12 @@ pub enum MobEvent {
         mob: u32,
         at: [f64; 3],
     },
+    /// `Mob.burnUndead` in daylight on a mob wearing something in its
+    /// `sunProtectionSlot`: the item loses up to 1 durability (the game knows
+    /// the item data) instead of the mob catching fire.
+    SunProtectionWear {
+        mob: u32,
+    },
     /// `Level.broadcastEntityEvent` for a mob: guests run its
     /// `handleEntityEvent`.
     EntityEvent {
@@ -1448,6 +1454,15 @@ pub enum MobEvent {
         item: Arc<str>,
         count: u32,
         at: [f64; 3],
+    },
+    /// `Goat.dropHorn`: a horn from goat `mob` (`Goat.createHorn` picks the
+    /// instrument from its UUID), thrown with `motion` as
+    /// `new ItemEntity(.., deltaX, deltaY, deltaZ)`.
+    DropGoatHorn {
+        mob: u32,
+        screaming: bool,
+        at: [f64; 3],
+        motion: [f64; 3],
     },
     /// `Mob.dropFromGiftLootTable`: a gift loot table's items dropped at `at`.
     DropGift {

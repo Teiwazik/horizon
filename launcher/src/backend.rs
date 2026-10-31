@@ -508,6 +508,76 @@ pub fn data_dir() -> PathBuf {
         .join("horizon-launcher")
 }
 
+/// A canonical path without Windows' verbatim prefix: `canonicalize` gives `\\?\C:\...` there,
+/// and some tools stat `\\?\C:` — the volume itself — and fail. A drive path loses its `\\?\`;
+/// any other path is left as it is.
+pub(crate) fn plain(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+/// `path` spelled only in ASCII: what Windows' MinGW-w64 tools can open (they read paths
+/// through ANSI APIs, so a Cyrillic user name in %APPDATA% breaks them, #5189).
+fn ascii(path: &Path) -> bool {
+    path.as_os_str().to_str().is_some_and(str::is_ascii)
+}
+
+/// Where builds happen — the Rust toolchain, its Cargo home and `native_mods::root` — as a
+/// path every build tool can read: `data_dir()` resolved, so the tools are never handed a
+/// link (horizon-mixins refuses one, and macOS's /tmp is one). On Windows, when the resolved
+/// path isn't [`ascii`], [`windows_build_dir`] names the same folder a way MinGW-w64 can open.
+pub fn build_dir() -> PathBuf {
+    let data = data_dir();
+    let _ = fs::create_dir_all(&data);
+    let real = data.canonicalize().map(plain).unwrap_or(data);
+    if ascii(&real) {
+        return real;
+    }
+    #[cfg(windows)]
+    return windows_build_dir(&real);
+    #[cfg(not(windows))]
+    real
+}
+
+/// [`build_dir`] when `real` isn't [`ascii`]: the folder's own short (8.3) name where the
+/// volume keeps one — the same files, spelled in ASCII — else a folder of ProgramData's,
+/// named for the path so each user's is its own and can be created there.
+#[cfg(windows)]
+fn windows_build_dir(real: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    if let Some(short) = short_path(real).filter(|p| ascii(p)) {
+        return short;
+    }
+    let public = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && ascii(p))
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let key = Sha256::digest(real.as_os_str().as_encoded_bytes());
+    let key: String = key[..4].iter().map(|b| format!("{b:02x}")).collect();
+    public.join(format!("horizon-launcher-{key}"))
+}
+
+/// `GetShortPathNameW`: `path`'s short (8.3) name, or None on error. A folder with no short
+/// name (the volume may keep none) answers with its long name again, which [`ascii`] refuses.
+#[cfg(windows)]
+fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let need = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) } as usize;
+    if need == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; need];
+    let got = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), need as u32) } as usize;
+    (got != 0 && got < need).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..got])))
+}
+
 fn versions_dir() -> PathBuf {
     data_dir().join("versions")
 }
@@ -3193,6 +3263,54 @@ mod java_tests;
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    /// A canonical path loses Windows' verbatim prefix on a drive (horizon-mixins' output
+    /// check stats `\\?\C:`, the volume itself, which Windows refuses, os error 1), and keeps
+    /// it where there is no drive form.
+    #[test]
+    fn a_canonical_windows_path_loses_only_a_drives_verbatim_prefix() {
+        let plain = |p: &str| plain(PathBuf::from(p));
+        assert_eq!(
+            plain(r"\\?\C:\Users\me\AppData\Roaming\horizon-launcher\native"),
+            PathBuf::from(r"C:\Users\me\AppData\Roaming\horizon-launcher\native")
+        );
+        // A share has no drive form to fall back to; other paths have no prefix.
+        assert_eq!(
+            plain(r"\\?\UNC\server\share\native"),
+            PathBuf::from(r"\\?\UNC\server\share\native")
+        );
+        assert_eq!(
+            plain("/home/me/.local/share/horizon-launcher/native"),
+            PathBuf::from("/home/me/.local/share/horizon-launcher/native")
+        );
+    }
+
+    /// [#5189](https://github.com/horizon-rust/horizon/issues/5189): MinGW-w64's tools can't
+    /// read a non-ASCII path, so the build root is the data folder's resolved ASCII spelling —
+    /// which a link's target or a short (8.3) name already is.
+    #[test]
+    fn the_build_dir_is_a_path_the_tools_can_read() {
+        assert!(ascii(Path::new(
+            r"C:\Users\me\AppData\Roaming\horizon-launcher"
+        )));
+        assert!(!ascii(Path::new(
+            r"C:\Users\Кириченко Павло\AppData\Roaming\horizon-launcher"
+        )));
+        assert!(!ascii(Path::new("/høme/me/horizon-launcher")));
+        let built = build_dir();
+        assert!(ascii(&built) || cfg!(windows), "{}", built.display());
+        // Resolved: the build never sees a link in the path (where the answer is the data
+        // folder itself, so already resolved — Windows' other spellings aren't its own).
+        if ascii(&built) {
+            assert_eq!(
+                built,
+                built
+                    .canonicalize()
+                    .map(plain)
+                    .unwrap_or_else(|_| built.clone())
+            );
+        }
+    }
 
     /// The game program's mod API level is its mark's; a program from before the mark (0.2.68
     /// and older) or none at all serves level 0.

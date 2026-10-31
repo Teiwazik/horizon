@@ -299,6 +299,20 @@ impl Game<'_> {
                 if let Some(state) = display.block {
                     // BlockModelResolver.update: model seed 42.
                     self.block_model_vertices(state, 42, matrix, light, true, out);
+                    // CompositeBlockModel.update: the special model of a chest,
+                    // head, banner and the like comes on top of the block model.
+                    if self
+                        .res
+                        .facts()
+                        .get(state)
+                        .name
+                        .strip_prefix("minecraft:")
+                        .is_some_and(has_special_model)
+                    {
+                        let packed =
+                            ((((light & 0xFF) / 16) << 4) | (((light >> 8) & 0xFF) / 16)) as u8;
+                        self.special_block_model(state, matrix, packed, out);
+                    }
                 } else if let Some(stack) = &display.item {
                     let context = match display.item_display {
                         1 => DisplayContext::ThirdPersonLeftHand,
@@ -387,6 +401,29 @@ impl Game<'_> {
         }
         self.text_displays = displays;
     }
+}
+
+/// Whether vanilla's built-in block models give this block a special model,
+/// drawn by its block-entity renderer.
+fn has_special_model(block: &str) -> bool {
+    matches!(
+        block,
+        "bell"
+            | "conduit"
+            | "decorated_pot"
+            | "enchanting_table"
+            | "end_gateway"
+            | "end_portal"
+            | "chest"
+            | "trapped_chest"
+            | "ender_chest"
+            | "shulker_box"
+    ) || block.ends_with("_banner")
+        || block.ends_with("_shulker_box")
+        || block.ends_with("_skull")
+        || (block.ends_with("_head") && block != "piston_head")
+        || block.contains("copper_chest")
+        || block.contains("copper_golem_statue")
 }
 
 #[cfg(test)]

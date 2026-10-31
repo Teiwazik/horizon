@@ -1844,10 +1844,21 @@ impl Game<'_> {
             }
             return;
         }
-        let Some(entity) = self.world.block_entities.get(&key) else {
+        let Tag::Compound(fields) = tag else {
             return;
         };
-        let Tag::Compound(fields) = tag else {
+        // A mod block entity's type is named after its block (`mod_content`):
+        // its update tag merges into what the client keeps of it (`handleUpdateTag`).
+        // Nothing is drawn from it yet, so its section stays as it is.
+        let block = self.world.block(pos[0], pos[1], pos[2]);
+        if let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&key) {
+            if *self.res.facts().get(block).name == *name {
+                m.nbt
+                    .extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            return;
+        }
+        let Some(entity) = self.world.block_entities.get(&key) else {
             return;
         };
         if entity.id() != name || fields.is_empty() {
@@ -1946,15 +1957,23 @@ impl Game<'_> {
         }
     }
     /// Keep the renderable block entities (chests, furnaces) in step with blocks.
-    pub(super) fn sync_block_entity(&mut self, pos: (i32, i32, i32), state: BlockStateId) {
+    /// `previous`: the block's state before, when it changed.
+    pub(super) fn sync_block_entity(
+        &mut self,
+        pos: (i32, i32, i32),
+        previous: Option<BlockStateId>,
+        state: BlockStateId,
+    ) {
         let name = self.res.facts().get(state).name.clone();
-        match BlockEntity::for_block(&name) {
+        // LevelChunk.setBlockState: another block's block entity goes, even
+        // one of the same type (a mod's blocks may share one).
+        let other_block = previous.is_some_and(|p| self.res.facts().get(p).name != name);
+        // A mod block's is the mod's own (`native_block_entity`), as on the server.
+        match self.new_block_entity(&name) {
             Some(entity) => {
-                let same = self
-                    .world
-                    .block_entities
-                    .get(&pos)
-                    .is_some_and(|e| e.id() == entity.id());
+                let same = self.world.block_entities.get(&pos).is_some_and(|e| {
+                    e.id() == entity.id() && !(other_block && matches!(e, BlockEntity::Mod(_)))
+                });
                 if !same {
                     self.world.block_entities.insert(pos, entity);
                 }
@@ -2006,7 +2025,7 @@ impl Game<'_> {
         if self.world.loaded(pos[0], pos[2])
             && self.world.set(pos[0], pos[1], pos[2], state).is_ok()
         {
-            self.sync_block_entity((pos[0], pos[1], pos[2]), state);
+            self.sync_block_entity((pos[0], pos[1], pos[2]), Some(previous), state);
             // LevelChunk.setBlockState removes the block entity of a block
             // that changes: the moving piston the client's moveBlocks made
             // stops when the server places what it moved (#3002).
@@ -3359,6 +3378,10 @@ impl Game<'_> {
                 // ClientPacketListener.handleEntityEvent 21: a guardian's hum.
                 if p.event == 21 {
                     self.start_guardian_sound(p.id as u32);
+                }
+                // Witch.handleEntityEvent 15: the magic puffs over its hat.
+                if p.event == 15 {
+                    self.witch_magic_particles(p.id as u32);
                 }
                 // Fox.handleEntityEvent 45: the crumbs of the food in its mouth.
                 if p.event == 45 {
@@ -4994,6 +5017,10 @@ impl Game<'_> {
         self.border.tick();
         self.player_border();
         self.tick_remote_entities(running);
+        // Breeze.tick's block dust: drawn by each client for the breezes it sees.
+        if running {
+            self.tick_breeze_effects();
+        }
         self.tick_remote_guardian_eyes(running);
         // ClientLevel.tickBlockEntities: chest lids, shulker boxes, bells,
         // and the moving pistons a block event's client-side moveBlocks made

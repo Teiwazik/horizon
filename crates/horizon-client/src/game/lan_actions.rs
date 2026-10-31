@@ -3375,6 +3375,13 @@ impl Game<'_> {
             if w.climbable().unwrap_or(false) {
                 w.player.fall_distance = 0.0;
             }
+            // ServerGamePacketListenerImpl.handlePlayerPositionChange ends the
+            // impulse context on LivingEntity.hasLandedInLiquid: a move into a
+            // liquid that does not rise, or a wind charge that lands in water
+            // would waive the fall after it.
+            let liquid = w.player.fluids.was_touching_water || w.player.is_in_lava();
+            let delta_y = w.player.velocity.y;
+            w.player.impulse.landed_in_liquid(delta_y, liquid);
             // Entity.applyEffectsFromBlocks along those moves: magma, cactus,
             // lit campfires and grown sweet berry bushes hurt (#1305).
             w.player.shift_key_down = sneaking;

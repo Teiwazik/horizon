@@ -927,6 +927,10 @@ pub fn mob_to_nbt(
                 Tag::Int(crate::mobs::aquatic::dark_ticks(m)),
             );
         }
+        // Phantom.addAdditionalSaveData.
+        "minecraft:phantom" => {
+            map.insert("size".into(), Tag::Int(m.extra.size));
+        }
         "minecraft:slime" | "minecraft:magma_cube" => {
             map.insert("Size".into(), Tag::Int(m.extra.size.max(1) - 1));
             map.insert("wasOnGround".into(), Tag::Byte(i8::from(m.extra.flag2)));
@@ -1812,6 +1816,10 @@ pub fn mob_from_nbt(
             m.health = h as f32;
         }
         m.extra.flag2 = flag(tag, "wasOnGround");
+    }
+    if m.species() == crate::mobs::Species::Phantom {
+        // Phantom.readAdditionalSaveData: setPhantomSize(size).
+        crate::mobs::phantom::set_size(&mut m, number(tag.get("size")).unwrap_or(0) as i32);
     }
     // Zombie, Piglin and Zoglin.readAdditionalSaveData: IsBaby (the baby
     // zombies of trial spawners).

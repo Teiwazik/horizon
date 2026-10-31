@@ -6,6 +6,8 @@
 //! Horizon's own HUD extras do, and keep a mod's settings where the
 //! WebAssembly mod of the same id kept them.
 //!
+//! API 45 sends mod block entities to clients (`native_block_entity_update_tag`).
+//!
 //! API 44 adds the server starting and stopping (`native_server_about_to_start`,
 //! `native_server_stopping`).
 //!
@@ -202,7 +204,7 @@ pub(super) use horizon_world::level::flags;
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 44;
+pub(crate) const NATIVE_HOOKS_API: u32 = 45;
 
 impl GameLevel<'_> {
     /// An authoritative server committed a changed state through `Level.setBlock`.
@@ -862,10 +864,25 @@ impl Game<'_> {
     /// data slots its menu shows (`data`). It is out of the world during the
     /// call (the block entity at `pos` reads as a `Mod` with an empty id, and
     /// a save leaves it out); if the call removes or replaces it, `entity` is
-    /// dropped. Clients, the window's own in single player included, don't
-    /// get it yet. API 17.
+    /// dropped. Clients, the window's own in single player included, get
+    /// what `native_block_entity_update_tag` gives when its chunk is sent or
+    /// its block changes. API 17.
     pub(super) fn native_block_entity_tick(&mut self, pos: [i32; 3], entity: &mut ModBlockEntity) {
         let _ = (pos, entity);
+    }
+    /// What clients get of the block entity at `pos` when its `id` is
+    /// yours (`BlockEntity.getUpdateTag`): set `tag` to it, read from
+    /// `entity` alone. Asked on the server whenever a chunk holding it is
+    /// sent and whenever its block changes, on the server thread or, for a
+    /// saved chunk sent past the view distance (`lan::far`), another one; a client's copy of the block
+    /// entity (made by `native_block_entity` there) merges it into its `nbt`.
+    /// Leave it unset to send nothing. API 45.
+    pub(super) fn native_block_entity_update_tag(
+        pos: [i32; 3],
+        entity: &ModBlockEntity,
+        tag: &mut Option<Compound>,
+    ) {
+        let _ = (pos, entity, tag);
     }
     /// A menu opens on this client for block `block`, a mod's: set `screen`
     /// when the block is yours, to lay its screen out (`native_screen_draw`
