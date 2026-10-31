@@ -152,6 +152,15 @@ fn run(resources: &Path) -> Result<(), String> {
             *shared() = Stage::Preparing(line.to_owned());
         },
     )?;
+    // The sounds are no part of `prepare`, which a computer follows with `horizon-prepare sounds`.
+    // The download above fetched them: without them the game plays nothing. Not fatal: a silent
+    // game still plays.
+    *shared() = Stage::Preparing("Copying the sounds".into());
+    if let Err(e) = horizon_prepare::sounds(&kit, Some(&crate::accounts::files_root()), &|line| {
+        log::info!("Horizon: preparing: {line}")
+    }) {
+        log::warn!("Horizon: the sounds were not copied: {e}");
+    }
     // The prepared folder becomes the resources; the ones there did not load.
     if resources.exists() {
         std::fs::remove_dir_all(resources).map_err(|e| format!("{}: {e}", resources.display()))?;
