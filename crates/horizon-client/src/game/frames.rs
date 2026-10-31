@@ -433,6 +433,7 @@ impl Game<'_> {
             };
             let frame_packed =
                 (u32::from(frame_light >> 4) * 16) | ((u32::from(frame_light & 15) * 16) << 8);
+            let frame_start = out.len();
             let mut quad =
                 |m: &glam::DMat4, corners: [[f64; 3]; 4], uv: [[f32; 2]; 4], light: u32| {
                     // The frame model is drawn with the entity shader, lit by its face normal.
@@ -478,6 +479,13 @@ impl Game<'_> {
                         map_uv(r, *uv),
                         frame_packed,
                     );
+                }
+            }
+            // HDR output: a glow frame shines softly (entity.wgsl fs_hdr_mark); the item in it
+            // is only lit, as vanilla draws it.
+            if f.glow {
+                for v in &mut out[frame_start..] {
+                    v.layer |= u32::from(horizon_client::mesher::INCANDESCENT) << 16;
                 }
             }
             self.cull_entity_vertices(out, entity_start);

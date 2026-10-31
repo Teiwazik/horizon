@@ -826,6 +826,8 @@ struct Pipeline<R: RandomSource> {
     pub(super) structures: Option<super::generator_structures::StructureState>,
     /// The noise settings' `spawn_target` points.
     spawn_target: Vec<SpawnTargetPoint>,
+    /// The noise settings' `debug_functions`: label and sampler.
+    debug_density: Vec<(String, Arc<dyn DensitySampler>)>,
     spawn_position: std::sync::OnceLock<[i32; 2]>,
 }
 const CACHE_LIMIT: usize = 16384;
@@ -933,6 +935,26 @@ where
         let mut densities = DensityRegistry::from_json(&data.noises, &data.densities)?;
         let router =
             NoiseRouter::from_json(&settings_json["noise_router"].to_string(), &mut densities)?;
+        // NoiseGeneratorSettings.debugFunctions: a registered density or an
+        // inline one, each with its label.
+        let debug_functions = settings_json
+            .get("debug_functions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                let label = entry["label"]
+                    .as_str()
+                    .ok_or_else(|| resource("debug label"))?;
+                let id = match &entry["function"] {
+                    Value::String(name) => densities
+                        .reference(name)
+                        .ok_or_else(|| resource(format!("debug function {name}")))?,
+                    inline => densities.decode_functions(&[&inline.to_string()])?[0],
+                };
+                Ok((label.to_owned(), id))
+            })
+            .collect::<Result<Vec<_>, GeneratorError>>()?;
         let aquifers = settings_json
             .get("aquifers")
             .filter(|v| !v.is_null())
@@ -947,6 +969,10 @@ where
             settings.legacy,
         )?;
         let router = library.compile_router(router)?;
+        let debug_density = debug_functions
+            .into_iter()
+            .map(|(label, id)| Ok((label, library.function_sampler(id)?)))
+            .collect::<Result<Vec<_>, GeneratorError>>()?;
         let aquifer = aquifers
             .map(|config| library.compile_aquifer(config))
             .transpose()?
@@ -1057,6 +1083,7 @@ where
             decoration: None,
             structures: None,
             spawn_target,
+            debug_density,
             spawn_position: std::sync::OnceLock::new(),
         };
         pipeline.decoration = pipeline
@@ -2090,6 +2117,8 @@ trait SeededPipeline: Send + Sync {
         radius: i32,
         skip: &dyn Fn(&str, ChunkPos) -> bool,
     ) -> Option<(String, [i32; 3])>;
+    /// `NoiseBasedChunkGenerator.addDebugScreenInfo`.
+    fn debug_density_line(&self, feet: [i32; 3]) -> Option<String>;
     fn find_closest_biome(
         &self,
         worker: &mut WorkerState,
@@ -2267,6 +2296,21 @@ where
             radius,
             skip,
         )
+    }
+    /// `NoiseBasedChunkGenerator.addDebugScreenInfo`: the labelled values of
+    /// the settings' `debug_functions` at `feet`, three decimals each.
+    fn debug_density_line(&self, feet: [i32; 3]) -> Option<String> {
+        if self.debug_density.is_empty() {
+            return None;
+        }
+        let mut context = SamplerContext::cached();
+        let mut line = String::from("Density ");
+        for (label, sampler) in &self.debug_density {
+            let value = sampler.sample_value(&mut context, feet).ok()?;
+            line.push_str(&format!("{label}: {:.3} ", f64::from(value)));
+        }
+        line.pop();
+        Some(line)
     }
     fn find_closest_biome(
         &self,
@@ -3001,6 +3045,12 @@ impl OverworldGenerator {
     ) -> Box<dyn super::structure::legacy::PieceRandom> {
         self.pipeline.region_random(center)
     }
+    /// `NoiseBasedChunkGenerator.addDebugScreenInfo`: the `Density` line of
+    /// the noise settings' `debug_functions` at the feet (none without them).
+    /// It reads the pipeline's samplers only, so it needs no worker.
+    pub fn debug_density_line(&self, feet: [i32; 3]) -> Option<String> {
+        self.pipeline.debug_density_line(feet)
+    }
     /// Create per-thread state. Workers are cheap; keep one per thread.
     pub fn worker(&self) -> GeneratorWorker {
         let data = self.pipeline.data();
@@ -3107,6 +3157,11 @@ impl GeneratorWorker {
     }
     pub fn noise_biomes(&mut self, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
         self.pipeline.noise_biomes(&mut self.state, quarts)
+    }
+    /// `NoiseBasedChunkGenerator.addDebugScreenInfo`: the `Density` line of
+    /// the noise settings' `debug_functions` at the feet (none without them).
+    pub fn debug_density_line(&self, feet: [i32; 3]) -> Option<String> {
+        self.pipeline.debug_density_line(feet)
     }
     /// `BiomeSource.findClosestBiome3d`: the first sampled position whose
     /// noise biome passes `allowed`, spiralling out from the origin.

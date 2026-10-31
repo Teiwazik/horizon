@@ -621,7 +621,7 @@ impl Settings {
     /// These settings with one `options.txt` value changed (`horizon-ctl
     /// options-set`, as `OptionsFile::set_text` reads it). Horizon's own
     /// files (graphics, controller, extras, the mod list) aren't in
-    /// `options.txt`, so they stay as they are.
+    /// `options.txt`, so they stay as they are, as do the monitor's video modes.
     pub fn with_option(&self, key: &str, value: &str) -> Result<Self, String> {
         let mut file = self.to_file();
         file.set_text(key, value)?;
@@ -630,6 +630,7 @@ impl Settings {
             controller: self.controller.clone(),
             extras: self.extras.clone(),
             mods: self.mods.clone(),
+            video_modes: self.video_modes.clone(),
             ..Self::from_file(file)
         })
     }

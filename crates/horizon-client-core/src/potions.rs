@@ -130,6 +130,28 @@ pub fn description_id(id: &str) -> String {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
     format!("effect.{namespace}.{}", path.replace('/', "."))
 }
+/// The effect's sprite in the GUI atlas (`Hud.getMobEffectSprite`: the key
+/// with `mob_effect/` before its path): `mob_effect/<path>` for vanilla's,
+/// `<ns>:mob_effect/<path>` for a mod's.
+pub fn sprite(id: &str) -> String {
+    let mut out = String::new();
+    push_sprite(&mut out, id);
+    out
+}
+/// [`sprite`], appended to `out`.
+pub fn push_sprite(out: &mut String, id: &str) {
+    let path = match id.split_once(':') {
+        None => id,
+        Some(("minecraft", path)) => path,
+        Some((namespace, path)) => {
+            out.push_str(namespace);
+            out.push(':');
+            path
+        }
+    };
+    out.push_str("mob_effect/");
+    out.push_str(path);
+}
 /// Namespaced effect ids for mob effect storage; a mod's id already is.
 pub fn namespaced(id: &'static str) -> &'static str {
     static IDS: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
@@ -300,10 +322,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn description_ids_keep_the_namespace() {
+    fn description_ids_and_sprites_keep_the_namespace() {
         assert_eq!(description_id("speed"), "effect.minecraft.speed");
         assert_eq!(description_id("minecraft:speed"), "effect.minecraft.speed");
         assert_eq!(description_id("ruby:curse/dark"), "effect.ruby.curse.dark");
+        assert_eq!(sprite("speed"), "mob_effect/speed");
+        assert_eq!(sprite("minecraft:speed"), "mob_effect/speed");
+        assert_eq!(sprite("ruby:curse/dark"), "ruby:mob_effect/curse/dark");
     }
 
     /// `PotionContents.getColorOptional`: each visible effect's colour weighted by its

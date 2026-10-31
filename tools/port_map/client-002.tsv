@@ -20,7 +20,7 @@ ClientPacketListener.queueLightRemoval	inline	crates/horizon-client-render/src/s
 ClientPacketListener.handleBlockUpdate	port	crates/horizon-client/src/game/remote.rs::Game::server_block	
 ClientPacketListener.handleConfigurationStart	port	crates/horizon-client/src/net.rs::receive_play	gap: player: no reconfiguring screen is shown and the chat state is not stored
 ClientPacketListener.handleSystemChat	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	SystemChat arm: overlay to the action bar, otherwise the chat
-ClientPacketListener.handlePlayerChat	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	PlayerChat arm; gap: minor: no chat index or validity checks
+ClientPacketListener.handlePlayerChat	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	PlayerChat arm: the global index (a mismatch disconnects), an unknown sender and the sender's validator; gap: minor: markMessageAsProcessed (no last-seen tracker is kept)
 ClientPacketListener.handleDisguisedChat	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	DisguisedChat arm
 ClientPacketListener.handleDeleteChat	port	crates/horizon-client/src/game/remote.rs::Game::handle_delete_chat	gap: minor: no LastSeenMessagesTracker.ignorePending, the client signs no chat
 ClientPacketListener.handleAnimate	port	crates/horizon-client/src/game/remote.rs::Game::remote_animate	action 0 stops sleeping, 1 and 2 emit crit and enchanted hit particles
@@ -74,7 +74,7 @@ ClientPacketListener.handleRemoveMobEffect	port	crates/horizon-client/src/game/r
 ClientPacketListener.handlePlayerInfoRemove	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	PlayerInfoRemove arm
 ClientPacketListener.handlePlayerInfoUpdate	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	PlayerInfoUpdate arm: new entries, then listing, latency, name, hat, list order and game mode for tab players
 ClientPacketListener.applyPlayerInfoUpdate	inline	crates/horizon-client/src/game/remote.rs::Game::handle_packet	gap: minor: the own player's game-mode update does not change the local mode; INITIALIZE_CHAT is ignored
-ClientPacketListener.initializeChatSession	missing		minor: other players' chat keys are not kept or checked, so no signature check is made on their messages
+ClientPacketListener.initializeChatSession	port	crates/horizon-client/src/game/remote.rs::Remote::new_chat_validator	the session each INITIALIZE_CHAT entry carries is kept and checked against the services' profile-key keys when the player's chat is first read
 ClientPacketListener.enforcesSecureChat	missing		minor: the Login flag enforces_secure_chat is not read
 ClientPacketListener.handleGameRuleValues	port	crates/horizon-client/src/game/lan_screen.rs::Game::remote_world_options_rules	
 ClientPacketListener.handleSoundEntityEvent	port	crates/horizon-client/src/game/remote.rs::Game::handle_packet	SoundEntity arm: the sound plays where the tracked entity is

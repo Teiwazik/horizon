@@ -502,6 +502,9 @@ reproducible by anyone, and show the same gameplay on both sides.
   - `walk`: flies to random points within 48 blocks of spawn at sprint speed (5.6 blocks/s);
   - `explore`: flies straight outwards at creative flying speed (22 blocks/s), which forces chunk generation;
   - `mixed`: 60 % walk, 20 % explore, 20 % idle.
+  - `fight`: survival bots (`gamemode=survival`, `force-gamemode=true`, `allow-flight=true`) that track the entities the server
+    sends, walk to the nearest living one and attack it every 5 ticks, vanilla's bare-hand cooldown; with `--pvp true` (the
+    default) they attack each other too, which needs `pvp=true` on the server. The report counts `attacks`.
 
   A `build` behaviour (breaking and placing blocks) needs the bots to read terrain and comes later. Runs use
   1, 10, 25, 50 and 100 bots, joining 1 per second. Bots are needed because 100 real vanilla clients can't run

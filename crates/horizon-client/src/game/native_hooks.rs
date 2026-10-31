@@ -6,6 +6,8 @@
 //! Horizon's own HUD extras do, and keep a mod's settings where the
 //! WebAssembly mod of the same id kept them.
 //!
+//! API 45 sends mod block entities to clients (`native_block_entity_update_tag`).
+//!
 //! API 44 adds the server starting and stopping (`native_server_about_to_start`,
 //! `native_server_stopping`).
 //!
@@ -202,7 +204,7 @@ pub(super) use horizon_world::level::flags;
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 44;
+pub(crate) const NATIVE_HOOKS_API: u32 = 45;
 
 impl GameLevel<'_> {
     /// An authoritative server committed a changed state through `Level.setBlock`.
@@ -827,7 +829,7 @@ impl Game<'_> {
     /// (`EntityBlock.newBlockEntity`): set `entity` to its id and saved
     /// compound when the block is yours and `entity` is none yet. The block's
     /// template must have a block entity (a chest, a furnace...), so that
-    /// breaking the block removes it. API 15.
+    /// breaking the block removes it; on another template it gets none. API 15.
     pub(super) fn native_block_entity(
         &mut self,
         block: &str,
@@ -862,10 +864,25 @@ impl Game<'_> {
     /// data slots its menu shows (`data`). It is out of the world during the
     /// call (the block entity at `pos` reads as a `Mod` with an empty id, and
     /// a save leaves it out); if the call removes or replaces it, `entity` is
-    /// dropped. Clients, the window's own in single player included, don't
-    /// get it yet. API 17.
+    /// dropped. Clients, the window's own in single player included, get
+    /// what `native_block_entity_update_tag` gives when its chunk is sent or
+    /// its block changes. API 17.
     pub(super) fn native_block_entity_tick(&mut self, pos: [i32; 3], entity: &mut ModBlockEntity) {
         let _ = (pos, entity);
+    }
+    /// What clients get of the block entity at `pos` when its `id` is
+    /// yours (`BlockEntity.getUpdateTag`): set `tag` to it, read from
+    /// `entity` alone. Asked on the server whenever a chunk holding it is
+    /// sent and whenever its block changes, on the server thread or, for a
+    /// saved chunk sent past the view distance (`lan::far`), another one; a client's copy of the block
+    /// entity (made by `native_block_entity` there) merges it into its `nbt`.
+    /// Leave it unset to send nothing. API 45.
+    pub(super) fn native_block_entity_update_tag(
+        pos: [i32; 3],
+        entity: &ModBlockEntity,
+        tag: &mut Option<Compound>,
+    ) {
+        let _ = (pos, entity, tag);
     }
     /// A menu opens on this client for block `block`, a mod's: set `screen`
     /// when the block is yours, to lay its screen out (`native_screen_draw`
@@ -1122,6 +1139,27 @@ impl Game<'_> {
         natural: bool,
     ) {
         let _ = (dimension, kind, pos, natural);
+    }
+    /// An entity joins the server level `dimension` (NeoForge's
+    /// `EntityJoinLevelEvent`): vanilla's `PersistentEntitySectionManager.addEntity`.
+    /// `loaded_from_disk` is true for an entity coming back with its chunk,
+    /// false for one added fresh (`addFreshEntity`: a drop, an orb, `/summon`,
+    /// an arrival through a portal). `entity` is its ID and `kind` its type
+    /// (`minecraft:item`). It is already in the level's lists, so helpers that
+    /// take an entity ID find it. Set `canceled` to keep it out: it is taken
+    /// back out as if never added, and a `/summon` of it fails. @API:entity_join_level@ tells
+    /// item entities and experience orbs; later APIs add other kinds, so check
+    /// `kind`. Server-side.
+    pub(super) fn native_entity_join_level(
+        &mut self,
+        dimension: &str,
+        entity: u32,
+        kind: &str,
+        pos: [f64; 3],
+        loaded_from_disk: bool,
+        canceled: &mut bool,
+    ) {
+        let _ = (dimension, entity, kind, pos, loaded_from_disk, canceled);
     }
     /// `player`'s melee blow killed the mob `entity` of `kind` (other deaths
     /// aren't told yet). It only hears, after the blow landed. Server-side.
@@ -1687,15 +1725,16 @@ impl Game<'_> {
             .cloned()
     }
     /// Puts `stack` into the container at `pos` (a chest, a furnace, a mod
-    /// container) through its side `face`, as a hopper would, and returns
-    /// what did not fit: a machine's auto-output. API 20.
+    /// container) through its side `face`, as a hopper would, one by one, and
+    /// returns what did not fit: a machine's auto-output. A composter takes
+    /// one a call, and a client's copy of the world none. API 20.
     pub(super) fn native_insert_item(
         &mut self,
         pos: [i32; 3],
         face: Direction,
         stack: ItemStack,
     ) -> Option<ItemStack> {
-        self.insert_into_container((pos[0], pos[1], pos[2]), stack, face)
+        self.insert_stack_through(pos, face, stack)
     }
     /// Where the mouse is, in GUI pixels. API 20.
     pub(super) fn native_cursor(&self) -> [f32; 2] {
@@ -1956,6 +1995,34 @@ impl Game<'_> {
             self.native_mob_spawned(self.dim.id(), &kind, pos, natural);
         }
     }
+    /// `native_entity_join_level` for `entity`, just put at the end of its
+    /// list: false when a mod canceled, and the caller takes it back out.
+    /// A client of a server tells nothing.
+    pub(super) fn native_entity_joins(
+        &mut self,
+        entity: u32,
+        kind: &str,
+        pos: [f64; 3],
+        loaded_from_disk: bool,
+    ) -> bool {
+        if self.remote.is_some() {
+            return true;
+        }
+        let mut canceled = false;
+        let dimension = self.dim.id();
+        self.native_entity_join_level(
+            dimension,
+            entity,
+            kind,
+            pos,
+            loaded_from_disk,
+            &mut canceled,
+        );
+        if canceled {
+            self.persist.joins_canceled += 1;
+        }
+        !canceled
+    }
     /// The acting player's blow killed mob `index`.
     pub(super) fn native_kill_event(&mut self, index: usize) {
         let (entity, kind) = (self.mobs[index].id, mob_kind(&self.mobs[index]));
@@ -2013,6 +2080,12 @@ impl Game<'_> {
         let mut entity = None;
         self.native_block_entity(name, &mut entity);
         let (id, nbt) = entity?;
+        // A template with no block entity (stone) never removes one, so it would stay in the save.
+        let state = self.pack.assets.registry.default_state(name)?;
+        if !self.res.facts().get(state).block_entity {
+            super::mods::warn_no_block_entity(name, &id);
+            return None;
+        }
         Some(BlockEntity::Mod(Box::new(ModBlockEntity {
             id,
             nbt,
@@ -2108,7 +2181,13 @@ impl Game<'_> {
     }
     /// A menu opened on this client with its slots under `key`, on block
     /// `target`: a mod block's is laid out by its mod (`native_screen`).
-    pub(super) fn open_native_screen(&mut self, key: Pos, target: Option<Pos>, window: i32) {
+    pub(super) fn open_native_screen(
+        &mut self,
+        key: Pos,
+        target: Option<Pos>,
+        window: i32,
+        menu: &str,
+    ) {
         self.mod_screen = None;
         let Some(t) = target else {
             return;
@@ -2120,6 +2199,16 @@ impl Game<'_> {
             .name
             .to_string();
         if block.starts_with("minecraft:") {
+            return;
+        }
+        // Only when this is the menu the clicked block opens: `target` outlives the
+        // use that set it, so another menu opened later (a command's, another
+        // mod's) would otherwise get the last clicked machine's screen. Asked
+        // here, as the window's world has no mod containers.
+        let mut container = None;
+        self.native_block_entity_container(&block, &mut container);
+        let opens = container.and_then(|c| mod_menu(c.menu.as_deref()?).map(|(m, _)| m));
+        if opens != Some(menu) {
             return;
         }
         let mut screen = None;
@@ -2354,8 +2443,10 @@ impl Game<'_> {
         true
     }
     /// The open mod screen's tooltip under the cursor (`native_screen_tooltip`).
-    pub(super) fn draw_native_screen_tooltip(&self, batch: &mut HudBatch) {
-        if self.carried.is_some() || self.slot_at(batch, self.cursor.0, self.cursor.1).is_some() {
+    pub(super) fn draw_native_screen_tooltip(&mut self, batch: &mut HudBatch) {
+        // Over no item: an empty slot still gets the mod's hint (which fuel it takes).
+        let slot = self.slot_at(batch, self.cursor.0, self.cursor.1);
+        if self.carried.is_some() || slot.is_some_and(|i| self.slot_view(i).is_some()) {
             return;
         }
         let Some((block, data, at)) = self.native_screen_at() else {

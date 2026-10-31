@@ -1274,7 +1274,7 @@ impl Launcher {
                     "{}{} · {}{} · {}",
                     e.verdict
                         .as_ref()
-                        .map(|v| format!("{v} · "))
+                        .map(|v| format!("{} · ", tr(v)))
                         .unwrap_or_default(),
                     e.number,
                     trf("from {source}", &[("source", e.source.label())]),

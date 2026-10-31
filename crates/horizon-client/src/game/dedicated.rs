@@ -195,6 +195,36 @@ fn load_anticheat() -> horizon_anticheat::Config {
     }
 }
 
+/// The secret for Velocity's player information forwarding, from `forwarding.secret` beside server.properties.
+/// No file means no forwarding. A file that is empty or can't be read stops the start, because an empty secret
+/// would let anyone sign a login, and a typo must not leave a server open that was meant to be behind a proxy.
+fn forwarding_secret(online: bool) -> Result<Option<Vec<u8>>> {
+    const FILE: &str = "forwarding.secret";
+    if !std::path::Path::new(FILE).exists() {
+        return Ok(None);
+    }
+    if online {
+        log(
+            "WARN",
+            "forwarding.secret is ignored: the proxy authenticates the players, so set \"online-mode\" to \"false\".",
+        );
+        return Ok(None);
+    }
+    let text = std::fs::read(FILE).map_err(|e| format!("{FILE}: {e}"))?;
+    let secret = text.trim_ascii().to_vec();
+    if secret.is_empty() {
+        return Err(format!(
+            "{FILE} is empty: put the proxy's forwarding secret in it, or remove the file"
+        )
+        .into());
+    }
+    log(
+        "INFO",
+        "Velocity player information forwarding is on (forwarding.secret)",
+    );
+    Ok(Some(secret))
+}
+
 /// Log4j's console pattern: `[HH:mm:ss] [thread/LEVEL]: message`.
 pub(super) fn log(level: &str, message: &str) {
     log_from("Server thread", level, message);
@@ -768,6 +798,8 @@ impl Game<'_> {
         let favicon = std::fs::read("server-icon.png")
             .ok()
             .filter(|b| png_size(b) == Some((64, 64)));
+        // Behind a Velocity proxy: `forwarding.secret` in the server folder, like the proxy's own file.
+        let forwarding_secret = forwarding_secret(online.is_some())?;
         let net = NetConfig {
             bind: (!props.server_ip.is_empty())
                 .then(|| props.server_ip.parse().ok())
@@ -795,6 +827,7 @@ impl Game<'_> {
             })),
             gate: Some(gate),
             online,
+            forwarding_secret,
             log: Some(NetLog {
                 write: Arc::new(log_from),
                 lang: Arc::new(horizon_client::net::load_language(&self.options.resources)),
@@ -1684,7 +1717,8 @@ impl Game<'_> {
         self.native_server_stopping(true);
         log("INFO", "Stopping server");
         log("INFO", "Saving players");
-        if let Some(host) = self.lan.take() {
+        if let Some(mut host) = self.lan.take() {
+            self.flush_native_net(&mut host);
             for g in &host.hub.guests {
                 // The vehicle the guest rides, for the file that names it.
                 let vehicle = self.root_vehicle_uuid(g.vehicle);

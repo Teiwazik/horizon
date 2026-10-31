@@ -1046,8 +1046,8 @@ fn emit_quad(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, uv_scale: f32) {
     };
     // Tile origins are integer multiples of a block, so local coordinates
     // retain the world texture phase without distant-coordinate precision loss;
-    // a whole number of blocks off each UV keeps it (the sampler repeats) and
-    // counts it from the face's corner.
+    // a whole number of blocks off each UV keeps it (terrain.wgsl's `tile_uv`
+    // repeats the sprite per block) and counts it from the face's corner.
     let uvs = points.map(|pos| match key.direction {
         Direction::Up | Direction::Down => [pos[0], -pos[2]],
         Direction::North | Direction::South => [pos[0], -pos[1]],

@@ -481,5 +481,22 @@
   "Use an access token…": "使用访问令牌…",
   "Make an invitation": "生成邀请",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "每位好友对应一个邀请。填写邮箱后由 Tailscale 发送；不填则将链接发给对方。好友在自己的 Tailscale 账号中接受邀请。",
-  "Forget the access token": "忘记访问令牌"
+  "Forget the access token": "忘记访问令牌",
+  "Builds from GitHub. Each one installs into its own folder.": "来自 GitHub 的构建版本。每个版本均安装在各自的文件夹中。",
+  "What changed in each release, newest first.": "每个版本的更新内容，最新版本优先。",
+  "Support the work below": "在下方赞助我们的工作",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon 完全开源构建。赞助者资助下一个版本的发布。",
+  "Sponsor on GitHub": "在 GitHub 上赞助",
+  "Loading releases…": "正在加载版本…",
+  "No releases yet.": "暂无可用版本。",
+  "Loading patch notes…": "正在加载更新说明…",
+  "In use": "使用中",
+  "Proxy": "代理",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "下载、登录和更新均通过此 HTTP 代理（http://host:port）。留空表示不使用：若启动器启动时设置了 HTTPS_PROXY 则会优先使用。",
+  "For example http://127.0.0.1:7890": "例如 http://127.0.0.1:7890",
+  "Game arguments": "游戏参数",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "游戏的额外启动参数，按原样透传（引号用于包含空格的词组）。将在游戏下次启动时生效。",
+  "For example --server-thread": "例如 --server-thread",
+  "Unsigned": "未签名",
+  "Verified": "已验证"
 }

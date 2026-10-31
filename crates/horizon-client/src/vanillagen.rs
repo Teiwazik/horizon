@@ -413,6 +413,12 @@ impl VanillaTerrain {
     ) -> Option<(String, [i32; 3])> {
         self.generator.worker().locate(names, from, radius)
     }
+    /// `NoiseBasedChunkGenerator.addDebugScreenInfo`: F3's `Density` line at
+    /// the feet. It reads the samplers only, not the shared query worker, so
+    /// a long `/locate biome` or `/place jigsaw` never holds it up.
+    pub fn density_debug_line(&self, feet: [i32; 3]) -> Option<String> {
+        self.generator.debug_density_line(feet)
+    }
     /// `ChunkGenerator.findNearestMapStructure` for an exploration map: with
     /// `skip_known` (`skip_existing_chunks`) the nearest start no map pointed
     /// at yet, which then counts as pointed at (`StructureStart.addReference`,

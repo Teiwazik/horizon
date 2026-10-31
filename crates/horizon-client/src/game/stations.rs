@@ -2075,6 +2075,8 @@ impl Game<'_> {
                 .names
                 .display_get(&key)
                 .unwrap_or_else(|| self.pack.names.display_item(&stack.item))
+        } else if let Some(head) = horizon_client::item_tooltip::player_head_name(stack) {
+            head.title(&|key| self.pack.names.display_get(key))
         } else {
             self.pack.names.display_item(&stack.item)
         }
@@ -2130,6 +2132,10 @@ impl Game<'_> {
                 let random = Text::translate("painting.random", &[]);
                 lines.push((random.with_color(horizon_client::text::GRAY), u32::MAX));
             }
+        }
+        // TropicalFish.Pattern.addToTooltip.
+        for text in horizon_client::item_tooltip::tropical_fish_lines(stack, &display) {
+            lines.push((text, gray));
         }
         // InstrumentComponent.addToTooltip.
         if let Some(text) =

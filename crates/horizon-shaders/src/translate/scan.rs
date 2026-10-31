@@ -15,6 +15,9 @@ use crate::macros::lex;
 pub(super) struct Var {
     pub(super) name: String,
     pub(super) decl: String,
+    /// Of a struct type: the pack's declaration stays as a private global, and the members
+    /// travel in varyings of ours (`struct_parts`).
+    pub(super) structure: bool,
 }
 
 pub(super) struct Stage<'p> {
@@ -37,6 +40,8 @@ pub(super) struct Stage<'p> {
     pub(super) frag_outs: Vec<(u32, String)>,
     /// The pack's functions that take samplers: which parameters are samplers.
     pub(super) sampler_functions: HashMap<String, Vec<bool>>,
+    /// The pack's structs: each member's type and name with its array suffix.
+    pub(super) structs: HashMap<String, Vec<(String, String)>>,
     pub(super) outputs: BTreeSet<u32>,
     pub(super) frag_coord: bool,
     /// Tokens written differently, by index.
@@ -98,8 +103,26 @@ pub(super) const LATER_KEYWORDS: [&str; 17] = [
     "writeonly",
 ];
 
+/// Vulkan GLSL's texture and sampler types, which naga's frontend reads as types, renamed.
+const VULKAN_TYPES: [(&str, &str); 9] = [
+    ("sampler", "hz_kw_sampler"),
+    ("samplerShadow", "hz_kw_samplerShadow"),
+    ("texture1D", "hz_kw_texture1D"),
+    ("texture2D", "hz_kw_texture2D"),
+    ("texture3D", "hz_kw_texture3D"),
+    ("textureCube", "hz_kw_textureCube"),
+    ("texture2DArray", "hz_kw_texture2DArray"),
+    ("texture2DMS", "hz_kw_texture2DMS"),
+    ("textureCubeArray", "hz_kw_textureCubeArray"),
+];
+
 pub(super) fn significant(t: &str) -> bool {
     !t.trim().is_empty()
+}
+
+/// `sampler2D`, `isampler3D`, `usampler2D`, `sampler2DShadow`...
+pub(super) fn is_sampler_type(t: &str) -> bool {
+    t.trim_start_matches(['i', 'u']).starts_with("sampler")
 }
 
 pub(super) fn is_ident(t: &str) -> bool {
@@ -120,6 +143,7 @@ impl<'p> Stage<'p> {
             attributes: Vec::new(),
             frag_outs: Vec::new(),
             sampler_functions: HashMap::new(),
+            structs: HashMap::new(),
             outputs: BTreeSet::new(),
             frag_coord: false,
             gbuffers: false,
@@ -127,6 +151,7 @@ impl<'p> Stage<'p> {
             inits: Vec::new(),
             errors: Vec::new(),
         };
+        s.rename_vulkan_types();
         let (mut start, mut depth, mut parens) = (0, 0usize, 0usize);
         for i in 0..s.tokens.len() {
             match s.tokens[i] {
@@ -134,6 +159,7 @@ impl<'p> Stage<'p> {
                 ")" => parens = parens.saturating_sub(1),
                 "{" if depth == 0 && parens == 0 => {
                     s.global(start, i, true);
+                    s.structure(start, i);
                     depth = 1;
                 }
                 "{" => depth += 1,
@@ -176,6 +202,24 @@ impl<'p> Stage<'p> {
         s
     }
 
+    /// Names that desktop GLSL leaves free but Vulkan GLSL takes for its separate texture and
+    /// sampler types (`sampler2D sampler`): renamed, unless called (`texture2D(...)`).
+    fn rename_vulkan_types(&mut self) {
+        for i in 0..self.tokens.len() {
+            let Some(&(_, renamed)) = VULKAN_TYPES.iter().find(|(t, _)| *t == self.tokens[i])
+            else {
+                continue;
+            };
+            let called = self.tokens[i + 1..]
+                .iter()
+                .find(|t| significant(t))
+                .is_some_and(|&t| t == "(");
+            if !called {
+                self.tokens[i] = renamed;
+            }
+        }
+    }
+
     pub(super) fn builtin_varying(&mut self, name: String) {
         let list = if self.kind == ShaderStage::Vertex {
             &mut self.outs
@@ -186,6 +230,7 @@ impl<'p> Stage<'p> {
             list.push(Var {
                 name,
                 decl: "vec4 @;".into(),
+                structure: false,
             });
         }
     }
@@ -312,7 +357,7 @@ impl<'p> Stage<'p> {
         for (name, array) in declarators {
             let decl = format!("{interpolation}{ty} @{array};");
             match storage {
-                "uniform" if ty.contains("sampler") => self.samplers.push((name, ty.clone())),
+                "uniform" if is_sampler_type(&ty) => self.samplers.push((name, ty.clone())),
                 "uniform" if ty.contains("image") => self
                     .errors
                     .push(self.error(ty_at, &format!("`{name}`: images are not supported yet"))),
@@ -326,14 +371,38 @@ impl<'p> Stage<'p> {
                         self.removed.push(w..w + 1);
                     }
                 }
-                _ if input => self.ins.push(Var { name, decl }),
+                _ if self.structs.contains_key(&ty) => {
+                    self.removed.pop();
+                    for &w in &words[..k] {
+                        self.removed.push(w..w + 1);
+                    }
+                    let var = Var {
+                        name,
+                        decl,
+                        structure: true,
+                    };
+                    if input {
+                        self.ins.push(var);
+                    } else {
+                        self.outs.push(var);
+                    }
+                }
+                _ if input => self.ins.push(Var {
+                    name,
+                    decl,
+                    structure: false,
+                }),
                 _ if fragment => {
                     let n = location.unwrap_or(self.outputs.len() as u32);
                     self.outputs.insert(n);
                     self.frag_outs
                         .push((n, format!("layout(location = {n}) out {ty} {name}{array};")));
                 }
-                _ => self.outs.push(Var { name, decl }),
+                _ => self.outs.push(Var {
+                    name,
+                    decl,
+                    structure: false,
+                }),
             }
         }
     }
@@ -449,6 +518,41 @@ impl<'p> Stage<'p> {
         self.inits.extend(names);
     }
 
+    /// `struct Name {` at token `open`, whose words start at `from`: its members, to `}`.
+    fn structure(&mut self, from: usize, open: usize) {
+        let words: Vec<&str> = self.tokens[from..open]
+            .iter()
+            .copied()
+            .filter(|t| significant(t))
+            .collect();
+        let [.., "struct", name] = words[..] else {
+            return;
+        };
+        let mut members = Vec::new();
+        let mut decl: Vec<&str> = Vec::new();
+        for &t in &self.tokens[open + 1..] {
+            match t {
+                "}" => break,
+                ";" => {
+                    // `T a, b[2]`, after any precision or other qualifier.
+                    let words: Vec<&str> =
+                        decl.drain(..).filter(|w| !QUALIFIERS.contains(w)).collect();
+                    let Some((ty, rest)) = words.split_first() else {
+                        continue;
+                    };
+                    for d in rest.split(|w| *w == ",") {
+                        if let Some((n, array)) = d.split_first() {
+                            members.push((ty.to_string(), format!("{n}{}", array.concat())));
+                        }
+                    }
+                }
+                t if significant(t) => decl.push(t),
+                _ => {}
+            }
+        }
+        self.structs.insert(name.to_owned(), members);
+    }
+
     /// A function definition or prototype: remember which parameters are samplers.
     pub(super) fn function(&mut self, words: &[usize]) {
         let Some(open) = words.iter().position(|&i| self.tokens[i] == "(") else {
@@ -465,7 +569,7 @@ impl<'p> Stage<'p> {
                     params.push(is_sampler);
                     is_sampler = false;
                 }
-                t if t.contains("sampler") => is_sampler = true,
+                t if is_sampler_type(t) => is_sampler = true,
                 _ => {}
             }
         }

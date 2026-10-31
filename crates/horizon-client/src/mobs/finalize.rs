@@ -2112,6 +2112,8 @@ pub fn variant_index(s: Species, name: &str) -> u8 {
         Species::Cat => super::tame::CAT_VARIANTS.iter().position(|v| *v == name),
         Species::Wolf => super::tame::WOLF_VARIANTS.iter().position(|v| v.0 == name),
         Species::ZombieNautilus => super::nautilus::VARIANTS.iter().position(|v| *v == name),
+        // MushroomCow.Variant: red is the codec's default, brown the other.
+        Species::Mooshroom => ["red", "brown"].iter().position(|v| *v == name),
         _ => ["temperate", "warm", "cold"]
             .iter()
             .position(|v| *v == name),
@@ -2131,6 +2133,7 @@ pub fn species_variant_component(s: Species, variant: u8) -> Option<(&'static st
         Species::Frog => "minecraft:frog/variant",
         Species::Pig => "minecraft:pig/variant",
         Species::Cow => "minecraft:cow/variant",
+        Species::Mooshroom => "minecraft:mooshroom/variant",
         Species::Chicken => "minecraft:chicken/variant",
         Species::ZombieNautilus => "minecraft:zombie_nautilus/variant",
         _ => return None,
@@ -2198,6 +2201,7 @@ pub fn variant_name(s: Species, index: u8) -> &'static str {
             .get(i)
             .copied()
             .unwrap_or("temperate"),
+        Species::Mooshroom => ["red", "brown"].get(i).copied().unwrap_or("red"),
         _ => ["temperate", "warm", "cold"]
             .get(i)
             .copied()
@@ -2239,6 +2243,25 @@ mod tests {
         assert_eq!(panda_variant(4, 0), 0);
         assert_eq!(panda_variant(4, 4), 4);
         assert_eq!(panda_variant(6, 0), 6);
+    }
+    /// `MushroomCow.get(DataComponentGetter)`: a mooshroom reports its colour
+    /// as the variant component, and the name maps back to the index.
+    #[test]
+    fn a_mooshroom_reports_its_variant_component() {
+        for (index, name) in [(0, "minecraft:red"), (1, "minecraft:brown")] {
+            assert_eq!(
+                species_variant_component(Species::Mooshroom, index),
+                Some(("minecraft:mooshroom/variant", name.to_owned()))
+            );
+            assert_eq!(variant_index(Species::Mooshroom, name), index);
+            assert_eq!(
+                format!("minecraft:{}", variant_name(Species::Mooshroom, index)),
+                name
+            );
+        }
+        // Variant.DEFAULT is red: an unknown name, or an index past brown.
+        assert_eq!(variant_index(Species::Mooshroom, "minecraft:temperate"), 0);
+        assert_eq!(variant_name(Species::Mooshroom, 2), "red");
     }
     /// #2269: the offspring of a spawn egg used on a mob is a baby of that
     /// kind (`SpawnEggItem.spawnOffspringFromSpawnEgg`), and only the mob's

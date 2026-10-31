@@ -384,11 +384,13 @@ impl Game<'_> {
     /// the compositor set up.
     fn apply_fullscreen(&mut self) {
         if let Some(w) = self.window.clone() {
-            let modes = w
-                .current_monitor()
-                .or_else(|| w.primary_monitor())
-                .map(|m| horizon_client::window::monitor_video_modes(&m))
-                .unwrap_or_default();
+            let monitor = w.current_monitor().or_else(|| w.primary_monitor());
+            if let Some(modes) = self
+                .video_modes
+                .refresh(monitor, horizon_client::window::monitor_video_modes)
+            {
+                self.settings.video_modes = modes;
+            }
             let in_video_screen = self.screen == Screen::Options
                 && self.ui.options.page() == horizon_client::options_ui::Page::Video;
             let wanted = self.settings.fullscreen;
@@ -401,7 +403,6 @@ impl Game<'_> {
                 .and_then(horizon_client::window::VideoMode::read);
             self.fullscreen
                 .apply(&w, wanted, exclusive, preferred, in_video_screen);
-            self.settings.video_modes = modes;
         }
     }
     /// Settings that Horizon applies beyond render distance, volume and GUI scale.

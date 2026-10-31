@@ -481,5 +481,22 @@
   "Use an access token…": "Zugriffstoken verwenden…",
   "Make an invitation": "Einladung erstellen",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Eine Einladung pro Freund. Mit E-Mail-Adresse versendet Tailscale sie; ohne schickst du ihnen den Link. Sie nehmen sie in ihrem eigenen Tailscale-Konto an.",
-  "Forget the access token": "Zugriffstoken vergessen"
+  "Forget the access token": "Zugriffstoken vergessen",
+  "Builds from GitHub. Each one installs into its own folder.": "Builds von GitHub. Jedes wird in einen eigenen Ordner installiert.",
+  "What changed in each release, newest first.": "Was sich in den einzelnen Versionen geändert hat, neueste zuerst.",
+  "Support the work below": "Unterstütze die Arbeit unten",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon wird öffentlich entwickelt. Sponsoren finanzieren das nächste Release.",
+  "Sponsor on GitHub": "Auf GitHub sponsern",
+  "Loading releases…": "Releases werden geladen…",
+  "No releases yet.": "Noch keine Releases.",
+  "Loading patch notes…": "Patchnotes werden geladen…",
+  "In use": "In Verwendung",
+  "Proxy": "Proxy",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Downloads, Anmeldungen und Updates laufen über diesen HTTP-Proxy (http://host:port). Leer bedeutet kein Proxy: HTTPS_PROXY wird stattdessen verwendet, wenn der Launcher damit gestartet wurde.",
+  "For example http://127.0.0.1:7890": "Zum Beispiel http://127.0.0.1:7890",
+  "Game arguments": "Spielargumente",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Zusätzliche Argumente für das Spiel, die unverändert weitergegeben werden (Anführungszeichen gruppieren Wörter mit Leerzeichen). Gilt beim nächsten Spielstart.",
+  "For example --server-thread": "Zum Beispiel --server-thread",
+  "Unsigned": "Nicht signiert",
+  "Verified": "Verifiziert"
 }

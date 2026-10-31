@@ -59,6 +59,22 @@ pub fn lock(dir: &Path) -> Result<File, String> {
     }
 }
 
+/// `attempt` (one that takes the folder's lock) retried for up to a second. A process another test
+/// spawns holds a copy of the lock's descriptor between its fork and exec: the lock comes back once that
+/// child has exec'd.
+#[cfg(test)]
+pub(crate) fn retried<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut result = attempt();
+    for _ in 0..50 {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        result = attempt();
+    }
+    result
+}
+
 enum Exit {
     /// Asked to stop, or the game ended by itself without an error (`stop` typed in its console, the EULA
     /// not agreed, the port taken): not restarted.
@@ -860,17 +876,7 @@ mod tests {
         let first = lock(&dir).unwrap();
         assert!(lock(&dir).unwrap_err().contains("already running"));
         drop(first);
-        // A process another test spawns holds a copy of the lock's descriptor between its fork and exec:
-        // the lock comes back once that child has exec'd.
-        let mut again = lock(&dir);
-        for _ in 0..50 {
-            if again.is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            again = lock(&dir);
-        }
-        again.unwrap();
+        retried(|| lock(&dir)).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

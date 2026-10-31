@@ -113,8 +113,8 @@ SulfurCube.pickUpItem	port	crates/horizon-client/src/game/sulfur_cubes.rs::Game:
 SulfurCube.getBaseExperienceReward	port	crates/horizon-client/src/mobs/drops.rs::base_experience	none for babies, 1 or 2 for adults
 SulfurCube.setSpawnSize	port	crates/horizon-client/src/mobs/sulfur_cube.rs::finalize	babies size 1, adults size 2
 SulfurCube.getBreedOffspring	inline	crates/horizon-client/src/mobs/sulfur_cube.rs::ai_step	gap: minor: a child is shrunk to size 1 on its next tick, not at birth
-SulfurCube.applyHorizontalHitAngleScale	missing		player: a hit with a block does not turn the launch by the attacker's aim; knockback takes no aim
-SulfurCube.applyVerticalHitAnglePowerTransfer	missing		player: the vertical share of a hit is not moved by the attacker's aim, so launches from above or below differ
+SulfurCube.applyHorizontalHitAngleScale	port	crates/horizon-client/src/mobs/sulfur_cube.rs::horizontal_hit_angle_scale	the knock turned by the causing entity's aim (the player, a mob, a projectile's owner: Game::attacker_aim); checked against the vanilla helpers on Vec2/Vec3/Mth (launch_tests)
+SulfurCube.applyVerticalHitAnglePowerTransfer	port	crates/horizon-client/src/mobs/sulfur_cube.rs::vertical_hit_angle_power_transfer	power moved between the launch's parts by where the causing entity aims; checked like applyHorizontalHitAngleScale
 SulfurCube.applyVerticalPositionAnglePowerRotation	port	crates/horizon-client/src/mobs/sulfur_cube.rs::knockback	feet-to-feet rotation at 0.8 with the power ratio clamp
 SulfurCube.get	skip:other		data component view of the body item; Horizon reads the body item directly (sulfur_cube::body)
 SulfurCube.applyImplicitComponent	skip:other		component copy when a cube is built from an item; Horizon sets the body directly

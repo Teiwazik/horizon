@@ -481,5 +481,22 @@
   "Use an access token…": "Użyj tokenu dostępu…",
   "Make an invitation": "Utwórz zaproszenie",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Jedno zaproszenie na znajomego. Z adresem e-mail wyśle je Tailscale; bez niego wyślij im link. Akceptują je na własnym koncie Tailscale.",
-  "Forget the access token": "Zapomnij token dostępu"
+  "Forget the access token": "Zapomnij token dostępu",
+  "Builds from GitHub. Each one installs into its own folder.": "Wydania z GitHuba. Każde instaluje się we własnym folderze.",
+  "What changed in each release, newest first.": "Co się zmieniło w poszczególnych wersjach, od najnowszych.",
+  "Support the work below": "Wesprzyj projekt poniżej",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon powstaje otwarcie. Sponsorzy finansują kolejne wydania.",
+  "Sponsor on GitHub": "Wesprzyj na GitHubie",
+  "Loading releases…": "Ładowanie wydań…",
+  "No releases yet.": "Brak wydań.",
+  "Loading patch notes…": "Ładowanie informacji o wydaniu…",
+  "In use": "W użyciu",
+  "Proxy": "Proxy",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Pobieranie, logowanie i aktualizacje przechodzą przez ten serwer proxy HTTP (http://host:port). Puste pole oznacza brak: HTTPS_PROXY jest używany zamiast tego, jeśli program uruchamiający został z nim uruchomiony.",
+  "For example http://127.0.0.1:7890": "Na przykład http://127.0.0.1:7890",
+  "Game arguments": "Argumenty gry",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Dodatkowe argumenty dla gry, przekazywane bez zmian (cudzysłowy grupują wyrażenia ze spacjami). Zostaną zastosowane przy następnym uruchomieniu gry.",
+  "For example --server-thread": "Na przykład --server-thread",
+  "Unsigned": "Niepodpisany",
+  "Verified": "Zweryfikowany"
 }

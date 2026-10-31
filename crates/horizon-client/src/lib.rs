@@ -15,9 +15,9 @@ pub use horizon_client_render::{
     multiline_edit, options_file, options_fixes, options_ui, overlay, pack_screen, packs, par,
     particles, poi_sections, post_chain, potent_sulfur, preedit, providers, screen_draw,
     screen_effects, sculk, section_mask, settings, shader_pack_list, signs, skins, sound_engine,
-    sound_events, sound_preview, spans, split_layout, sprites, streaming, structure_block,
-    tab_list, telemetry, test_block, test_instance_block, testgen, title_edition, trims, ui, vault,
-    weather, widgets, world, worldborder, zip,
+    sound_events, sound_preview, spans, split_layout, split_profiles, sprites, streaming,
+    structure_block, tab_list, telemetry, test_block, test_instance_block, testgen, title_edition,
+    trims, ui, vault, weather, widgets, world, worldborder, zip,
 };
 pub mod attack_strength;
 pub mod attribute_updates;

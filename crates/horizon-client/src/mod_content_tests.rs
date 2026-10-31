@@ -67,6 +67,49 @@ fn item_components_patch_the_template_entry() {
     }
 }
 
+#[test]
+fn creative_tabs_keep_vanilla_items_missing_from_search() {
+    let tab = horizon_mods::content::CreativeTab {
+        id: "test:restricted".into(),
+        title: "Restricted".into(),
+        icon: "minecraft:barrier".into(),
+        items: [
+            "minecraft:barrier",
+            "minecraft:command_block",
+            "minecraft:written_book",
+            "minecraft:knowledge_book",
+        ]
+        .map(str::to_owned)
+        .into(),
+    };
+    let plan = Plan {
+        blocks: Vec::new(),
+        items: Vec::new(),
+        vanilla_items: tab.items.iter().cloned().collect(),
+        effects: Vec::new(),
+        states: 0,
+        defaults: BTreeMap::new(),
+        sounds: BTreeMap::new(),
+        tabs: vec![&tab],
+        names: BTreeMap::new(),
+    };
+    let mut doc: J = serde_json::from_str(
+        r#"{"tabs":[{"type":"SEARCH","items":["{count:1,id:\"minecraft:stone\"}"]}]}"#,
+    )
+    .unwrap();
+    plan.creative_tabs(&mut doc).unwrap();
+    let doc: serde_json::Value = serde_json::to_value(doc).unwrap();
+    assert_eq!(
+        doc["tabs"][1]["items"],
+        serde_json::json!([
+            "{count:1,id:\"minecraft:barrier\"}",
+            "{count:1,id:\"minecraft:command_block\"}",
+            "{count:1,id:\"minecraft:written_book\"}",
+            "{count:1,id:\"minecraft:knowledge_book\"}",
+        ])
+    );
+}
+
 /// A block item's patch goes over its template block's item, and a type no
 /// vanilla item has fails the build.
 #[test]
@@ -178,7 +221,8 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
             "minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":7},
             "minecraft:iron_block":{"protocol_id":11}}},
             "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
-            "minecraft:luck":{"protocol_id":25}}}}"#,
+            "minecraft:luck":{"protocol_id":25}}},
+            "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
     )
     .unwrap();
     fs::create_dir_all(base.join("assets/minecraft/blockstates")).unwrap();
@@ -260,7 +304,8 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
                 "minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":7},
                 "minecraft:iron_block":{"protocol_id":11}}},
                 "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
-                "minecraft:luck":{"protocol_id":25}}}}"#,
+                "minecraft:luck":{"protocol_id":25}}},
+                "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
         )
         .unwrap();
         plan.json("registries.json", &mut registry).unwrap();
@@ -281,6 +326,11 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
         assert_eq!(id("minecraft:block", "minecraft:iron_block"), 11);
         assert_eq!(id("minecraft:block", "alpha:zblock"), 12);
         assert_eq!(id("minecraft:block", "ruby:zblock"), 13);
+        // Each mod block names a block entity type, after vanilla's.
+        assert_eq!(id("minecraft:block_entity_type", "minecraft:chest"), 1);
+        assert_eq!(id("minecraft:block_entity_type", "alpha:zblock"), 2);
+        assert_eq!(id("minecraft:block_entity_type", "ruby:zblock"), 3);
+
         assert_eq!(id("minecraft:mob_effect", "minecraft:luck"), 25);
         assert_eq!(id("minecraft:mob_effect", "alpha:dull"), 26);
         assert_eq!(id("minecraft:mob_effect", "alpha:zap"), 27);
@@ -1106,6 +1156,37 @@ fn content_root_registers_a_mod_mob_effect() {
     fs::remove_dir_all(&scratch).unwrap();
 }
 
+/// A mod that adds only an item still moves the item network ids, so a game
+/// without it must fail the content check rather than show other items.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn content_root_with_only_an_item_checks_its_identity() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-item-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let m = folder_mod(
+        &scratch.join("gem"),
+        &[
+            ("horizon-mod.toml", &manifest("gem", "")),
+            (
+                "data/gem/horizon/item/opal.json",
+                r#"{"template": "minecraft:diamond"}"#,
+            ),
+        ],
+    );
+    let root = resource_root(&base, std::slice::from_ref(&m), &scratch.join("cache")).unwrap();
+    let ids = horizon_protocol::registry::Builtin::load(&root.join("registries.json")).unwrap();
+    assert!(ids.get("minecraft:item").unwrap().id("gem:opal").is_some());
+    assert!(root.join(crate::content_identity::MARKER).exists());
+    assert_ne!(
+        crate::content_identity::identity(&root).unwrap(),
+        crate::content_identity::identity(&base).unwrap()
+    );
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
 /// A content mod folder from `(path, text)` pairs, read as the game reads it.
 fn folder_mod(dir: &Path, files: &[(&str, &str)]) -> ContentMod {
     for (name, text) in files {
@@ -1388,6 +1469,44 @@ fn exploration_maps_skip_the_structures_maps_pointed_at() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+/// `NoiseBasedChunkGenerator.addDebugScreenInfo`: F3's `Density` line lists
+/// the noise settings' `debug_functions` with three decimals.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn debug_density_line_lists_the_noise_settings_functions() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let assets = Assets::load(&base).unwrap();
+    let biomes = crate::biome::Biomes::load(&base).unwrap();
+    let terrain = crate::vanillagen::VanillaTerrain::new(
+        &base.join("worldgen"),
+        assets.registry,
+        &biomes,
+        1234,
+    )
+    .unwrap();
+    let line = terrain.density_debug_line([0, 70, 0]).unwrap();
+    let labels: Vec<&str> = line
+        .strip_prefix("Density ")
+        .unwrap()
+        .split(' ')
+        .step_by(2)
+        .collect();
+    assert_eq!(
+        labels,
+        ["N:", "T:", "V:", "C:", "E:", "D:", "W:", "PV:", "PS:"],
+        "{line}"
+    );
+    assert!(
+        line.split(' ')
+            .skip(2)
+            .step_by(2)
+            .all(|v| v.split('.').nth(1).is_some_and(|d| d.len() == 3)),
+        "{line}"
+    );
+}
+
 #[test]
 #[ignore = "full content root: needs prepared vanilla data"]
 fn content_shapes_drive_outline_and_collision() {
@@ -1653,5 +1772,102 @@ fn mod_recipe_results_are_an_item_stack_or_a_bare_item_id() {
             .unwrap_or_else(|| panic!("{name}: no recipe"));
         assert_eq!((&*made.item, made.count), (item, count), "{name}");
     }
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// A mod's creative tab comes after vanilla's, on page 1 in the first top
+/// slot, with only the items the game has; its new items join the search tab
+/// under their English names.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn creative_tabs_come_on_their_own_page() {
+    let Some(_) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-tabs-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("gems");
+    for (name, text) in [
+        (
+            "horizon-mod.toml",
+            "id = \"gems\"\nname = \"Gems\"\nversion = \"0.1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n",
+        ),
+        (
+            "data/gems/horizon/item/ruby.json",
+            r#"{"template": "minecraft:diamond"}"#,
+        ),
+        (
+            "data/gems/horizon/block/ruby_block.json",
+            r#"{"template": "minecraft:diamond_block"}"#,
+        ),
+        (
+            "data/gems/horizon/creative_tab/gems.json",
+            r#"{"title": "Gems", "icon": "gems:ruby", "items": ["gems:ruby", "minecraft:diamond", "gems:missing"]}"#,
+        ),
+        (
+            "assets/gems/lang/en_us.json",
+            r#"{"item.gems.ruby": "Ruby"}"#,
+        ),
+    ] {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let package = horizon_mods::Package::read(&dir).unwrap();
+    let m = ContentMod {
+        id: "gems".into(),
+        content: Content::read(&dir, &package.manifest).unwrap(),
+    };
+    let relative = Path::new("../../.local/horizon-client/26.3");
+    let root = resource_root(relative, std::slice::from_ref(&m), &scratch.join("cache")).unwrap();
+    let mut creative = crate::creative::Creative::load(&root).unwrap();
+    assert_eq!(creative.pages(), 2);
+    let i = creative
+        .tabs
+        .iter()
+        .position(|t| t.id == "gems:gems")
+        .unwrap();
+    let tab = &creative.tabs[i];
+    assert_eq!(
+        (tab.page, tab.top, tab.column, tab.title.as_str()),
+        (1, true, 0, "Gems")
+    );
+    let items: Vec<&str> = tab.items.iter().map(|s| &*s.item).collect();
+    assert_eq!(items, ["gems:ruby", "minecraft:diamond"]);
+    assert!(
+        creative
+            .search_items()
+            .iter()
+            .any(|s| &*s.item == "gems:ruby")
+    );
+    // A block's item is in search once.
+    let blocks = creative
+        .search_items()
+        .iter()
+        .filter(|s| &*s.item == "gems:ruby_block");
+    assert_eq!(blocks.count(), 1);
+    // Search, on every page, stays selected over a page turn.
+    let search = creative.tabs.iter().position(|t| t.search).unwrap();
+    creative.select(search);
+    creative.set_page(1);
+    assert_eq!((creative.selected, creative.page), (search, 1));
+    creative.select(0);
+    // Page 1 shows the mod's tab and the right-hand ones, not vanilla's.
+    creative.set_page(1);
+    assert_eq!(creative.selected, i);
+    let shown: Vec<&str> = creative
+        .tabs
+        .iter()
+        .filter(|t| creative.on_page(t))
+        .map(|t| t.id.as_str())
+        .collect();
+    assert!(
+        shown.contains(&"gems:gems") && shown.contains(&"minecraft:search"),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&"minecraft:building_blocks"), "{shown:?}");
+    // Selecting a vanilla tab goes back to its page.
+    creative.select(0);
+    assert_eq!(creative.page, 0);
     fs::remove_dir_all(&scratch).unwrap();
 }

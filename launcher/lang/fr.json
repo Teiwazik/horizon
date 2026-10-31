@@ -481,5 +481,22 @@
   "Use an access token…": "Utiliser un jeton d'accès…",
   "Make an invitation": "Créer une invitation",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Une invitation par ami. Avec un e-mail, Tailscale l'envoie ; sans, envoyez-leur le lien. Ils l'acceptent dans leur propre compte Tailscale.",
-  "Forget the access token": "Oublier le jeton d'accès"
+  "Forget the access token": "Oublier le jeton d'accès",
+  "Builds from GitHub. Each one installs into its own folder.": "Versions de GitHub. Chacune s'installe dans son propre dossier.",
+  "What changed in each release, newest first.": "Ce qui a changé dans chaque version, de la plus récente à la plus ancienne.",
+  "Support the work below": "Soutenez le projet ci-dessous",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon est développé en libre accès. Les sponsors financent la prochaine version.",
+  "Sponsor on GitHub": "Sponsoriser sur GitHub",
+  "Loading releases…": "Chargement des versions…",
+  "No releases yet.": "Aucune version pour l'instant.",
+  "Loading patch notes…": "Chargement des notes de version…",
+  "In use": "En cours d'utilisation",
+  "Proxy": "Proxy",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Les téléchargements, connexions et mises à jour passent par ce proxy HTTP (http://hôte:port). Laisser vide pour aucun : HTTPS_PROXY est utilisé à la place si le lanceur a été démarré avec.",
+  "For example http://127.0.0.1:7890": "Par exemple http://127.0.0.1:7890",
+  "Game arguments": "Arguments du jeu",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Arguments supplémentaires pour le jeu, transmis tels quels (les guillemets regroupent les mots avec des espaces). S'applique au prochain lancement du jeu.",
+  "For example --server-thread": "Par exemple --server-thread",
+  "Unsigned": "Non signé",
+  "Verified": "Vérifié"
 }
