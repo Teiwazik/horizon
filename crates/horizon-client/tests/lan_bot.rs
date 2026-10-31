@@ -663,6 +663,45 @@ fn a_move_behind_a_use_on_a_block_and_its_swing_waits_for_the_next_tick() {
 }
 
 #[test]
+fn a_move_behind_an_attack_and_its_swing_waits_for_the_next_tick() {
+    let Some(resources) = resources() else {
+        return;
+    };
+    let mut s = server(&resources);
+    let port = s.hub.lan.port;
+    let _bot = run(&mut s, move || connect(port, "Striker", true));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while s.hub.guests.is_empty() {
+        s.tick(&[]);
+        assert!(Instant::now() < deadline, "guest did not join");
+        thread::yield_now();
+    }
+    s.hub.guests[0].loaded = true;
+    s.hub.guests[0].load_timeout = 0;
+    s.hub.guests[0].awaiting_teleport = None;
+    s.hub.guests[0].on_ground = false;
+    // A falling attack sharing a server tick with the landing move behind it:
+    // the attack, the arm swing, then the landing move.
+    let inbox = &mut s.hub.guests[0].inbox;
+    inbox.push_back((S::Attack(play::Attack { id: 1 }), 0));
+    inbox.push_back((S::Punch(Empty), 0));
+    inbox.push_back((S::MovePlayerStatus(play::MovePlayerStatus { flags: 1 }), 0));
+    s.tick(&[]);
+    // The game runs the attack after the hub's pass: the landing move waits so
+    // critical_attack still sees the player off the ground.
+    let g = &s.hub.guests[0];
+    assert!(!g.on_ground, "the landing move ran before the attack");
+    assert!(
+        matches!(g.inbox.back(), Some((S::MovePlayerStatus(_), _))),
+        "the move left the queue"
+    );
+    s.tick(&[]);
+    let g = &s.hub.guests[0];
+    assert!(g.on_ground, "the landing move did not run on the next tick");
+    assert!(g.inbox.is_empty());
+}
+
+#[test]
 fn status_and_join() {
     let Some(resources) = resources() else {
         return;

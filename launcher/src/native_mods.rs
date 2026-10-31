@@ -283,17 +283,7 @@ pub fn is_native(version: &str) -> bool {
 }
 
 pub(crate) fn root() -> PathBuf {
-    backend::data_dir().join("native")
-}
-
-/// A canonical path without Windows' verbatim prefix: `canonicalize` gives `\\?\C:\...` there,
-/// and horizon-mixins' output check stats `\\?\C:`, the volume itself, which Windows refuses
-/// (os error 1). A drive path loses its `\\?\`; any other path is left as it is.
-fn plain(path: PathBuf) -> PathBuf {
-    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
-        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
-        _ => path,
-    }
+    backend::build_dir().join("native")
 }
 
 /// The build's log, kept until the next build.
@@ -1282,8 +1272,9 @@ pub fn build(
         progress(Step::Source(revision.clone()));
         let source = source(&revision)?;
         progress(Step::Mixins);
-        // horizon-mixins refuses an output path through a link (macOS's /tmp is one).
-        let real = plain(root().canonicalize().map_err(|e| e.to_string())?);
+        // `root()` is already the form horizon-mixins and MinGW take: resolved (no link, which
+        // it refuses) and, on Windows, ASCII (which they can't read past), both by build_dir.
+        let real = root();
         let fresh = real.join("stage.new");
         let _ = fs::remove_dir_all(&fresh);
         run(
@@ -1505,24 +1496,6 @@ mod tests {
         let manifest = format!("[mod]\nid = \"{id}\"\nversion = \"0.1.0\"\n");
         fs::write(at.join(MANIFEST), manifest).unwrap();
         fs::write(at.join("hook.rs"), helper).unwrap();
-    }
-
-    #[test]
-    fn a_canonical_windows_path_loses_only_a_drives_verbatim_prefix() {
-        let plain = |p: &str| plain(PathBuf::from(p));
-        assert_eq!(
-            plain(r"\\?\C:\Users\me\AppData\Roaming\horizon-launcher\native"),
-            PathBuf::from(r"C:\Users\me\AppData\Roaming\horizon-launcher\native")
-        );
-        // A share has no drive form to fall back to; other paths have no prefix.
-        assert_eq!(
-            plain(r"\\?\UNC\server\share\native"),
-            PathBuf::from(r"\\?\UNC\server\share\native")
-        );
-        assert_eq!(
-            plain("/home/me/.local/share/horizon-launcher/native"),
-            PathBuf::from("/home/me/.local/share/horizon-launcher/native")
-        );
     }
 
     #[test]

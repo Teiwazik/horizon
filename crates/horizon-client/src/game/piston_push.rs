@@ -9,7 +9,7 @@
 //!
 use super::Game;
 use horizon_client::collisions::{EntityCollisions, SceneCollisions, with_piston_noclip};
-use horizon_core::geometry::{Aabb, Direction, Vec3, border::BorderGeometry};
+use horizon_core::geometry::{Aabb, Axis, Direction, ShapeOp, Vec3, border::BorderGeometry};
 use horizon_core::position::BlockPos;
 use horizon_world::{
     block_collision_scan::BlockCollisionWorld, level::pistons::MovingPiston,
@@ -202,6 +202,55 @@ impl Game<'_> {
                     );
                 }
             }
+        }
+    }
+
+    /// `Block.pushEntitiesUp(old, new, level, pos)` for the block now at `pos`
+    /// (`FarmlandBlock.turnToBaseBlock`, `PathBlock.turnToBaseBlock`): every body
+    /// touching the collision that the new state adds over `old` is lifted
+    /// onto it with `teleportRelative`, no collision scan.
+    pub(super) fn push_entities_up(
+        &mut self,
+        pos: BlockPos,
+        old: horizon_world::registry::BlockStateId,
+    ) {
+        let new = self.world.block(pos.x, pos.y, pos.z);
+        if new == old {
+            return;
+        }
+        let at = [pos.x, pos.y, pos.z];
+        let shape = |state| {
+            let mut scene = SceneCollisions {
+                world: &self.world,
+                binding: self.collision,
+                subject: None,
+            };
+            self.collision.collision_shape(&mut scene, state, at).ok()
+        };
+        let (Some(old_shape), Some(new_shape)) = (shape(old), shape(new)) else {
+            return;
+        };
+        let Ok(added) = old_shape.join_unoptimized(&new_shape, ShapeOp::ONLY_SECOND) else {
+            return;
+        };
+        let added = added.moved(Vec3::new(
+            f64::from(pos.x),
+            f64::from(pos.y),
+            f64::from(pos.z),
+        ));
+        let Some(bounds) = added.bounds() else {
+            return;
+        };
+        let steps = self.push_step_heights();
+        for target in self.push_targets() {
+            let Some(body) = self.push_body(target, pos, &steps) else {
+                continue;
+            };
+            if !body.bounds.intersects(bounds) {
+                continue;
+            }
+            let dy = added.collide(Axis::Y, body.bounds.move_by(Vec3::new(0.0, 1.0, 0.0)), -1.0);
+            self.apply_push(target, Vec3::new(0.0, 1.0 + dy, 0.0));
         }
     }
 

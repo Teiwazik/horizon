@@ -611,6 +611,7 @@ pub struct Behaviours {
     pub fluid_tags: data::FluidTags,
     blocks: Vec<BlockData>,
     items: HashMap<String, ItemBinding>,
+    potted_by_content: HashMap<BlockId, BlockId>,
     liquid_blocks: FluidBlockBindings,
     /// Uncached (position- or block-entity-dependent) collision shapes.
     dynamic: HashMap<BlockStateId, crate::dynamic_support::DynamicSupport>,
@@ -661,6 +662,11 @@ impl Behaviours {
     }
     pub fn item_binding(&self, item: &str) -> Option<&ItemBinding> {
         self.items.get(item)
+    }
+    /// FlowerPotBlock.POTTED_BY_CONTENT: the potted flower pot block that
+    /// holds plant, if any.
+    pub fn potted_block(&self, plant: BlockId) -> Option<BlockId> {
+        self.potted_by_content.get(&plant).copied()
     }
     pub fn tag(&self, name: &str) -> Option<&data::BlockSet> {
         self.all_tags.get(name).map(|s| &**s)

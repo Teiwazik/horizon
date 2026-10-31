@@ -119,7 +119,7 @@ EntityReference.readWithOldOwnerConversion	inline	crates/horizon-client/src/enti
 EntityReference.equals	skip:java		UUIDs are compared directly
 world/entity/EntitySelector.withinDistance	port	crates/horizon-client/src/game/dragon.rs::Game::fight_has_players	the 192 block range around (0, 128, 0) for the dragon fight's valid players
 EntityType.appendCustomEntityStackConfig	missing		player: a spawn egg or entity item with an entity_data component spawns a plain entity (use_spawn_egg ignores the stack's data)
-EntityType.updateCustomEntityTag	missing		player: entity_data of a spawn egg (from /give or a data pack) is never loaded into the spawned entity
+EntityType.updateCustomEntityTag	port	crates/horizon-client/src/game/creatures.rs::Game::apply_spawn_egg_entity_data	the egg's minecraft:entity_data is merged over the mob's own compound and loaded back (TypedEntityData.loadInto), for a player's egg and a dispenser's
 EntityType.getDescription	inline	crates/horizon-client/src/game/commands.rs::Game::target_name	entity.<namespace>.<name> translated
 EntityType.toShortString	skip:debug		only a game test message uses it
 EntityType.loadPassengersRecursive	port	crates/horizon-client/src/game/persist.rs::Game::load_mob	riders under Passengers are loaded after the vehicle; gap: minor: only mobs Horizon simulates, the rest stay in the tag

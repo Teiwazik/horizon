@@ -260,11 +260,35 @@ fn translate(
         .collect();
 
     // Varyings by name: the vertex outputs, then fragment inputs the vertex stage lacks. A
-    // matrix or array travels as one varying per column or element (`varying_parts`).
+    // matrix or array travels as one varying per column or element (`varying_parts`), a
+    // struct as its members packed into vectors (`struct_parts`).
     let mut locations: BTreeMap<String, (u32, String)> = BTreeMap::new();
     let mut split: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
-    for var in v.outs.iter().chain(&f.ins) {
+    let vars = v.outs.iter().map(|o| (&v, o));
+    for (stage, var) in vars.chain(f.ins.iter().map(|i| (&f, i))) {
         if locations.contains_key(&var.name) || split.contains_key(&var.name) {
+            continue;
+        }
+        if var.structure {
+            match struct_parts(&var.decl, &stage.structs) {
+                Some(parts) => {
+                    let mut copies = Vec::new();
+                    for (k, (decl, members)) in parts.into_iter().enumerate() {
+                        let part = format!("hz_v_{}_{k}", var.name);
+                        let next = locations.len() as u32;
+                        locations.insert(part.clone(), (next, decl));
+                        for (swizzle, access) in members {
+                            copies.push((format!("{part}{swizzle}"), access));
+                        }
+                    }
+                    split.insert(var.name.clone(), (String::new(), copies));
+                }
+                None => errors.push(Error {
+                    file: stage.pp.files.first().cloned().unwrap_or_default(),
+                    line: 0,
+                    message: format!("`{}`: this struct can't be a varying", var.name),
+                }),
+            }
             continue;
         }
         match varying_parts(&var.decl) {
@@ -327,7 +351,7 @@ fn translate(
             )
             .unwrap();
         }
-        for (name, (global, _)) in &split {
+        for (name, (global, _)) in split.iter().filter(|(_, (g, _))| !g.is_empty()) {
             writeln!(h, "{}", global.replace("@", name)).unwrap();
         }
         if let (Some(inputs), ShaderStage::Vertex) = (gbuffers, stage.kind) {
@@ -368,7 +392,14 @@ fn translate(
         writeln!(vertex_main, "    {name} = hz_init_{name}();").unwrap();
     }
     vertex_main.push_str("    hz_main();\n");
-    for (name, (_, copies)) in &split {
+    // A struct's own declaration is the pack's: only a stage that declares it copies it.
+    let declared = |list: &[scan::Var], name: &str, global: &str| {
+        !global.is_empty() || list.iter().any(|var| var.name == name)
+    };
+    for (name, (global, copies)) in &split {
+        if !declared(&v.outs, name, global) {
+            continue;
+        }
         for (part, access) in copies {
             writeln!(vertex_main, "    {part} = {name}{access};").unwrap();
         }
@@ -390,7 +421,10 @@ fn translate(
             Target::Buffers => "    hz_FragCoord = gl_FragCoord;\n",
         });
     }
-    for (name, (_, copies)) in &split {
+    for (name, (global, copies)) in &split {
+        if !declared(&f.ins, name, global) {
+            continue;
+        }
         for (part, access) in copies {
             writeln!(fragment_main, "    {name}{access} = {part};").unwrap();
         }
@@ -509,6 +543,126 @@ fn varying_parts(decl: &str) -> Option<(String, Vec<(String, String)>)> {
         })
         .collect();
     Some((format!("{ty} @{array};"), parts))
+}
+
+/// A struct varying (`flat Params @;`) as vectors: its scalar, vector and matrix members, through
+/// nested structs and arrays, packed four components at a time by base type. Each part: its
+/// declaration and, per member, the swizzle of the part and how to reach the member (`.a[1].b`).
+/// `None` for a member that can't travel (`bool`, an unknown type, a size that is not a number).
+#[allow(clippy::type_complexity)]
+fn struct_parts(
+    decl: &str,
+    structs: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Option<Vec<(String, Vec<(String, String)>)>> {
+    let (before, after) = decl.split_once('@')?;
+    let mut words: Vec<&str> = before.split_whitespace().collect();
+    let ty = words.pop()?;
+    let qualifiers: String = words.iter().map(|w| format!("{w} ")).collect();
+    let mut leaves = Vec::new();
+    leaves_of(
+        ty,
+        after.trim().trim_end_matches(';'),
+        String::new(),
+        structs,
+        &mut leaves,
+    )?;
+    // Slots of one base type and up to four components: (base, used, members (from, size, access)).
+    let mut slots: Vec<(&str, usize, Vec<(usize, usize, String)>)> = Vec::new();
+    for (base, size, access) in leaves {
+        match slots
+            .iter_mut()
+            .find(|(b, used, _)| *b == base && used + size <= 4)
+        {
+            Some(slot) => {
+                slot.2.push((slot.1, size, access));
+                slot.1 += size;
+            }
+            None => slots.push((base, size, vec![(0, size, access)])),
+        }
+    }
+    Some(
+        slots
+            .into_iter()
+            .map(|(base, used, members)| {
+                let ty = match (base, used) {
+                    (b, 1) => b.to_owned(),
+                    ("float", n) => format!("vec{n}"),
+                    ("int", n) => format!("ivec{n}"),
+                    (_, n) => format!("uvec{n}"),
+                };
+                // Integers only travel flat.
+                let flat = if base != "float" && !qualifiers.contains("flat") {
+                    "flat "
+                } else {
+                    ""
+                };
+                let members = members
+                    .into_iter()
+                    .map(|(from, size, access)| {
+                        let swizzle = if used == 1 {
+                            String::new()
+                        } else {
+                            format!(".{}", &"xyzw"[from..from + size])
+                        };
+                        (swizzle, access)
+                    })
+                    .collect();
+                (format!("{flat}{qualifiers}{ty} @;"), members)
+            })
+            .collect(),
+    )
+}
+
+/// The scalars and vectors inside a value of type `ty` with array suffix `array`, reached by
+/// `access`: (base type, components, access).
+fn leaves_of(
+    ty: &str,
+    array: &str,
+    access: String,
+    structs: &std::collections::HashMap<String, Vec<(String, String)>>,
+    out: &mut Vec<(&'static str, usize, String)>,
+) -> Option<()> {
+    if let Some(rest) = array.trim().strip_prefix('[') {
+        let (n, rest) = rest.split_once(']')?;
+        for k in 0..n.trim().parse::<usize>().ok()? {
+            leaves_of(ty, rest, format!("{access}[{k}]"), structs, out)?;
+        }
+        return Some(());
+    }
+    if let Some(members) = structs.get(ty) {
+        for (member_ty, member) in members {
+            let (name, array) = member
+                .split_once('[')
+                .map_or((member.as_str(), ""), |(n, _)| (n, &member[n.len()..]));
+            leaves_of(member_ty, array, format!("{access}.{name}"), structs, out)?;
+        }
+        return Some(());
+    }
+    if let Some(dims) = ty.strip_prefix("mat") {
+        let (c, r) = dims.split_once('x').unwrap_or((dims, dims));
+        let (c, r) = (c.parse::<usize>().ok()?, r.parse::<usize>().ok()?);
+        for k in 0..c {
+            out.push(("float", r, format!("{access}[{k}]")));
+        }
+        return Some(());
+    }
+    let (base, size) = match ty {
+        "float" => ("float", 1),
+        "int" => ("int", 1),
+        "uint" => ("uint", 1),
+        _ => {
+            let (base, n) = if let Some(n) = ty.strip_prefix("vec") {
+                ("float", n)
+            } else if let Some(n) = ty.strip_prefix("ivec") {
+                ("int", n)
+            } else {
+                ("uint", ty.strip_prefix("uvec")?)
+            };
+            (base, n.parse().ok()?)
+        }
+    };
+    out.push((base, size, access));
+    Some(())
 }
 
 /// `sampler2DShadow` → (`texture2D`, `samplerShadow`); `isampler3D` → (`itexture3D`, `sampler`).
@@ -905,6 +1059,88 @@ mod tests {
     }
 
     #[test]
+    fn struct_varyings_travel_packed() {
+        let lib = "struct Light { vec3 color; float power; int id; mat2 m; float k[2]; };\n";
+        let vsh = "#version 400\n#include \"/lib.glsl\"\nflat out Light light;\nvoid main() {\n    \
+                   gl_Position = ftransform();\n    light.color = vec3(1.0);\n    light.id = 2;\n}\n";
+        let fsh = "#version 400\n#include \"/lib.glsl\"\nflat in Light light;\nout vec4 c;\n\
+                   void main() { c = vec4(light.color * light.power * light.m[1].x * light.k[1], float(light.id)); }\n";
+        let p = program(
+            &[
+                ("lib.glsl", lib),
+                ("composite.vsh", vsh),
+                ("composite.fsh", fsh),
+            ],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        // color and power, the matrix's columns, the array, and the int: four slots.
+        let inputs = p.fragment.entry_points[0].function.arguments.len();
+        assert_eq!(inputs, 4, "{inputs} inputs");
+        let structs = std::collections::HashMap::from([(
+            "S".to_owned(),
+            vec![
+                ("vec3".to_owned(), "a".to_owned()),
+                ("int".to_owned(), "i".to_owned()),
+                ("float".to_owned(), "b[2]".to_owned()),
+            ],
+        )]);
+        assert_eq!(
+            struct_parts("S @;", &structs).unwrap(),
+            [
+                (
+                    "vec4 @;".to_owned(),
+                    vec![
+                        (".xyz".to_owned(), ".a".to_owned()),
+                        (".w".to_owned(), ".b[0]".to_owned())
+                    ]
+                ),
+                (
+                    "flat int @;".to_owned(),
+                    vec![(String::new(), ".i".to_owned())]
+                ),
+                (
+                    "float @;".to_owned(),
+                    vec![(String::new(), ".b[1]".to_owned())]
+                ),
+            ]
+        );
+        let bools = std::collections::HashMap::from([(
+            "B".to_owned(),
+            vec![("bool".to_owned(), "b".to_owned())],
+        )]);
+        assert!(struct_parts("B @;", &bools).is_none());
+    }
+
+    #[test]
+    fn vulkan_type_names_are_free_names() {
+        let fsh = "#version 400\nuniform sampler2D colortex0;\nout vec4 c;\n\
+                   vec4 fetch(sampler2D sampler, vec2 p) { return texture(sampler, p); }\n\
+                   void main() { float texture2D = 1.0; c = fetch(colortex0, vec2(0.5)) * texture2D; }\n";
+        program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn gathers_and_vertex_texture_reads_translate() {
+        let vsh = "#version 400\nuniform sampler2D colortex1;\nout vec3 tint;\nvoid main() {\n    \
+                   gl_Position = ftransform();\n    tint = texture(colortex1, vec2(0.5)).rgb;\n}\n";
+        let fsh = "#version 400\nuniform sampler2D colortex1;\nuniform sampler2D depthtex0;\nin vec3 tint;\nout vec4 c;\n\
+                   struct S { float k[2]; };\n\
+                   void main() {\n    const S s = S(float[2](1.0, 2.0));\n    \
+                   vec4 d = textureGather(depthtex0, vec2(0.5)) + textureGather(colortex1, vec2(0.5), 3);\n    \
+                   c = vec4(tint * vec3(d.x > 0.5) * s.k[1], float(ivec2(d.xy) % 2));\n}\n";
+        program(
+            &[("composite.vsh", vsh), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
     fn locals_may_hide_a_sampler() {
         let fsh = "#version 120\nuniform sampler2D specular;\nstruct M { float specular; };\n\
                    float f(float x) { float specular = x * 2.0; return specular; }\n\
@@ -936,5 +1172,20 @@ mod tests {
             ("lib/bad.glsl", 3),
             "{errors:?}"
         );
+    }
+
+    /// `x / 0.0` and `sqrt(-1.0)` are GL's infinity and NaN at run time; naga folds them into
+    /// constants and refuses them (Mellow, Bloop). `texelFetch2D` is GL_EXT_gpu_shader4's name
+    /// (Bliss).
+    #[test]
+    fn infinities_nans_and_old_fetches_translate() {
+        let fsh = "#version 330\nuniform sampler2D noisetex;\nout vec4 color;\nvoid main() {\n    \
+                   ivec2 t = ivec2(gl_FragCoord.xy);\n    \
+                   color = texelFetch2D(noisetex, t, 0) + vec4(-1.0 / 0.0) + vec4(sqrt(-1.0));\n}\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        );
+        assert!(p.is_ok(), "{:?}", p.err());
     }
 }

@@ -638,6 +638,7 @@ impl Loader<'_> {
             notes.push(format!("{name}: skipped"));
             return None;
         }
+        notes.extend([&vertex, &fragment].iter().flat_map(|pp| warnings(pp)));
         let program = match translate(&vertex, &fragment) {
             Ok(p) => p,
             Err(errors) => {
@@ -684,8 +685,16 @@ impl Loader<'_> {
 }
 
 fn diagnostics(pp: &Preprocessed) -> Vec<String> {
-    pp.diagnostics
-        .iter()
+    located(pp, &pp.diagnostics)
+}
+
+/// `pp`'s warnings (conditions read as false), located.
+fn warnings(pp: &Preprocessed) -> Vec<String> {
+    located(pp, &pp.warnings)
+}
+
+fn located(pp: &Preprocessed, list: &[crate::preprocess::Diagnostic]) -> Vec<String> {
+    list.iter()
         .map(|d| {
             let file = pp
                 .files

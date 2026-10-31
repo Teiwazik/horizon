@@ -531,8 +531,16 @@ pub struct ExperienceOrb {
     pub count: u32,
     /// `Entity.tickCount`, which paces `ExperienceOrb.scanForMerges`.
     pub ticks: u32,
+    /// `ExperienceOrb.health`: damage wears it down from 5 (`hurtServer`).
+    pub health: i32,
 }
 impl ExperienceOrb {
+    /// `ExperienceOrb.hurtServer`: the damage comes off the health as an
+    /// `int`; an orb at 0 or below is discarded. True when it is gone.
+    pub fn hurt(&mut self, damage: f32) -> bool {
+        self.health = (self.health as f32 - damage) as i32;
+        self.health <= 0
+    }
     pub fn bounds(&self) -> Aabb {
         let h = 0.25;
         Aabb::new(

@@ -320,7 +320,14 @@ impl Game<'_> {
     fn run_function_by_id(&mut self, id: &str, args: Option<&Tag>, source: Source) {
         self.exec.commands = 0;
         if let Some(f) = self.fns.store.functions.get(id).cloned() {
-            let _ = self.run_function(&f, args, source);
+            // `ServerFunctionManager.execute` logs a function that failed to
+            // instantiate or run; its lines' own failures stay silent.
+            if let Err(e) = self.run_function(&f, args, source) {
+                log::warn!(
+                    "Horizon: failed to run function {id}: {}",
+                    e.message.plain()
+                );
+            }
         }
     }
 

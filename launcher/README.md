@@ -287,6 +287,19 @@ labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`, `horizon-launch
 
 ## Command line
 
+Generate shell completions without opening the window:
+
+```sh
+horizon-launcher completions bash > horizon-launcher.bash
+horizon-launcher completions zsh > _horizon-launcher
+horizon-launcher completions fish > horizon-launcher.fish
+```
+
+Elvish and PowerShell are also supported (`completions elvish` and
+`completions powershell`). Source the generated script from your shell configuration,
+or install it in your shell’s completion directory. Packagers can generate these
+files at build time and install them in the corresponding system directories.
+
 The same binary is a command-line tool; without a subcommand it opens the window. On Windows it
 is a windowed program, so a desktop start opens no terminal; a subcommand writes to the terminal
 it was typed in, or to the pipes and files it was given (MCP keeps its stdio). Interactive `cmd`

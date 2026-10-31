@@ -214,6 +214,22 @@ Already have a vanilla server? Run `horizon-server init` in its folder, or `hori
 server.properties` to write `server.toml` from it. The world, `ops.json`, `whitelist.json` and the ban lists
 keep vanilla's names and formats, so going back to vanilla works too.
 
+### Behind a Velocity proxy
+
+A network can put one Velocity proxy in front of several servers: the proxy signs the players in with their
+Microsoft accounts, and the servers behind it trust what it forwards. To run Horizon as one of them:
+
+1. Set `online_mode = false` in `server.toml` and keep the server's port reachable only from the proxy (bind it
+   to `127.0.0.1` or put it on a private network).
+2. Put the proxy's forwarding secret, the one in Velocity's `forwarding.secret`, into a file `forwarding.secret`
+   in the server folder, and set `player-info-forwarding-mode = "modern"` in `velocity.toml`.
+3. Restart the server. The log says `Velocity player information forwarding is on`.
+
+Players then join with the UUID, name, skin and address the proxy forwards. Anyone who connects without going
+through the proxy is refused, and so is a login signed with another secret. With the file in place but
+`online_mode = true` the file is ignored (with a warning), and an empty file stops the start, because an empty
+secret could be signed by anyone. How the exchange works: [velocity-forwarding.md](velocity-forwarding.md).
+
 ## 5. Commands
 
 ```text

@@ -331,6 +331,32 @@ impl Game<'_> {
             if on("player_section_position") {
                 d.group("position", [section]);
             }
+            // chunk_generation_stats: DebugEntryChunkGeneration, where the world is generated here.
+            // The window's server thread publishes its generators; the deprecated in-frame path
+            // (`end.locator`) is not extended.
+            if on("chunk_generation_stats") {
+                let terrain = self
+                    .integrated
+                    .as_ref()
+                    .and_then(|server| server.terrain(self.dim.id()));
+                // `DebugEntryChunkGeneration.display`: the feet block decides whether the line is
+                // sampled again; otherwise the last result is drawn.
+                let feet = [
+                    p.position.x.floor() as i32,
+                    p.position.y.floor() as i32,
+                    p.position.z.floor() as i32,
+                ];
+                let dim = self.dim.id();
+                let mut cache = self.debug_density.borrow_mut();
+                let line = cache.line(
+                    dim,
+                    feet,
+                    terrain.map(|t| move || t.density_debug_line(feet)),
+                );
+                if let Some(line) = line {
+                    d.group("chunk_generation", [line.to_owned()]);
+                }
+            }
         }
         if on("simple_performance_impactors") {
             self.debug_performance_lines(&mut d);
@@ -1215,6 +1241,39 @@ impl DebugQuery {
     }
 }
 
+/// `DebugEntryChunkGeneration`'s `lastPos` and `result`: F3's `Density` line is sampled again
+/// only when the feet block or the dimension changes. Vanilla adds the group only inside its
+/// server-level branch, so with no generator (a remote server, a LAN world joined, the server
+/// thread not there yet) nothing is drawn and nothing of the last world is kept.
+#[derive(Default)]
+pub(super) struct DensityCache(Option<(&'static str, [i32; 3], Option<String>)>);
+impl DensityCache {
+    /// The line to draw; `sample` is `None` without a generator.
+    fn line(
+        &mut self,
+        dim: &'static str,
+        feet: [i32; 3],
+        sample: Option<impl FnOnce() -> Option<String>>,
+    ) -> Option<&str> {
+        let Some(sample) = sample else {
+            self.0 = None;
+            return None;
+        };
+        if !self
+            .0
+            .as_ref()
+            .is_some_and(|(d, f, _)| *d == dim && *f == feet)
+        {
+            self.0 = Some((dim, feet, sample()));
+        }
+        self.0.as_ref().and_then(|(_, _, line)| line.as_deref())
+    }
+    /// Another world: its generator, not the last one's line.
+    pub(super) fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,5 +1298,50 @@ mod tests {
         assert_eq!(q.start(block(3)), 2);
         assert_eq!(q.answer(1), None);
         assert_eq!(q.answer(2), Some(block(3)));
+    }
+
+    #[test]
+    fn the_density_line_is_sampled_when_the_block_or_the_dimension_changes() {
+        let mut cache = DensityCache::default();
+        let samples = std::cell::Cell::new(0);
+        let at = |cache: &mut DensityCache, dim, feet, present: bool| {
+            let sample = || {
+                samples.set(samples.get() + 1);
+                Some(format!("Density {}", samples.get()))
+            };
+            cache
+                .line(dim, feet, if present { Some(sample) } else { None })
+                .map(str::to_owned)
+        };
+        // Standing still draws the first sample again and again.
+        assert_eq!(
+            at(&mut cache, "o", [0, 70, 0], true).as_deref(),
+            Some("Density 1")
+        );
+        assert_eq!(
+            at(&mut cache, "o", [0, 70, 0], true).as_deref(),
+            Some("Density 1")
+        );
+        // A new block, then a new dimension at the same block, sample again.
+        assert_eq!(
+            at(&mut cache, "o", [1, 70, 0], true).as_deref(),
+            Some("Density 2")
+        );
+        assert_eq!(
+            at(&mut cache, "n", [1, 70, 0], true).as_deref(),
+            Some("Density 3")
+        );
+        // No generator: nothing is drawn, nothing is kept, even on the same block.
+        assert_eq!(at(&mut cache, "n", [1, 70, 0], false), None);
+        assert_eq!(
+            at(&mut cache, "n", [1, 70, 0], true).as_deref(),
+            Some("Density 4")
+        );
+        // Another world clears it too.
+        cache.clear();
+        assert_eq!(
+            at(&mut cache, "n", [1, 70, 0], true).as_deref(),
+            Some("Density 5")
+        );
     }
 }

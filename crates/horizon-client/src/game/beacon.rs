@@ -656,7 +656,12 @@ impl Game<'_> {
             let origin = (glam::DVec3::new(f64::from(k.0), f64::from(k.1), f64::from(k.2))
                 - camera)
                 .as_vec3();
+            let start = out.len();
             horizon_client::block_entity_render::beacon_beam(origin, sections, time, scale, s, out);
+            // HDR output: the beam shines (entity.wgsl fs_hdr_mark).
+            for v in &mut out[start..] {
+                v.layer |= u32::from(horizon_client::mesher::BRIGHT) << 16;
+            }
         }
     }
 }

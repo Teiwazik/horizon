@@ -141,7 +141,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
 @vertex fn vs_lightning(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
     @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>, @location(5) normal: vec4<f32>,
     @location(7) offset: vec3<f32>) -> Out {
-    return entity_vertex(offset + position, uv, overlay, color, light, normal);
+    var out = entity_vertex(offset + position, uv, overlay & 0xffffu, color, light, normal);
+    out.tier = (overlay >> 16u) & 0xffu;
+    return out;
 }
 struct CloudInfo {
     offset: vec4<f32>,
@@ -294,7 +296,10 @@ fn shadow_color(in: Out) -> vec4<f32> {
 // way terrain.wgsl marks a light source's, drawn again after the entities with
 // only alpha written, so its colour stays as blended.
 @fragment fn fs_hdr_mark(in: Out) -> @location(0) vec4<f32> {
-    if in.tier == 0u || textureSample(atlas, atlas_sampler, in.uv).a < 0.1 { discard; }
+    // Beams wrap their v in the sprite as fs_entity does: sample where they draw.
+    var uv = in.uv;
+    if in.overlay == 6u { uv.y = in.wrap.x + fract(in.uv.y) * in.wrap.y; }
+    if in.tier == 0u || textureSample(atlas, atlas_sampler, uv).a < 0.1 { discard; }
     return vec4(0.0, 0.0, 0.0, 0.7 * f32(4u - min(in.tier, 4u)) / 4.0);
 }
 

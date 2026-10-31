@@ -126,6 +126,19 @@ impl Macros {
             .map(|m| m.body.as_str())
     }
 
+    /// Whether `text` calls a function-like macro whose arguments go on past its end.
+    pub(crate) fn unfinished_call(&self, text: &str) -> bool {
+        let tokens = lex(text);
+        tokens.iter().enumerate().any(|(i, t)| {
+            self.0.get(*t).is_some_and(|m| m.params.is_some())
+                && tokens[i + 1..]
+                    .iter()
+                    .find(|t| !t.trim().is_empty())
+                    .is_some_and(|t| *t == "(")
+                && arguments(&tokens, i + 1).is_none()
+        })
+    }
+
     /// `text` with every macro expanded, repeatedly; a macro is not expanded again inside its own
     /// expansion, so `A` defined as `A + 1` stops. Function-like macros take their arguments
     /// (expanded first, raw beside `##`, which pastes) when a `(` follows their name.

@@ -25,7 +25,7 @@ AbstractBoat.getPaddleState	port	crates/horizon-client/src/game/boats.rs::Boat::
 AbstractBoat.getControllingPassenger	inline	crates/horizon-client/src/game/boats.rs::Game::tick_riding	the riding player is the controller; mobs never steer
 AbstractBoat.setInput	inline	crates/horizon-client/src/game/boats.rs::Game::tick_riding	input flags are copied from the keys each tick
 AbstractBoat.isUnderWater	port	crates/horizon-client/src/game/boats.rs::Boat::under_water	
-AbstractBoat.modifyPassengerFluidInteractionBox	missing		minor: a rider's water check still uses the whole body; horizon-world boat_passenger_box exists but no game code calls it
+AbstractBoat.modifyPassengerFluidInteractionBox	inline	crates/horizon-client/src/motion/fluids.rs::MotionWorld::interaction_box	the ridden boat (RiddenBoat) is set on clients in remote.rs and for served players in lan_actions.rs; the passenger box keeps only the part above the boat's top
 AbstractChestBoat.remove	inline	crates/horizon-client/src/game/boats.rs::Game::hurt_boat	a destroyed chest boat spills its 27 slots
 AbstractChestBoat.openCustomInventoryScreen	inline	crates/horizon-client/src/game/boats.rs::Game::interact_boat	sneaking opens the chest; gap: minor: no piglin anger
 AbstractChestBoat.createMenu	inline	crates/horizon-client/src/game/boats.rs::Game::interact_boat	the chest container is set up there; gap: minor: no spectator or loot table check

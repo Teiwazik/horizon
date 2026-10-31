@@ -720,6 +720,8 @@ impl Game<'_> {
         // take the ids counted as this stack's.
         let mut waiting = std::mem::take(&mut self.world.loaded_entities);
         let before = self.next_entity;
+        let mut tag = tag;
+        crate::game::persist::mark_fresh(&mut tag);
         self.world.loaded_entities.push((key, vec![tag]));
         self.spawn_loaded_entities();
         waiting.append(&mut self.world.loaded_entities);
@@ -792,8 +794,13 @@ impl Game<'_> {
         }
         place(&mut tag, pos);
         let from = self.mobs.len();
+        let canceled = self.persist.joins_canceled;
         let target = self.spawn_entity_from_nbt(tag);
         self.native_mobs_joined(from, false);
+        // A mod kept the entity out: tryAddFreshEntityWithPassengers is false.
+        if target.is_none() && self.persist.joins_canceled != canceled {
+            return Err(err("commands.summon.failed.uuid", &[]));
+        }
         Ok(target)
     }
 }

@@ -142,6 +142,11 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_tick"
     },
     {
+      "name": "block_entity_update_tag",
+      "version": 1,
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_update_tag"
+    },
+    {
       "name": "block_entity_container",
       "version": 1,
       "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_container"

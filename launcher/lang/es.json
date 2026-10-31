@@ -481,5 +481,22 @@
   "Use an access token…": "Usar un token de acceso…",
   "Make an invitation": "Crear una invitación",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Una invitación por amigo. Con correo, Tailscale la envía; sin él, envíales el enlace. La aceptan en su propia cuenta de Tailscale.",
-  "Forget the access token": "Olvidar el token de acceso"
+  "Forget the access token": "Olvidar el token de acceso",
+  "Builds from GitHub. Each one installs into its own folder.": "Compilaciones de GitHub. Cada una se instala en su propia carpeta.",
+  "What changed in each release, newest first.": "Qué cambió en cada versión, las más recientes primero.",
+  "Support the work below": "Apoya este proyecto abajo",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon se desarrolla en abierto. Los patrocinadores financian la siguiente versión.",
+  "Sponsor on GitHub": "Patrocinar en GitHub",
+  "Loading releases…": "Cargando versiones…",
+  "No releases yet.": "Aún no hay versiones.",
+  "Loading patch notes…": "Cargando notas de la versión…",
+  "In use": "En uso",
+  "Proxy": "Proxy",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Las descargas, inicios de sesión y actualizaciones pasarán por este proxy HTTP (http://host:puerto). En blanco significa ninguno: se usará HTTPS_PROXY si el iniciador se arrancó con él.",
+  "For example http://127.0.0.1:7890": "Por ejemplo http://127.0.0.1:7890",
+  "Game arguments": "Argumentos del juego",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Argumentos adicionales para el juego, transmitidos tal cual (las comillas agrupan palabras con espacios). Se aplica la próxima vez que inicie el juego.",
+  "For example --server-thread": "Por ejemplo --server-thread",
+  "Unsigned": "Sin firmar",
+  "Verified": "Verificado"
 }

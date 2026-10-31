@@ -481,5 +481,22 @@
   "Use an access token…": "Використати токен доступу…",
   "Make an invitation": "Створити запрошення",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Одне запрошення на друга. Якщо вказати email, Tailscale надішле його сам; інакше надішліть посилання вручну. Друг приймає його у власному обліковому записі Tailscale.",
-  "Forget the access token": "Забути токен доступу"
+  "Forget the access token": "Забути токен доступу",
+  "Builds from GitHub. Each one installs into its own folder.": "Збірки з GitHub. Кожна встановлюється у власну папку.",
+  "What changed in each release, newest first.": "Що змінилося в кожному випуску, спочатку нові.",
+  "Support the work below": "Підтримайте розробку нижче",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon створюється відкрито. Спонсори фінансують наступний випуск.",
+  "Sponsor on GitHub": "Підтримати на GitHub",
+  "Loading releases…": "Завантаження випусків…",
+  "No releases yet.": "Ще немає випусків.",
+  "Loading patch notes…": "Завантаження опису змін…",
+  "In use": "Використовується",
+  "Proxy": "Проксі",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Завантаження, вхід в обліковий запис та оновлення проходять через цей HTTP-проксі (http://host:port). Порожнє поле означає відсутність: натомість використовується HTTPS_PROXY, якщо лаунчер було запущено з ним.",
+  "For example http://127.0.0.1:7890": "Наприклад http://127.0.0.1:7890",
+  "Game arguments": "Параметри гри",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Додаткові параметри запуску гри, передаються як є (лапки об'єднують слова з пробілами). Застосовується під час наступного запуску гри.",
+  "For example --server-thread": "Наприклад --server-thread",
+  "Unsigned": "Без підпису",
+  "Verified": "Перевірено"
 }

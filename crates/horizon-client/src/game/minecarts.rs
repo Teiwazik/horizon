@@ -1505,7 +1505,7 @@ impl Game<'_> {
                     ))
                     * glam::Mat4::from_rotation_y(90f32.to_radians());
                 if c.kind == CartKind::Chest {
-                    self.cart_chest(state, display, l, out);
+                    self.special_block_model(state, display, l, out);
                 } else {
                     // TNT minecarts flash white as the fuse runs out (TntMinecartRenderer).
                     let swell = if c.kind == CartKind::Tnt && c.fuse > -1 {
@@ -1540,8 +1540,15 @@ impl Game<'_> {
             self.cull_entity_vertices(out, entity_start);
         }
     }
-    /// The chest inside a chest minecart, drawn by the chest block-entity renderer.
-    fn cart_chest(&self, state: BlockStateId, m: glam::Mat4, light: u8, out: &mut Vec<Vertex>) {
+    /// The model of a block drawn by its block-entity renderer, as a chest
+    /// minecart shows its chest and a block display its special block.
+    pub(super) fn special_block_model(
+        &self,
+        state: BlockStateId,
+        m: glam::Mat4,
+        light: u8,
+        out: &mut Vec<Vertex>,
+    ) {
         let lid = |_: [i32; 3]| 0.0;
         let scene = horizon_client::block_entity_render::Scene {
             camera: glam::DVec3::ZERO,

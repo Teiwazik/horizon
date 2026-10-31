@@ -291,6 +291,11 @@ mod tests {
             assert_eq!(v.pos[1], (pos.y - camera.y) as f32);
             assert!(v.pos[1] < feet);
         }
+        let [v0, v1, v2] = [out[0].pos, out[1].pos, out[2].pos].map(glam::Vec3::from);
+        assert!(
+            (v1 - v0).cross(v2 - v0).y > 0.0,
+            "shadow quad winds upward (+Y) so back-face culling hides it from below"
+        );
         let farmland = registry.default_state("minecraft:farmland").unwrap();
         world.set(8, 63, 8, farmland).unwrap();
         out.clear();

@@ -685,6 +685,8 @@ impl SourceArg {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Write a shell completion script to stdout
+    Completions { shell: clap_complete::Shell },
     /// List Horizon releases, or the installed versions
     Versions {
         /// Only the versions installed here (no network)
@@ -994,7 +996,10 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), 
             use horizon_launcher::themes::Accent;
             s.accent = Accent::parse(value).ok_or_else(|| {
                 let names: Vec<_> = Accent::ALL.iter().map(|a| a.name()).collect();
-                format!("{value}: say {}", names.join(", "))
+                format!(
+                    "{value}: say {} or a hue in degrees (0 to 360)",
+                    names.join(", ")
+                )
             })?
         }
         "background" => {
@@ -1134,6 +1139,14 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
         }
     }
     match command {
+        Cmd::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut self::command(),
+                "horizon-launcher",
+                &mut std::io::stdout(),
+            );
+        }
         Cmd::Versions { installed: true } => {
             let installed = backend::installed();
             let selected = backend::resolve_version(None).ok();
@@ -3429,6 +3442,30 @@ fn modpack(action: ModpackCmd, as_json: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn completions_cover_each_shell_and_nested_commands() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::Elvish,
+            clap_complete::Shell::PowerShell,
+        ] {
+            let shell_name = shell.to_string();
+            let args = ["horizon-launcher", "completions", shell_name.as_str()].map(str::to_owned);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(Cmd::Completions { .. })));
+            let mut output = Vec::new();
+            clap_complete::generate(shell, &mut command(), "horizon-launcher", &mut output);
+            let script = String::from_utf8(output).unwrap();
+            assert!(script.contains("horizon-launcher"));
+            assert!(script.contains("versions"));
+            assert!(script.contains("multiplayer"));
+        }
+        assert!(Cli::try_parse_from(["horizon-launcher", "completions"]).is_err());
+        assert!(Cli::try_parse_from(["horizon-launcher", "completions", "unknown"]).is_err());
+    }
 
     #[test]
     fn settings_accepts_german_and_chinese() {

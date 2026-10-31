@@ -118,24 +118,23 @@ fn sample_rgss(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv: v
     let rgss = mix(sum_low * 0.25, sum_high * 0.25, mip_blend);
     return mix(sample_nearest(uv, layer, pixel, du, dv, texel_screen), rgss, blend);
 }
-fn sprite(uv: vec2<f32>, layer: u32) -> vec4<f32> {
-    let mode = u32(globals.filtering.x);
-    if mode != 0u {
-        // Texture Filtering Anisotropic or RGSS: terrain.fsh's two sampling paths.
-        let du = dpdx(uv);
-        let dv = dpdy(uv);
-        let pixel = vec2(1.0 / globals.filtering.y);
-        let texel_screen = sqrt(du * du + dv * dv);
-        if mode == 1u {
-            return sample_rgss(uv, layer, pixel, du, dv, texel_screen);
-        }
-        return sample_nearest(uv, layer, pixel, du, dv, texel_screen);
+// Distant terrain tiles (lod/mesh.rs) count their UVs in blocks past 1: each block takes the
+// sprite again, as separate faces would under the clamped sampler. Sprite UVs in [0, 1] stay.
+fn tile_uv(uv: vec2<f32>) -> vec2<f32> {
+    return uv - max(ceil(uv) - 1.0, vec2(0.0));
+}
+fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
+    // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
+    // The gradients come from the unwrapped UV, so the mip level holds across block seams.
+    let du = dpdx(tiled);
+    let dv = dpdy(tiled);
+    let uv = tile_uv(tiled);
+    let pixel = vec2(1.0 / globals.filtering.y);
+    let texel_screen = sqrt(du * du + dv * dv);
+    if u32(globals.filtering.x) == 1u {
+        return sample_rgss(uv, layer, pixel, du, dv, texel_screen);
     }
-    if SPRITE_ARRAYS == 1u {
-        return textureSample(sprites, sprite_sampler, uv, i32(layer));
-    }
-    // The array is chosen per fragment: sample with the derivatives taken here.
-    return sprite_grad(uv, layer, dpdx(uv), dpdy(uv));
+    return sample_nearest(uv, layer, pixel, du, dv, texel_screen);
 }
 
 struct TerrainOut {

@@ -481,5 +481,22 @@
   "Use an access token…": "Использовать токен доступа…",
   "Make an invitation": "Создать приглашение",
   "One invitation per friend. With an email Tailscale sends it; without, send them the link. They accept it in their own Tailscale account.": "Одно приглашение на друга. Если указать email, Tailscale отправит его сам; иначе отправьте ссылку вручную. Друг принимает его в своём аккаунте Tailscale.",
-  "Forget the access token": "Забыть токен доступа"
+  "Forget the access token": "Забыть токен доступа",
+  "Builds from GitHub. Each one installs into its own folder.": "Сборки с GitHub. Каждая устанавливается в собственную папку.",
+  "What changed in each release, newest first.": "Что изменилось в каждом релизе, сначала новые.",
+  "Support the work below": "Поддержите разработку ниже",
+  "Horizon is built in the open. Sponsors fund the next release.": "Horizon создаётся открыто. Спонсоры финансируют следующий релиз.",
+  "Sponsor on GitHub": "Спонсировать на GitHub",
+  "Loading releases…": "Загрузка релизов…",
+  "No releases yet.": "Пока нет релизов.",
+  "Loading patch notes…": "Загрузка описания изменений…",
+  "In use": "Используется",
+  "Proxy": "Прокси",
+  "Downloads, sign-ins and updates go through this HTTP proxy (http://host:port). Empty means none: HTTPS_PROXY is used instead when the launcher was started with one.": "Загрузки, вход в аккаунт и обновления проходят через этот HTTP-прокси (http://host:port). Пустое поле означает отсутствие: вместо этого используется HTTPS_PROXY, если лаунчер был запущен с ним.",
+  "For example http://127.0.0.1:7890": "Например http://127.0.0.1:7890",
+  "Game arguments": "Параметры игры",
+  "Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts.": "Дополнительные параметры запуска игры, передаются как есть (кавычки объединяют слова с пробелами). Применяется при следующем запуске игры.",
+  "For example --server-thread": "Например --server-thread",
+  "Unsigned": "Без подписи",
+  "Verified": "Проверено"
 }
