@@ -278,7 +278,15 @@ fn read_meta(source: &Source) -> Option<serde_json::Value> {
         Source::Dir(d) => fs::read(d.join("pack.mcmeta")).ok()?,
         Source::Zip(z) => Zip::open(z).ok()?.read("pack.mcmeta").ok()?,
     };
-    serde_json::from_slice(&bytes).ok()
+    parse_meta(&bytes)
+}
+/// The first JSON value of a `pack.mcmeta`: what follows it is ignored, as some packs sign the
+/// file with a comment after the closing brace.
+fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
+    serde_json::Deserializer::from_slice(bytes)
+        .into_iter()
+        .next()?
+        .ok()
 }
 fn pack(id: String, title: Text, source: Source) -> Option<Pack> {
     pack_for(id, title, source, RESOURCE_FORMAT)
@@ -937,6 +945,13 @@ impl SelectionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_comment_after_the_metadata_does_not_hide_a_pack() {
+        let meta = parse_meta(b"{\"pack\":{\"pack_format\":34}}\n// Made by someone").unwrap();
+        assert_eq!(meta["pack"]["pack_format"], 34);
+        assert!(parse_meta(b"// Made by someone").is_none());
+        assert!(parse_meta(b"{\"pack\":").is_none());
+    }
     #[test]
     fn compatibility_ranges() {
         let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
