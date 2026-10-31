@@ -11,6 +11,7 @@
 
 - **Play offline:** the first start offers **Play offline** beside **Sign in with Microsoft**, so the game installs without an account. Online-mode servers still need the sign-in.
 - **Mods and data packs for a new world:** **Create New World > More > Mods & Data Packs** lists the content mods that add blocks or items next to your data packs. Pick them and Starling starts again with those mods and creates the world. Opening a mod's file with Starling now points you there.
+- **A steadier first download:** the game's files come over a few connections kept open, and a file is tried again when the network drops for a moment.
 - **Your data packs** move into the `Starling` folder with your worlds and packs.
 
 ## Report a bug
