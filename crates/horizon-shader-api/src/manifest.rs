@@ -417,15 +417,27 @@ struct RawShadow {
 /// takes, each at one scale, `MAX_POST_TARGETS` at most.
 fn check_post_targets(post: &[Stage], textures: &[RawTexture]) -> Result<(), String> {
     let reserved = [
-        "frame", "scene_color", "scene_depth", "previous", "linear_sampler", "nearest_sampler",
-        "shadow_map", "shadow_sampler", "history", "shadow_map_translucent", "shadow_color",
+        "frame",
+        "scene_color",
+        "scene_depth",
+        "previous",
+        "linear_sampler",
+        "nearest_sampler",
+        "shadow_map",
+        "shadow_sampler",
+        "history",
+        "shadow_map_translucent",
+        "shadow_color",
         "scene_surface",
     ];
     let mut targets: Vec<(&str, f32)> = Vec::new();
     for (i, p) in post.iter().enumerate() {
         let scale = p.scale.unwrap_or(1.0);
         if !POST_SCALES.contains(&scale) {
-            return Err(format!("{}: scale {scale} is not one of {POST_SCALES:?}", p.file));
+            return Err(format!(
+                "{}: scale {scale} is not one of {POST_SCALES:?}",
+                p.file
+            ));
         }
         if i + 1 == post.len() && (p.output.is_some() || scale != 1.0) {
             return Err(format!(
@@ -453,7 +465,10 @@ fn check_post_targets(post: &[Stage], textures: &[RawTexture]) -> Result<(), Str
         }
         match targets.iter().find(|t| t.0 == name) {
             Some(&(_, s)) if s != scale => {
-                return Err(format!("{}: output {name:?} is written at two scales", p.file));
+                return Err(format!(
+                    "{}: output {name:?} is written at two scales",
+                    p.file
+                ));
             }
             Some(_) => {}
             None => targets.push((name, scale)),
@@ -911,7 +926,11 @@ fn check_pages(raw: Vec<RawPage>, options: &[PackOption]) -> Result<Vec<OptionPa
     if pages.is_empty() {
         return Ok(pages);
     }
-    let (mut seen, mut next, mut shown) = (vec![false; pages.len()], vec![0], vec![false; options.len()]);
+    let (mut seen, mut next, mut shown) = (
+        vec![false; pages.len()],
+        vec![0],
+        vec![false; options.len()],
+    );
     seen[0] = true;
     while let Some(at) = next.pop() {
         for item in &pages[at].items {
@@ -942,7 +961,10 @@ fn check_pages(raw: Vec<RawPage>, options: &[PackOption]) -> Result<Vec<OptionPa
 
 fn read_pages(raw: &[RawPage], options: &[PackOption]) -> Result<Vec<OptionPage>, String> {
     if raw.len() > MAX_PAGES {
-        return Err(format!("{} pages; a pack may declare {MAX_PAGES}", raw.len()));
+        return Err(format!(
+            "{} pages; a pack may declare {MAX_PAGES}",
+            raw.len()
+        ));
     }
     for (i, page) in raw.iter().enumerate() {
         if !pack_identifier(&page.id) {
@@ -988,7 +1010,10 @@ fn read_pages(raw: &[RawPage], options: &[PackOption]) -> Result<Vec<OptionPage>
                     }
                 };
                 if item != PageItem::Empty && items.contains(&item) {
-                    return Err(fail(format!("{:?} is on the page twice", page.items[items.len()])));
+                    return Err(fail(format!(
+                        "{:?} is on the page twice",
+                        page.items[items.len()]
+                    )));
                 }
                 items.push(item);
             }

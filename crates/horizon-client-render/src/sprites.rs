@@ -160,7 +160,11 @@ fn side_within(start: u32, layers: u64, bytes: u64) -> u32 {
 }
 /// The colour's and each LabPBR map's share of `budget`: halves, the maps a quarter each.
 fn shares(budget: u64, pbr: bool) -> (u64, u64) {
-    if pbr { (budget / 2, budget / 4) } else { (budget, 0) }
+    if pbr {
+        (budget / 2, budget / 4)
+    } else {
+        (budget, 0)
+    }
 }
 /// `frame` (a square RGBA `side`) averaged down by whole powers of two to at most `max`.
 fn shrink(frame: Vec<u8>, side: u32, max: u32) -> (u32, Vec<u8>) {
@@ -263,7 +267,10 @@ impl Sprites {
                                 let image = if path.with_extension("png.mcmeta").exists() {
                                     image
                                 } else {
-                                    shrink_image(image, if is_map(path) { map_cap } else { color_cap })
+                                    shrink_image(
+                                        image,
+                                        if is_map(path) { map_cap } else { color_cap },
+                                    )
                                 };
                                 Some((path.clone(), image))
                             })
@@ -483,8 +490,7 @@ impl Sprites {
             for row in 0..side {
                 let source_row = y + row * height / side;
                 for column in 0..side {
-                    let offset =
-                        ((source_row * info.0 + x + column * width / side) * 4) as usize;
+                    let offset = ((source_row * info.0 + x + column * width / side) * 4) as usize;
                     frame.extend_from_slice(&pixels[offset..offset + 4]);
                 }
             }
@@ -614,7 +620,10 @@ impl Sprites {
     /// of `count`: its first frame, square, no larger than the maps' share of the budget
     /// allows any game's textures (a 512x pack's maps would otherwise fill the memory first).
     fn pbr_map(&mut self, path: &Path, suffix: &str, count: u32) -> Option<(u32, Vec<u8>)> {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         let map = path.with_file_name(format!("{stem}{suffix}.png"));
         let Image {
             width: map_width,
@@ -634,7 +643,11 @@ impl Sprites {
             }
         }
         let (_, map_bytes) = shares(texture_budget(), true);
-        Some(shrink(frame, side, side_within(side, LAYERS_AT_LEAST, map_bytes)))
+        Some(shrink(
+            frame,
+            side,
+            side_within(side, LAYERS_AT_LEAST, map_bytes),
+        ))
     }
 }
 

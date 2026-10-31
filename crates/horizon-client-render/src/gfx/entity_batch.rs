@@ -80,8 +80,9 @@ impl EntityBatch {
         }
         let entity_vertices = quads.len() * 4;
         self.combined.clear();
-        self.combined
-            .reserve(entity_vertices + additive.len() + hand.len() + see_through.len() + shadow_only.len());
+        self.combined.reserve(
+            entity_vertices + additive.len() + hand.len() + see_through.len() + shadow_only.len(),
+        );
         for runs in &self.runs {
             for &(first, count) in runs {
                 self.combined

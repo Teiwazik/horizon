@@ -158,7 +158,11 @@ const GUI_DETAIL: u32 = 8;
 /// `pixels` (`w` by `h` RGBA) shrunk by `factor` a side, each texel the mean of the
 /// `factor` squared it covers.
 fn box_down(pixels: &[u8], w: u32, h: u32, factor: u32) -> Vec<u8> {
-    let (ow, oh, f) = ((w / factor) as usize, (h / factor) as usize, factor as usize);
+    let (ow, oh, f) = (
+        (w / factor) as usize,
+        (h / factor) as usize,
+        factor as usize,
+    );
     let mut out = Vec::with_capacity(ow * oh * 4);
     for y in 0..oh {
         for x in 0..ow {

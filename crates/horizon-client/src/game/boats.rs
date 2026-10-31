@@ -243,8 +243,12 @@ impl Game<'_> {
         const DEPTH: i32 = 96;
         let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
         let top = camera.y.floor() as i32 + 2;
-        // Scanned again once the camera moves to another block, or each second.
-        let scan = ([cx, top, cz], self.world.game_time.div_euclid(20));
+        // Scanned again once the camera moves 8 blocks, or every 5 seconds: a scan reads up
+        // to 60 000 blocks on the game thread, and the plane rarely changes.
+        let scan = (
+            [cx >> 3, top >> 3, cz >> 3],
+            self.world.game_time.div_euclid(100),
+        );
         if self.water_plane_scan.replace(Some(scan)) == Some(scan) {
             return self.water_plane_memo.get();
         }

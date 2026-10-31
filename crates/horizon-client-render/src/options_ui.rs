@@ -1445,6 +1445,11 @@ impl OptionsUi {
         }
         self.pack_infos = infos;
     }
+    /// Whether the resource pack screen is open (not Create World's data packs on the same
+    /// page).
+    pub fn resource_packs_open(&self) -> bool {
+        self.page() == Page::Packs && self.data_pack_dir.is_none()
+    }
     /// The name of a pack's settings page past its first, as the page's title.
     fn pack_page_title(&self, s: &Settings, page: Page) -> Option<Text> {
         let Page::ShaderPackOptions(at @ 1..) = page else {
@@ -1937,9 +1942,11 @@ impl OptionsUi {
                     };
                     button(0.0, 0.0, width, Text::literal(label), act)
                 };
-                rows.extend(items.chunks(columns).map(|row| {
-                    Row::Buttons(widget(&row[0]), row.get(1).map(&widget))
-                }));
+                rows.extend(
+                    items
+                        .chunks(columns)
+                        .map(|row| Row::Buttons(widget(&row[0]), row.get(1).map(&widget))),
+                );
                 rows
             }
             _ => {
@@ -2468,7 +2475,9 @@ impl OptionsUi {
                     w,
                     h: 9.0,
                     kind: WKind::Text {
-                        text: self.pack_page_title(s, page).unwrap_or_else(|| tr(Self::title(page))),
+                        text: self
+                            .pack_page_title(s, page)
+                            .unwrap_or_else(|| tr(Self::title(page))),
                         color: u32::MAX,
                         centered: true,
                     },

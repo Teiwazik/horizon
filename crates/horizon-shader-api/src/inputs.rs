@@ -166,9 +166,10 @@ uniform! {
         /// Last frame's camera-relative world to clip space (its `projection * view`); a point
         /// at camera-relative `p` now was at `p + camera_motion` relative to last frame's camera.
         previous_view_projection: [[f32; 4]; 4],
-        /// How far the camera moved since last frame, in blocks.
+        /// How far the camera moved since last frame, in blocks (0 after a gap of over half a
+        /// second: a pause, a world load).
         camera_motion: [f32; 3],
-        /// Seconds since last frame.
+        /// Seconds since last frame (0 on the first and after such a gap).
         delta_time: f32,
         /// Rain that lingers: `rain` followed with a half-life of 30 seconds as it starts and
         /// 10 as it stops (Iris's `wetness`).

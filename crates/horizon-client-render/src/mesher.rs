@@ -1028,7 +1028,11 @@ impl Mesher<'_> {
         };
         let tint = Self::tint(state, q.tint_index, tints, pos);
         let translucent = face.translucent
-            || self.translucent_layers.get(face.layer as usize).copied().unwrap_or(false);
+            || self
+                .translucent_layers
+                .get(face.layer as usize)
+                .copied()
+                .unwrap_or(false);
         let target = if translucent {
             &mut out.translucent
         } else {

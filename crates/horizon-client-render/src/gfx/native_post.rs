@@ -164,6 +164,19 @@ fn frame_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Seconds between frames past which the last one is forgotten (`NativeFrame::write`).
+const MAX_FRAME_GAP: f32 = 0.5;
+
+/// `value` moved toward `target` over `dt` seconds by a half-life in seconds; a NaN `value`
+/// (the first frame) starts at `target`.
+fn eased(value: f32, target: f32, half_life: f32, dt: f32) -> f32 {
+    if value.is_nan() {
+        target
+    } else {
+        target + (value - target) * 0.5f32.powf(dt / half_life)
+    }
+}
+
 impl NativeFrame {
     /// The frame of a pack with the `[shadow]` settings `shadow`, if any.
     pub fn new(
@@ -527,10 +540,15 @@ impl NativeFrame {
         .to_cols_array_2d();
         let now = std::time::Instant::now();
         inputs.previous_view_projection = view_proj;
-        if let Some((previous, camera, time)) = self.last {
-            inputs.previous_view_projection = previous;
-            inputs.camera_motion = (frame.camera - camera).as_vec3().to_array();
-            inputs.delta_time = (now - time).as_secs_f32();
+        // `write` skips title frames, so a gap means a pause or another world: the frame
+        // before says nothing about this one, and the eased values start over.
+        match self.last {
+            Some((previous, camera, time)) if (now - time).as_secs_f32() < MAX_FRAME_GAP => {
+                inputs.previous_view_projection = previous;
+                inputs.camera_motion = (frame.camera - camera).as_vec3().to_array();
+                inputs.delta_time = (now - time).as_secs_f32();
+            }
+            _ => self.eye = [f32::NAN; 4],
         }
         // Eased toward this frame's weather by half-lives in seconds: rising, falling.
         let dt = inputs.delta_time;
@@ -557,11 +575,7 @@ impl NativeFrame {
             (f32::from(u8::from(inputs.eye_in == 2)), 0.25),
         ];
         for (value, (target, half_life)) in self.eye.iter_mut().zip(targets) {
-            *value = if value.is_nan() {
-                target
-            } else {
-                target + (*value - target) * 0.5f32.powf(dt / half_life)
-            };
+            *value = eased(*value, target, half_life, dt);
         }
         let [block, sky, water, lava] = self.eye;
         inputs.eye_light_smooth = [block, sky];
@@ -1170,7 +1184,6 @@ impl NativePost {
             .as_mut()
             .map(|d| d.capture(device, encoder, (world.0, world.1)))
             .unwrap_or(false);
-        // The last pass's input becomes next frame's `history`: the chain's last picture.
         let last = self.passes.len() - 1;
         let history_after = self.plan[..last]
             .iter()
@@ -1200,16 +1213,6 @@ impl NativePost {
             pass.set_bind_group(GROUP, group, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
-            if history_after == Some(i)
-                && let Writes::Chain(slot) = self.plan[i].writes
-                && let (Some((_, history)), Some((_, targets))) = (&self.history, &self.targets)
-            {
-                encoder.copy_texture_to_texture(
-                    targets[slot].texture().as_image_copy(),
-                    history.as_image_copy(),
-                    history.size(),
-                );
-            }
             if dump_now {
                 let clean = |label: &str| label.replace(['/', '\\', ':'], "_");
                 let name = if i + 1 < self.passes.len() {
@@ -1221,6 +1224,18 @@ impl NativePost {
                     dump.copy(device, encoder, view, name);
                 }
             }
+        }
+        // The chain's last picture becomes next frame's `history`, once every pass has read
+        // this frame's.
+        if let Some(i) = history_after
+            && let Writes::Chain(slot) = self.plan[i].writes
+            && let (Some((_, history)), Some((_, targets))) = (&self.history, &self.targets)
+        {
+            encoder.copy_texture_to_texture(
+                targets[slot].texture().as_image_copy(),
+                history.as_image_copy(),
+                history.size(),
+            );
         }
     }
 }
@@ -1568,6 +1583,13 @@ pub fn frame_inputs(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eased_values_start_at_the_target_and_halve_the_distance() {
+        use super::eased;
+        assert_eq!(eased(f32::NAN, 0.25, 2.0, 0.0), 0.25);
+        assert_eq!(eased(1.0, 0.0, 2.0, 2.0), 0.5);
+        assert_eq!(eased(1.0, 0.0, 2.0, 0.0), 1.0);
+    }
     use super::*;
     use horizon_shader_api::{MANIFEST, Pack, check};
 

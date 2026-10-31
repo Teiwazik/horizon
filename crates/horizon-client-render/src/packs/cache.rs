@@ -44,8 +44,7 @@ impl Dependencies {
     fn valid(&self) -> bool {
         !self.failed
             && self.entries.iter().all(|(path, directory, signature)| {
-                dependency_signature(path, *directory, &self.vanilla)
-                    .is_ok_and(|s| s == *signature)
+                dependency_signature(path, *directory, &self.vanilla).is_ok_and(|s| s == *signature)
             })
     }
 }

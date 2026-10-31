@@ -115,7 +115,7 @@ impl Game<'_> {
     /// While the pack screen is open, `resourcepacks/` is looked at once a second and the
     /// list found again when its packs changed (`PackSelectionScreen.tick`'s watcher).
     fn watch_pack_folder(&mut self) {
-        if self.ui.options.page() != Page::Packs {
+        if !self.ui.options.resource_packs_open() {
             self.pack_folder = None;
             return;
         }

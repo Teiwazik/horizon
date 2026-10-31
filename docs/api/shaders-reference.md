@@ -275,8 +275,8 @@ The frame, as `frame` in every stage. Positions and directions are in world axes
 | `has_shadow` | `u32` | 428 | 1 while `shadow_map` holds this frame's shadow map. |
 | `shadow_view_proj` | `mat4x4<f32>` | 432 | Camera-relative world to the shadow camera's clip space, before the distortion (orthographic, looking along `-light_direction`; z 0 at the light, 1 away from it). |
 | `previous_view_projection` | `mat4x4<f32>` | 496 | Last frame's camera-relative world to clip space (its `projection * view`); a point at camera-relative `p` now was at `p + camera_motion` relative to last frame's camera. |
-| `camera_motion` | `vec3<f32>` | 560 | How far the camera moved since last frame, in blocks. |
-| `delta_time` | `f32` | 572 | Seconds since last frame. |
+| `camera_motion` | `vec3<f32>` | 560 | How far the camera moved since last frame, in blocks (0 after a gap of over half a second: a pause, a world load). |
+| `delta_time` | `f32` | 572 | Seconds since last frame (0 on the first and after such a gap). |
 | `wetness` | `f32` | 576 | Rain that lingers: `rain` followed with a half-life of 30 seconds as it starts and 10 as it stops (Iris's `wetness`). |
 | `biome_rain` | `f32` | 580 | 1 while the biome at the camera has rain (not snow, not dry), eased with a half-life of 20 seconds in and 10 out (Complementary's `inRainy`). |
 | `biome_snow` | `f32` | 584 | The same for a biome with snow (`inSnowy`). |

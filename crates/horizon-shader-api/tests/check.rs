@@ -61,7 +61,7 @@ fn material(input: MaterialInput) -> Surface {
     return Surface(input.albedo + mirror(input.screen) * 0.0);
 }
 "
-            .to_vec(),
+        .to_vec(),
     );
     let report = check(&Pack::from_files(files).unwrap()).unwrap();
     assert!(report.stages[1].reads("reflection"));

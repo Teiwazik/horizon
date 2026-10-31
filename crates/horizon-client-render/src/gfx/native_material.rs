@@ -157,14 +157,15 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     let screen = in.clip.xy / frame.resolution;
     let material_id = material_ids[min(in.layer & 0x7fffu, arrayLength(&material_ids) - 1u)];
     // Block faces are flat: the derivatives of the position give the face's normal, turned
-    // toward the camera. Far away they lose precision, so a normal within a few degrees of
-    // an axis (every full block face) is that axis exactly: no shimmer on distant faces.
+    // toward the camera. Far away they lose precision, so a normal within about 3.6 degrees of
+    // an axis (every full block face) is that axis exactly: no shimmer on distant faces. The
+    // gentlest slope of flowing water, one level over a block, tilts about 6 degrees.
     let n = normalize(cross(dpdx(in.position), dpdy(in.position)));
     let a = abs(n);
     let m = max(a.x, max(a.y, a.z));
     let axis = select(select(vec3(0.0, 0.0, sign(n.z)), vec3(0.0, sign(n.y), 0.0), a.y == m),
         vec3(sign(n.x), 0.0, 0.0), a.x == m);
-    let flat_n = select(select(n, axis, m > 0.99), in.normal, dot(in.normal, in.normal) > 0.5);
+    let flat_n = select(select(n, axis, m > 0.998), in.normal, dot(in.normal, in.normal) > 0.5);
     let normal = select(flat_n, -flat_n, dot(flat_n, in.base) > 0.0);
     horizon_material_normal = normal;
     horizon_surface = vec4(0.0);

@@ -324,19 +324,44 @@ fn reads_settings_pages_and_refuses_broken_links() {
     );
     assert_eq!(
         m.pages[1].items,
-        [PageItem::Option(3), PageItem::Option(2), PageItem::Option(1)]
+        [
+            PageItem::Option(3),
+            PageItem::Option(2),
+            PageItem::Option(1)
+        ]
     );
     // Without pages, the settings show every option on one.
     assert!(Manifest::parse(&sample_text()).unwrap().pages.is_empty());
     let cases = [
-        (pages.replace("\"page:more\"", "\"page:less\""), "no page \"less\""),
-        (pages.replace("\"page:more\"", "\"page:main\""), "links to itself"),
-        (pages.replace("\"tonemap\"", "\"tone\""), "no option \"tone\""),
-        (pages.replace("\"samples\",", "\"tonemap\","), "on the page twice"),
+        (
+            pages.replace("\"page:more\"", "\"page:less\""),
+            "no page \"less\"",
+        ),
+        (
+            pages.replace("\"page:more\"", "\"page:main\""),
+            "links to itself",
+        ),
+        (
+            pages.replace("\"tonemap\"", "\"tone\""),
+            "no option \"tone\"",
+        ),
+        (
+            pages.replace("\"samples\",", "\"tonemap\","),
+            "on the page twice",
+        ),
         (pages.replace("columns = 1", "columns = 3"), "1 or 2"),
-        (pages.replace("id = \"more\"", "id = \"main\""), "declared twice"),
-        (pages.replace(", \"vignette\"]", "]"), "option \"vignette\" is on no page"),
-        (pages.replace("\"page:more\"", "\"\""), "page \"more\" can't be reached"),
+        (
+            pages.replace("id = \"more\"", "id = \"main\""),
+            "declared twice",
+        ),
+        (
+            pages.replace(", \"vignette\"]", "]"),
+            "option \"vignette\" is on no page",
+        ),
+        (
+            pages.replace("\"page:more\"", "\"\""),
+            "page \"more\" can't be reached",
+        ),
     ];
     for (pages, needle) in cases {
         let e = refused(&format!("{}{pages}", sample_text()));
@@ -380,19 +405,28 @@ option = \"mirror\"
     ))
     .unwrap();
     assert_eq!(m.reflection.unwrap().option.as_deref(), Some("mirror"));
-    assert!(Manifest::parse(&format!("{head}{material}")).unwrap().reflection.is_none());
     assert!(
-        refused(&format!("{head}[[post]]
-file = \"p.wgsl\"
-[reflection]
-"))
-            .contains("needs [material]")
+        Manifest::parse(&format!("{head}{material}"))
+            .unwrap()
+            .reflection
+            .is_none()
     );
     assert!(
-        refused(&format!("{head}{material}[reflection]
+        refused(&format!(
+            "{head}[[post]]
+file = \"p.wgsl\"
+[reflection]
+"
+        ))
+        .contains("needs [material]")
+    );
+    assert!(
+        refused(&format!(
+            "{head}{material}[reflection]
 option = \"nope\"
-"))
-            .contains("is no option")
+"
+        ))
+        .contains("is no option")
     );
 }
 

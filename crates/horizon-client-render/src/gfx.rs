@@ -5264,23 +5264,15 @@ impl Renderer {
                 });
             }
             if let Some(mirror) = &self.mirror {
-                // Mirroring the world about y = `plane` in camera-relative space
-                // is the matrix F: y flips and moves to 2*(plane - camera.y).
-                // Composing it with the camera's projection negates column 1 and
-                // moves column 3 by c times column 1; the sky reads
-                // `inverse_view`, which mirrors the same way.
-                let c = 2.0 * (plane - frame.camera.y as f32);
-                let view_proj = mirror_view_projection(
-                    view_proj,
-                    plane - frame.camera.y as f32,
-                )
-                .to_cols_array_2d();
-                let mut inverse_view = crate::camera::view_matrix(frame.yaw, frame.pitch)
-                    .inverse()
+                // Mirrored about y = `plane` (camera-relative).
+                let view_proj = mirror_view_projection(view_proj, plane - frame.camera.y as f32)
                     .to_cols_array_2d();
-                let iv_col1 = inverse_view[1];
-                inverse_view[1] = iv_col1.map(|v| -v);
-                inverse_view[3] = std::array::from_fn(|i| inverse_view[3][i] + c * iv_col1[i]);
+                let inverse_view = mirror_inverse_view(
+                    crate::camera::view_matrix(frame.yaw, frame.pitch)
+                        .inverse()
+                        .to_cols_array_2d(),
+                    plane - frame.camera.y as f32,
+                );
                 // fog_ends.w: the plane, camera-relative, below which terrain.wgsl's
                 // fs_solid_mirror cuts the world away (only entity.wgsl reads the glint
                 // strength there, and no entity draws in this pass).
@@ -6559,6 +6551,11 @@ fn mirror_view_projection(view_proj: Mat4, plane: f32) -> Mat4 {
     m[3] = std::array::from_fn(|i| m[3][i] + 2.0 * plane * col1[i]);
     Mat4::from_cols_array_2d(&m)
 }
+/// The mirror's `inverse_view` (the sky's rays): what the view sees, mirrored about the
+/// horizontal plane at the camera-relative height `plane`, so F * `inverse_view`.
+fn mirror_inverse_view(inverse_view: [[f32; 4]; 4], plane: f32) -> [[f32; 4]; 4] {
+    inverse_view.map(|[x, y, z, w]| [x, 2.0 * plane * w - y, z, w])
+}
 /// Where a perspective `view_proj` sees from, in its own (camera-relative)
 /// space: the point whose clip x, y and w are all 0. `None` for a
 /// projection without one (orthographic).
@@ -6617,6 +6614,23 @@ fn frustum(m: Mat4) -> [Vec4; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_mirrors_sky_rays_are_the_cameras_reflected() {
+        use glam::{Mat4, Vec3, Vec4};
+        // A camera looking down: its mirror looks up, by as much.
+        let forward = Vec3::new(0.3, -0.64, -1.0).normalize();
+        let view = Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
+        let mirrored = super::mirror_inverse_view(view.inverse().to_cols_array_2d(), -3.25);
+        let ray = Mat4::from_cols_array_2d(&mirrored) * Vec4::new(0.0, 0.0, -1.0, 0.0);
+        let reflected = Vec3::new(forward.x, -forward.y, forward.z);
+        assert!((ray.truncate() - reflected).length() < 1e-5, "{ray}");
+        // The view's origin, the camera, goes to the mirror's eye.
+        let eye = Mat4::from_cols_array_2d(&mirrored) * Vec4::W;
+        assert!(
+            (eye.truncate() - Vec3::new(0.0, -6.5, 0.0)).length() < 1e-5,
+            "{eye}"
+        );
+    }
     #[test]
     fn drawable_size_skips_minimized_and_oversized_windows() {
         use super::drawable_size;

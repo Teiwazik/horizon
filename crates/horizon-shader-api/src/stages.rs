@@ -414,7 +414,7 @@ struct HorizonMaterialIn {
     let m = max(a.x, max(a.y, a.z));
     let axis = select(select(vec3(0.0, 0.0, sign(n.z)), vec3(0.0, sign(n.y), 0.0), a.y == m),
         vec3(sign(n.x), 0.0, 0.0), a.x == m);
-    let flat_n = select(n, axis, m > 0.99);
+    let flat_n = select(n, axis, m > 0.998);
     let normal = select(flat_n, -flat_n, dot(flat_n, in.world) > 0.0);
     let material_id = material_ids[min(in.layer & 0x7fffu, arrayLength(&material_ids) - 1u)];
     let tangent = horizon_material_tangent(in.world, in.uv, normal);
@@ -697,7 +697,10 @@ pub fn compose(pack: &Pack, kind: StageKind, file: &str) -> Composed {
         push(&vertex.file, pack.source(&vertex.file).unwrap_or_default());
     }
     if kind == StageKind::Material && pack.manifest.displacement.is_some() {
-        push("<entries>", &(kind.entries().to_owned() + DISPLACEMENT_ENTRIES));
+        push(
+            "<entries>",
+            &(kind.entries().to_owned() + DISPLACEMENT_ENTRIES),
+        );
     } else {
         push("<entries>", kind.entries());
     }
