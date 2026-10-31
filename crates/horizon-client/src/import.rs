@@ -175,7 +175,7 @@ pub fn install(path: &Path, name: &str, places: &Places) -> Result<Installed, St
                 extract_into(path, &prefix, &unique(&dir, &title, ""), &[]).map_err(fail)?;
             }
             format!(
-                "Mod \"{title}\" added: turn it on in Options > Mods (one that adds blocks or items needs a restart)"
+                "Mod \"{title}\" added: turn it on in Options > Mods, or, if it adds blocks or items, pick it for a new world in Create New World > More > Mods & Data Packs"
             )
         }
         Kind::Resources => {
