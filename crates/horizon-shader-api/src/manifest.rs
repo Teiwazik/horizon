@@ -210,6 +210,12 @@ pub struct Displacement {
     pub cells: u32,
     /// The `bool` option that turns it on, if any (else it is always on).
     pub option: Option<String>,
+    /// A `choice` option whose values are cell counts, if any: the player's value replaces
+    /// `cells`.
+    pub cells_option: Option<String>,
+    /// A `bool` option, if any: while it is on each cell is a flat step with walls, the
+    /// height map's texels standing out sharply, rather than a smooth surface through them.
+    pub steps_option: Option<String>,
 }
 
 /// `[reflection]`: when Horizon draws the world mirrored about the water in view for the
@@ -491,6 +497,8 @@ struct RawDisplacement {
     #[serde(default = "default_displacement_cells")]
     cells: u32,
     option: Option<String>,
+    cells_option: Option<String>,
+    steps_option: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -824,10 +832,34 @@ impl Manifest {
                         "displacement.option: `{id}` is no bool option"
                     )));
                 }
+                if let Some(id) = &d.steps_option
+                    && !options
+                        .iter()
+                        .any(|o| o.id == *id && matches!(o.kind, OptionKind::Bool { .. }))
+                {
+                    return Err(err(format!(
+                        "displacement.steps_option: `{id}` is no bool option"
+                    )));
+                }
+                if let Some(id) = &d.cells_option
+                    && !options.iter().any(|o| {
+                        o.id == *id
+                            && matches!(&o.kind, OptionKind::Choice { values, .. } if values
+                                .iter()
+                                .all(|v| v.parse().is_ok_and(|c| DISPLACEMENT_CELLS.contains(&c))))
+                    })
+                {
+                    return Err(err(format!(
+                        "displacement.cells_option: `{id}` is no choice of cell counts in \
+                         {DISPLACEMENT_CELLS:?}"
+                    )));
+                }
                 Some(Displacement {
                     distance: d.distance,
                     cells: d.cells,
                     option: d.option,
+                    cells_option: d.cells_option,
+                    steps_option: d.steps_option,
                 })
             }
             None => None,

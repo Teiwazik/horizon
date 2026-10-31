@@ -300,6 +300,7 @@ enum Pass {
 pub struct DisplacedShape<'a> {
     pub distance: f32,
     pub cells: u32,
+    pub steps: bool,
     pub layout: &'a wgpu::BindGroupLayout,
 }
 
@@ -387,6 +388,7 @@ impl NativeMaterial {
         ));
         if let Some(d) = displaced {
             constants.push(("horizon_displace_cells", f64::from(d.cells)));
+            constants.push(("horizon_displace_steps", f64::from(u8::from(d.steps))));
         }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {

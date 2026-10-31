@@ -46,6 +46,23 @@ fn option_on(constants: &[(String, f64)], id: Option<&String>) -> bool {
     })
 }
 
+/// `[displacement]`'s cells: the value of its `cells_option`, if any.
+fn chosen_cells(
+    d: &horizon_shader_api::manifest::Displacement,
+    options: &[horizon_shader_api::manifest::PackOption],
+    constants: &[(String, f64)],
+) -> u32 {
+    let chosen = d.cells_option.as_ref().and_then(|id| {
+        let option = options.iter().find(|o| o.id == *id)?;
+        let horizon_shader_api::manifest::OptionKind::Choice { values, .. } = &option.kind else {
+            return None;
+        };
+        let (_, index) = constants.iter().find(|(k, _)| k == id)?;
+        values.get(*index as usize)?.parse().ok()
+    });
+    chosen.unwrap_or(d.cells)
+}
+
 impl NativePack {
     /// The pack of the checked stages `report` with the option values `constants`, drawing
     /// onto the world's targets as `terrain` describes; the sky reads the terrain's group 0.
@@ -80,11 +97,16 @@ impl NativePack {
             .map(|d| {
                 // No more cells than the height maps have texels.
                 let texels = terrain.pbr.map_or(16, |p| p[0].width());
-                let cells = d.cells.min(texels).max(1);
+                let cells = chosen_cells(d, &report.manifest.options, constants)
+                    .min(texels)
+                    .max(1);
+                let steps =
+                    d.steps_option.is_some() && option_on(constants, d.steps_option.as_ref());
                 Displacement::new(
                     device,
                     d.distance,
                     cells,
+                    steps,
                     &frame.pbr[0],
                     report.shadow.is_some(),
                 )
@@ -101,6 +123,7 @@ impl NativePack {
                     .map(|(d, picks, material)| ShadowGrid {
                         distance: d.distance,
                         cells: picks.cells,
+                        steps: picks.steps,
                         material,
                         layout: &d.draw_layout,
                     });
@@ -172,6 +195,7 @@ impl NativePack {
                 let displaced = displacement.as_ref().map(|d| DisplacedShape {
                     distance: d.distance,
                     cells: d.view.cells,
+                    steps: d.view.steps,
                     layout: &d.draw_layout,
                 });
                 NativeMaterial::new(

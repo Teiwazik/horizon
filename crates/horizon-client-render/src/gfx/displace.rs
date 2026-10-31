@@ -61,6 +61,8 @@ struct HorizonDisplaceSection {
 @group(1) @binding(10) var<storage, read> horizon_displace_sections: array<HorizonDisplaceSection>;
 // The grid's cells along a face's side.
 override horizon_displace_cells: u32 = 16u;
+// Each cell a flat step with walls to its neighbours (`grid_vertices`), not a smooth surface.
+override horizon_displace_steps: bool = false;
 struct HorizonDisplaceCorner {
     position: vec3<f32>,
     uv: vec2<f32>,
@@ -97,6 +99,12 @@ fn horizon_displace_height(uv: vec2<f32>, layer: u32, lod: i32) -> f32 {
     let d = textureLoad(horizon_pbr_normals, clamp(i + vec2(1, 1), vec2(0), m), l, lod).a;
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+// The height map's texel at `uv` of mip level `lod`.
+fn horizon_displace_texel(uv: vec2<f32>, layer: u32, lod: i32) -> f32 {
+    let size = vec2<i32>(textureDimensions(horizon_pbr_normals, lod));
+    let i = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2(0), size - 1);
+    return textureLoad(horizon_pbr_normals, i, i32(layer), lod).a;
+}
 struct HorizonDisplacePoint {
     // Where it is drawn, and where it lies on the flat face (both camera-relative).
     position: vec3<f32>,
@@ -109,6 +117,111 @@ struct HorizonDisplacePoint {
     normal: vec3<f32>,
     near: f32,
 }
+// A quad's corners, for the steps.
+struct HorizonDisplaceQuad {
+    c0: HorizonDisplaceCorner,
+    c1: HorizonDisplaceCorner,
+    c2: HorizonDisplaceCorner,
+    c3: HorizonDisplaceCorner,
+    origin: vec3<f32>,
+    normal: vec3<f32>,
+}
+fn horizon_displace_at(q: HorizonDisplaceQuad, s: f32, t: f32) -> vec3<f32> {
+    return mix(mix(q.c0.position, q.c1.position, s), mix(q.c3.position, q.c2.position, s), t)
+        + q.origin;
+}
+fn horizon_displace_uv(q: HorizonDisplaceQuad, s: f32, t: f32) -> vec2<f32> {
+    return mix(mix(q.c0.uv, q.c1.uv, s), mix(q.c3.uv, q.c2.uv, s), t);
+}
+// How far cell (`i`, `j`) sinks: nothing outside the face, whose edges keep the mean height so
+// that they meet their neighbours.
+fn horizon_displace_cell_depth(q: HorizonDisplaceQuad, i: i32, j: i32) -> f32 {
+    let g = i32(horizon_displace_cells);
+    if i < 0 || j < 0 || i >= g || j >= g {
+        return 0.0;
+    }
+    let s = (f32(i) + 0.5) / f32(g);
+    let t = (f32(j) + 0.5) / f32(g);
+    let base = horizon_displace_at(q, s, t);
+    let uv = horizon_displace_uv(q, s, t);
+    let layer = q.c0.layer & 0x7fffu;
+    let lods = i32(textureNumLevels(horizon_pbr_normals)) - 1;
+    let size = f32(textureDimensions(horizon_pbr_normals).x);
+    let lod = clamp(i32(floor(log2(size / f32(g)))), 0, lods);
+    let material_id = material_ids[min(layer, arrayLength(&material_ids) - 1u)];
+    let height = horizon_displace_texel(uv, layer, lod);
+    let mean = horizon_relief_mean(layer);
+    let depth = displacement(DisplacementInput(base, q.normal, uv, material_id, height))
+        - displacement(DisplacementInput(base, q.normal, uv, material_id, mean));
+    let r = horizon_displace_distance;
+    return depth * (1.0 - smoothstep(0.75 * r, r - 0.1, length(base)));
+}
+// Vertex `v` of a stepped grid: per cell, from -1 so that the first walls have a cell before
+// them, its flat top and its walls to the next cell along each side. A wall faces the way
+// out of the higher cell and takes that cell's texture.
+fn horizon_displace_step(v: u32, q: HorizonDisplaceQuad) -> HorizonDisplacePoint {
+    let g = horizon_displace_cells;
+    let cell = v / 18u;
+    let part = (v / 6u) % 3u;
+    let i = i32(cell % (g + 1u)) - 1;
+    let j = i32(cell / (g + 1u)) - 1;
+    let cells = f32(g);
+    var k = v % 6u;
+    var s = 0.0;
+    var t = 0.0;
+    var uv_s = 0.0;
+    var uv_t = 0.0;
+    var depth = 0.0;
+    if part == 0u {
+        if i >= 0 && j >= 0 {
+            s = (f32(i) + f32((0x16u >> k) & 1u)) / cells;
+            t = (f32(j) + f32((0x34u >> k) & 1u)) / cells;
+            depth = horizon_displace_cell_depth(q, i, j);
+        }
+        uv_s = s;
+        uv_t = t;
+    } else if part == 1u {
+        if j >= 0 {
+            let here = horizon_displace_cell_depth(q, i, j);
+            let next = horizon_displace_cell_depth(q, i + 1, j);
+            if next < here {
+                k = (0x453120u >> (k * 4u)) & 15u;
+            }
+            s = f32(i + 1) / cells;
+            t = (f32(j) + f32((0x16u >> k) & 1u)) / cells;
+            depth = select(max(here, next), min(here, next), ((0x34u >> k) & 1u) == 1u);
+            uv_s = s + select(0.25, -0.25, here <= next) / cells;
+            uv_t = t;
+        }
+    } else {
+        if i >= 0 {
+            let here = horizon_displace_cell_depth(q, i, j);
+            let next = horizon_displace_cell_depth(q, i, j + 1);
+            if here < next {
+                k = (0x453120u >> (k * 4u)) & 15u;
+            }
+            s = (f32(i) + f32((0x16u >> k) & 1u)) / cells;
+            t = f32(j + 1) / cells;
+            depth = select(max(here, next), min(here, next), ((0x34u >> k) & 1u) == 1u);
+            uv_s = s;
+            uv_t = t + select(0.25, -0.25, here <= next) / cells;
+        }
+    }
+    var p: HorizonDisplacePoint;
+    let position = horizon_displace_at(q, s, t);
+    let c = clamp(vec2(uv_s, uv_t), vec2(0.0), vec2(1.0));
+    p.uv = horizon_displace_uv(q, c.x, c.y);
+    p.light = mix(mix(q.c0.light, q.c1.light, s), mix(q.c3.light, q.c2.light, s), t);
+    p.color = mix(mix(q.c0.color, q.c1.color, s), mix(q.c3.color, q.c2.color, s), t);
+    p.layer = q.c0.layer;
+    p.normal = q.normal;
+    p.base = horizon_material_displace(position, p.uv, q.c0.layer, p.color,
+        vec2<u32>(p.light + 0.5));
+    p.near = 1.0 - smoothstep(0.75 * horizon_displace_distance, horizon_displace_distance - 0.1,
+        length(p.base));
+    p.position = p.base - p.normal * depth;
+    return p;
+}
 // Vertex `v` of instance `instance`'s grid.
 fn horizon_displace_point(v: u32, instance: u32) -> HorizonDisplacePoint {
     let pick = horizon_displace_picked[instance];
@@ -117,6 +230,10 @@ fn horizon_displace_point(v: u32, instance: u32) -> HorizonDisplacePoint {
     let c1 = horizon_displace_corner(pick.x, 1u, section.origin.w);
     let c2 = horizon_displace_corner(pick.x, 2u, section.origin.w);
     let c3 = horizon_displace_corner(pick.x, 3u, section.origin.w);
+    if horizon_displace_steps {
+        return horizon_displace_step(v, HorizonDisplaceQuad(c0, c1, c2, c3, section.origin.xyz,
+            normalize(cross(c1.position - c0.position, c2.position - c0.position))));
+    }
     // The cell's two triangles wind as the quad's (0, 1, 2) and (0, 2, 3).
     let g = horizon_displace_cells;
     let cell = v / 6u;
@@ -275,6 +392,8 @@ pub struct Near<'a> {
 pub struct Picks {
     /// The grid's cells along a face's side.
     pub cells: u32,
+    /// Each cell a flat step with walls.
+    pub steps: bool,
     params: wgpu::Buffer,
     /// The indirect draw: the grid's vertices, then the quads picked.
     draw: wgpu::Buffer,
@@ -318,13 +437,25 @@ fn storage(
 /// The shadow map's grid is coarser: its texels near the camera are a 32nd of a block.
 pub const SHADOW_CELLS: u32 = 16;
 
+/// The vertices of one quad's grid: two triangles a cell, or in `steps` also two walls a cell,
+/// with a row and a column more for the walls at the face's first edges.
+fn grid_vertices(cells: u32, steps: bool) -> u32 {
+    if steps {
+        (cells + 1) * (cells + 1) * 18
+    } else {
+        cells * cells * 6
+    }
+}
+
 impl Displacement {
-    /// The grid's buffers and pick pass for `[displacement]` with `distance` and `cells`,
-    /// reading the LabPBR normal maps `normals`; with a list for the shadow map when `shadow`.
+    /// The grid's buffers and pick pass for `[displacement]` with `distance` and `cells`, in
+    /// `steps` or not, reading the LabPBR normal maps `normals`; with a list for the shadow map
+    /// when `shadow`.
     pub fn new(
         device: &wgpu::Device,
         distance: f32,
         cells: u32,
+        steps: bool,
         normals: &wgpu::TextureView,
         shadow: bool,
     ) -> Self {
@@ -424,6 +555,7 @@ impl Displacement {
             });
             Picks {
                 cells,
+                steps,
                 params,
                 draw,
                 pick_group,
@@ -431,7 +563,15 @@ impl Displacement {
             }
         };
         let view = picks(cells);
-        let shadow = shadow.then(|| picks(cells.min(SHADOW_CELLS)));
+        // A step's flat top has to lie where its shadow was cast from, or it shadows itself in
+        // grain; a smooth surface hides the difference and can take fewer cells.
+        let shadow = shadow.then(|| {
+            picks(if steps {
+                cells
+            } else {
+                cells.min(SHADOW_CELLS)
+            })
+        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Displacement pick"),
             source: wgpu::ShaderSource::Wgsl(PICK.into()),
@@ -522,7 +662,7 @@ impl Displacement {
                 pad: [0; 3],
             };
             queue.write_buffer(&picks.params, 0, bytemuck::bytes_of(&params));
-            let vertices = picks.cells * picks.cells * 6;
+            let vertices = grid_vertices(picks.cells, picks.steps);
             queue.write_buffer(&picks.draw, 0, bytemuck::cast_slice(&[vertices, 0, 0, 0]));
             pass.set_bind_group(0, &picks.pick_group, &[]);
             pass.dispatch_workgroups(most.div_ceil(64), table.len() as u32, 1);
@@ -542,6 +682,15 @@ impl Displacement {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(1, &picks.draw_group, &[]);
         pass.draw_indirect(&picks.draw, 0);
+    }
+}
+
+#[cfg(test)]
+mod grid_vertices_tests {
+    #[test]
+    fn a_stepped_grid_has_a_top_and_two_walls_a_cell_and_the_first_edges() {
+        assert_eq!(super::grid_vertices(16, false), 16 * 16 * 6);
+        assert_eq!(super::grid_vertices(16, true), 17 * 17 * 18);
     }
 }
 

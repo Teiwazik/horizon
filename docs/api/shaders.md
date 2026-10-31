@@ -68,6 +68,8 @@ solid_materials = [2]      # optional: [[materials]] ids drawn whole, their cuto
 distance = 12.0            # how far, in blocks, 4 to 32; the relief eases out over the last quarter
 cells = 16                 # the grid's cells along a face's side, 4 to 64 (no more than the texels)
 option = "displacement"    # optional: the bool option that turns it on
+cells_option = "relief_cells"  # optional: a choice option of cell counts ("16", "32", ...), replacing cells
+steps_option = "relief_steps"  # optional: a bool option: while on, each cell is a flat step with walls
 
 [reflection]               # optional, needs [material]: when the water mirror (`reflection`) is drawn
 option = "water_reflections"  # optional: drawn while this option is not 0 (else whenever the stage reads it)
