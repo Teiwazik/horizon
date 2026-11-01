@@ -556,6 +556,8 @@ pub struct Frame<'a> {
     /// What each of `dynamic_lights` shines as, for its colour in the rays.
     pub dynamic_states: &'a [Option<u32>],
     pub colored_lights: &'a [crate::dynamic_light::Colored],
+    /// Particles shining in the rays this frame.
+    pub particle_lights: &'a [crate::dynamic_light::ParticleSource],
     pub emissive_layers: &'a [[u32; 4]],
     /// Cloud mesh inputs; geometry and GPU storage are retained by the renderer.
     pub clouds: Option<crate::clouds::Input<'a>>,
@@ -3903,6 +3905,13 @@ impl Renderer {
         self.sections.len()
     }
     /// Whether the world is being ray traced this frame.
+    /// The pack's `[[particle_lights]]` while the rays are on: `None` otherwise.
+    pub fn particle_lights(&self) -> Option<&[horizon_shader_api::manifest::ParticleLight]> {
+        self.native
+            .as_ref()
+            .filter(|n| n.frame.rays.is_some())
+            .map(|n| n.particle_lights.as_slice())
+    }
     pub fn rays_on(&self) -> bool {
         self.native.as_ref().is_some_and(|n| n.frame.rays.is_some())
     }
@@ -6515,6 +6524,7 @@ impl Renderer {
                 frame.dynamic_lights,
                 frame.dynamic_states,
                 frame.colored_lights,
+                frame.particle_lights,
             );
         }
         if !frame.title

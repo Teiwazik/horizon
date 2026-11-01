@@ -27,6 +27,8 @@ pub struct NativePack {
     pub vanilla_stars: bool,
     /// The pack's material stage fogs terrain itself (`[material] fog = false`).
     pub own_fog: bool,
+    /// `[[particle_lights]]`.
+    pub particle_lights: Vec<horizon_shader_api::manifest::ParticleLight>,
     /// The weather stage's pipeline (`[weather]`), drawing rain and snow in vanilla's place.
     pub weather: Option<wgpu::RenderPipeline>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
@@ -246,6 +248,7 @@ impl NativePack {
             vanilla_sun,
             vanilla_stars,
             own_fog,
+            particle_lights: report.manifest.particle_lights.clone(),
             weather,
             displacement,
             reflection,

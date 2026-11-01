@@ -14781,32 +14781,36 @@ impl Game<'_> {
         let g = self.debug_gizmos(alpha as f32, camera.to_array());
         lines.extend(g.lines);
         let on_top = g.on_top;
-        let mut colored_lights = if self.title.is_none() {
+        let colored_lights = if self.title.is_none() {
             self.native_frame_visuals(camera, &mut lines)
         } else {
             Vec::new()
         };
-        // Fireflies light what's around them in the rays, moving and fading as they do. Behind the
-        // list's others, which the classic shaders read first; the rays read all of them.
-        if self.title.is_none() && self.renderer.as_ref().is_some_and(|r| r.rays_on()) {
-            const FIREFLY_REACH: f32 = 4.0;
+        // What the pack's `[[particle_lights]]` name lights what's around it in the rays, moving
+        // and fading as it does.
+        let mut particle_lights: Vec<horizon_client::dynamic_light::ParticleSource> = Vec::new();
+        if self.title.is_none()
+            && let Some(entries) = self.renderer.as_ref().and_then(|r| r.particle_lights())
+        {
             let partial = self.clock.camera_fraction() as f32;
-            let mut near: Vec<[[f32; 4]; 2]> = self
-                .particles
-                .firefly_lights(partial)
-                .into_iter()
-                .filter(|(_, fade)| *fade > 0.02)
-                .map(|(at, fade)| {
-                    let p = (glam::DVec3::from(at) - camera).as_vec3();
-                    [[p.x, p.y, p.z, FIREFLY_REACH * fade], [0.85, 1.0, 0.5, 0.0]]
-                })
-                .collect();
-            near.sort_by(|a, b| {
-                let d = |l: &[[f32; 4]; 2]| l[0][0] * l[0][0] + l[0][1] * l[0][1] + l[0][2] * l[0][2];
-                d(a).total_cmp(&d(b))
-            });
-            near.truncate(64);
-            colored_lights.extend(near);
+            particle_lights.extend(self.particles.lights(entries, partial).into_iter().filter_map(
+                |(at, entry, alpha)| {
+                    (alpha > 0.02).then(|| {
+                        let p = (glam::DVec3::from(at) - camera).as_vec3();
+                        horizon_client::dynamic_light::ParticleSource {
+                            at: p.to_array(),
+                            reach: entry.reach * alpha,
+                            color: entry.color,
+                            size: entry.size,
+                        }
+                    })
+                },
+            ));
+            let d = |l: &horizon_client::dynamic_light::ParticleSource| {
+                l.at[0] * l.at[0] + l.at[1] * l.at[1] + l.at[2] * l.at[2]
+            };
+            particle_lights.sort_by(|a, b| d(a).total_cmp(&d(b)));
+            particle_lights.truncate(64);
         }
         let emissive_layers = if self.title.is_none() {
             let mut requests = Vec::new();
@@ -15118,6 +15122,7 @@ impl Game<'_> {
             dynamic_lights: &self.dynamic_lights,
             dynamic_states: &self.dynamic_states,
             colored_lights: &colored_lights,
+            particle_lights: &particle_lights,
             emissive_layers: &emissive_layers,
             lightning: horizon_client::gfx::lightning::Input {
                 bolts: &bolts,
@@ -19233,6 +19238,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         dynamic_lights: &[],
         dynamic_states: &[],
         colored_lights: &[],
+        particle_lights: &[],
         emissive_layers: &[],
         clouds: None,
         lightning: Default::default(),

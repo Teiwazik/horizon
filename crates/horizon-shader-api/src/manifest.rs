@@ -58,7 +58,25 @@ pub struct Manifest {
     /// The colour of block light by the block giving it off, in order: the first entry whose
     /// pattern matches wins (`Manifest::light_of`).
     pub lights: Vec<LightColor>,
+    /// Particles that shine in the rays (`[[particle_lights]]`), in order: the first entry
+    /// naming a particle wins.
+    pub particle_lights: Vec<ParticleLight>,
 }
+
+/// `[[particle_lights]]`: `particles` (names, as `firefly` or `minecraft:firefly`) light their
+/// surroundings in the rays, where they are, fading with their alpha. `color` is the light's
+/// colour and brightness, `reach` how many blocks it reaches at full alpha, and `size` half the
+/// source's size in blocks: the smaller, the sharper its shadows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParticleLight {
+    pub particles: Vec<String>,
+    pub color: [f32; 3],
+    pub reach: f32,
+    pub size: f32,
+}
+
+/// `[[particle_lights]]` entries a manifest may declare.
+pub const MAX_PARTICLE_LIGHTS: usize = 32;
 
 /// `[[lights]]`: the colour the light of `blocks` (block ids, `namespace:path` or a path in
 /// `minecraft`, with `*` wildcards) tints its surroundings, read by the material stage's
@@ -375,6 +393,8 @@ struct Raw {
     textures: Vec<RawTexture>,
     #[serde(default)]
     lights: Vec<RawLight>,
+    #[serde(default)]
+    particle_lights: Vec<RawParticleLight>,
 }
 
 #[derive(Deserialize)]
@@ -382,6 +402,15 @@ struct Raw {
 struct RawLight {
     color: [f32; 3],
     blocks: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawParticleLight {
+    particles: Vec<String>,
+    color: [f32; 3],
+    reach: f32,
+    size: f32,
 }
 
 #[derive(Deserialize)]
@@ -756,6 +785,39 @@ impl Manifest {
                 blocks: l.blocks,
             })
             .collect();
+        if raw.particle_lights.len() > MAX_PARTICLE_LIGHTS {
+            return Err(err(format!(
+                "{} [[particle_lights]]; a pack may declare {MAX_PARTICLE_LIGHTS}",
+                raw.particle_lights.len()
+            )));
+        }
+        for l in &raw.particle_lights {
+            if l.particles.is_empty() {
+                return Err(err("a [[particle_lights]] entry needs particles".into()));
+            }
+            if l.color.iter().any(|c| !(0.0..=4.0).contains(c)) {
+                return Err(err(format!(
+                    "particle light color {:?} is not in 0..=4 per channel",
+                    l.color
+                )));
+            }
+            if !(l.reach > 0.0 && l.reach <= 16.0) {
+                return Err(err(format!("particle light reach {} is not in (0, 16]", l.reach)));
+            }
+            if !(l.size > 0.0 && l.size <= 1.0) {
+                return Err(err(format!("particle light size {} is not in (0, 1]", l.size)));
+            }
+        }
+        let particle_lights = raw
+            .particle_lights
+            .into_iter()
+            .map(|l| ParticleLight {
+                particles: l.particles,
+                color: l.color,
+                reach: l.reach,
+                size: l.size,
+            })
+            .collect();
         let materials = raw
             .materials
             .into_iter()
@@ -901,6 +963,7 @@ impl Manifest {
             materials,
             textures,
             lights,
+            particle_lights,
         })
     }
 

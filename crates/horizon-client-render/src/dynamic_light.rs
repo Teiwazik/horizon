@@ -16,6 +16,15 @@ pub const MAX: usize = 16;
 /// Camera-relative position and radius; RGB intensity in a second vec4.
 pub type Colored = [[f32; 4]; 2];
 
+/// A particle shining in the rays this frame (`[[particle_lights]]`): camera-relative.
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleSource {
+    pub at: [f32; 3],
+    pub reach: f32,
+    pub color: [f32; 3],
+    pub size: f32,
+}
+
 /// Nearest validated native visual lights; never enters gameplay lighting.
 pub fn select_colored(
     sources: impl Iterator<Item = ([f64; 3], u32, f32, f32)>,

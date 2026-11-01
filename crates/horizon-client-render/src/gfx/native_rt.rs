@@ -212,23 +212,22 @@ impl RayScene {
         dynamic: &[[f32; 4]],
         dynamic_states: &[Option<u32>],
         colored: &[crate::dynamic_light::Colored],
+        particles: &[crate::dynamic_light::ParticleSource],
     ) {
         // Sources by how much they matter to the camera, with a stable order among equals.
         let mut lights: Vec<(f32, [i32; 3], Light)> = Vec::new();
-        let mut add = |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3], size: f32| {
+        let mut add = |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3], size: f32, bright: f32| {
             let d2 = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
             if reach > 0.0 && d2 < (reach + 80.0) * (reach + 80.0) {
                 // The brightness is the level's: `[[lights]]` colours go up to 4.
                 let top = color[0].max(color[1]).max(color[2]).max(0.001);
-                // The colour is made full bright: a source this small is a faint light.
-                let dim = if size < 0.5 { 0.12 } else { 1.0 };
                 lights.push((
                     d2 - reach * reach,
                     key,
                     Light {
                         position: [at[0], at[1], at[2], reach],
                         // w: half the source's size, which softens its shadows.
-                        color: [color[0] / top * dim, color[1] / top * dim, color[2] / top * dim, size],
+                        color: [color[0] / top * bright, color[1] / top * bright, color[2] / top * bright, size],
                     },
                 ));
             }
@@ -238,7 +237,7 @@ impl RayScene {
                 let p = (DVec3::new(f64::from(at[0]), f64::from(at[1]), f64::from(at[2])) + 0.5
                     - camera)
                     .as_vec3();
-                add(p.to_array(), *at, f32::from(*level), *color, 0.5);
+                add(p.to_array(), *at, f32::from(*level), *color, 0.5, 1.0);
             }
         }
         // A source that moves has no block: after every block on ties.
@@ -250,12 +249,14 @@ impl RayScene {
                 .flatten()
                 .and_then(|state| table.get(&state))
                 .map_or([1.0, 0.85, 0.65], |(color, _)| *color);
-            add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], color, 0.5);
+            add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], color, 0.5, 1.0);
         }
         for [p, c] in colored {
-            // No intensity in the classic shaders: a light for the rays alone, as small as a firefly.
-            let size = if c[3] == 0.0 { 0.08 } else { 0.5 };
-            add([p[0], p[1], p[2]], [i32::MAX; 3], p[3], [c[0], c[1], c[2]], size);
+            add([p[0], p[1], p[2]], [i32::MAX; 3], p[3], [c[0], c[1], c[2]], 0.5, 1.0);
+        }
+        for p in particles {
+            let bright = p.color[0].max(p.color[1]).max(p.color[2]);
+            add(p.at, [i32::MAX; 3], p.reach, p.color, p.size, bright);
         }
         lights.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         lights.truncate(MAX_LIGHTS);

@@ -4093,16 +4093,37 @@ impl ParticleEngine {
         }
     }
 
-    /// The fireflies as lights, for the rays: where each is this frame and how far it has faded in.
-    pub fn firefly_lights(&self, partial: f32) -> Vec<([f64; 3], f32)> {
+    /// The particles a pack's `[[particle_lights]]` name, as lights for the rays: each where it is
+    /// this frame, the reach following its alpha. Position, then the entry that named it and that
+    /// alpha.
+    pub fn lights<'a>(
+        &self,
+        entries: &'a [horizon_shader_api::manifest::ParticleLight],
+        partial: f32,
+    ) -> Vec<([f64; 3], &'a horizon_shader_api::manifest::ParticleLight, f32)> {
+        let shining: Vec<_> = entries
+            .iter()
+            .flat_map(|e| {
+                e.particles.iter().filter_map(move |name| {
+                    let name = if name.contains(':') {
+                        name.clone()
+                    } else {
+                        format!("minecraft:{name}")
+                    };
+                    Some((ParticleType::from_name(&name)?, e))
+                })
+            })
+            .collect();
+        if shining.is_empty() {
+            return Vec::new();
+        }
+        let f = f64::from(partial);
         self.particles
             .iter()
-            .filter(|p| matches!(p.behaviour, Behaviour::Firefly))
-            .map(|p| {
-                let f = f64::from(partial);
+            .filter_map(|p| {
+                let (_, entry) = shining.iter().find(|(ty, _)| *ty == p.ty)?;
                 let at = std::array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * f);
-                let progress = p.lifetime_progress(p.age as f32 + partial);
-                (at, fade_amount(progress, 0.3, 0.5))
+                Some((at, *entry, p.rgba[3]))
             })
             .collect()
     }

@@ -199,3 +199,17 @@ stages.
 - 2026-10-25: the stages of API 0.1 (sky, material, post), their inputs and the generated reference.
 - 2026-10-25: the pack format, schema 1: `horizon-shaders.toml` and the `.hshader` package.
 - 2026-10-24: the earlier shader pack code was removed; this API is designed from scratch.
+
+## Particles as lights
+
+`[[particle_lights]]` makes particles light their surroundings on a device with ray tracing:
+
+```toml
+[[particle_lights]]
+particles = ["firefly"]        # names, `firefly` or `minecraft:firefly`
+color = [0.30, 0.35, 0.17]     # colour and brightness, 0 to 4 per channel
+reach = 4.0                    # blocks at full alpha, up to 16; follows the particle's alpha
+size = 0.08                    # half the source's size in blocks, up to 1: smaller is sharper
+```
+
+The nearest 64 shine. The first entry naming a particle wins.
