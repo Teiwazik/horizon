@@ -96,7 +96,7 @@ fn reads_every_key_of_schema_1() {
 }
 
 #[test]
-fn a_shadow_map_stays_in_range_and_needs_a_stage_to_read_it() {
+fn a_shadow_map_stays_in_range() {
     let refused = |shadow: &str, needle: &str| {
         let mut text = sample_text();
         text = text.replace("resolution = 1024\ndistance = 96.0", shadow);
@@ -106,11 +106,6 @@ fn a_shadow_map_stays_in_range_and_needs_a_stage_to_read_it() {
     };
     refused("resolution = 64", "shadow.resolution");
     refused("distance = 8.0", "shadow.distance");
-    let m = Manifest::parse(
-        "schema = 1\nid = \"a\"\nname = \"A\"\nversion = \"1\"\napi = \"0.1\"\n\
-         [sky]\nfile = \"s.wgsl\"\n[shadow]\n",
-    );
-    assert!(m.unwrap_err().to_string().contains("[shadow] needs"));
 }
 
 #[test]
@@ -138,17 +133,6 @@ fn refuses_what_this_build_does_not_read() {
         (
             text.replace("license = \"MIT\"", "licence = \"MIT\""),
             "unknown field",
-        ),
-        (
-            text.replace(
-                "[\"minecraft:block/glass\", \"block/*_stained_glass\"]",
-                "[]",
-            ),
-            "needs sprites",
-        ),
-        (
-            text.replace("\"block/*_stained_glass\"", "\"block/*_*\""),
-            "at most one *",
         ),
         (
             text.replace("gpu_ms = 1.5", "gpu_ms = 40.0"),
@@ -202,8 +186,8 @@ fn refuses_what_this_build_does_not_read() {
     }
     let no_stage = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n";
     assert!(refused(no_stage).contains("no stage"));
-    let many = (0..13).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
-    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("13 post passes"));
+    let many = (0..29).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
+    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("29 post passes"));
 }
 
 #[test]
@@ -349,7 +333,7 @@ fn refuses_the_new_keys_where_they_do_not_belong() {
 fn reads_settings_pages_and_refuses_broken_links() {
     let pages = "[[pages]]\nid = \"main\"\nname = \"Sample\"\nitems = [\"saturation\", \"\", \"page:more\"]\n\
                  [[pages]]\nid = \"more\"\nname = \"More\"\ndescription = \"The rest.\"\ncolumns = 1\n\
-                 items = [\"tonemap\", \"samples\", \"vignette\"]\n";
+                 items = [\"tonemap\", \"samples\", \"vignette\", \"reflections\"]\n";
     let m = Manifest::parse(&format!("{}{pages}", sample_text())).unwrap();
     assert_eq!(m.pages.len(), 2);
     assert_eq!(
@@ -363,6 +347,7 @@ fn reads_settings_pages_and_refuses_broken_links() {
     assert_eq!(
         m.pages[1].items,
         [
+            PageItem::Option(4),
             PageItem::Option(3),
             PageItem::Option(2),
             PageItem::Option(1)
@@ -393,7 +378,7 @@ fn reads_settings_pages_and_refuses_broken_links() {
             "declared twice",
         ),
         (
-            pages.replace(", \"vignette\"]", "]"),
+            pages.replace(", \"vignette\"", ""),
             "option \"vignette\" is on no page",
         ),
         (

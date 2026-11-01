@@ -52,7 +52,8 @@ fn a_stage_reads_the_resources_its_calls_do() {
     let mut files = sample().files;
     files.insert(
         "material.wgsl".into(),
-        b"fn material(input: MaterialInput) -> Surface {
+        b"override reflections: bool = true;
+fn material(input: MaterialInput) -> Surface {
     return Surface(input.albedo);
 }
 "
@@ -62,7 +63,8 @@ fn a_stage_reads_the_resources_its_calls_do() {
     assert!(!report.stages[1].reads("reflection"));
     files.insert(
         "material.wgsl".into(),
-        b"fn mirror(uv: vec2<f32>) -> vec4<f32> {
+        b"override reflections: bool = true;
+fn mirror(uv: vec2<f32>) -> vec4<f32> {
     return textureSampleLevel(reflection, reflection_sampler, uv, 0.0);
 }
 fn material(input: MaterialInput) -> Surface {

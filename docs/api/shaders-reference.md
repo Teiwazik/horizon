@@ -312,7 +312,7 @@ Every page must be reached from the first, and every option be on one of them.
 
 ## Limits
 
-- 12 post passes, 64 options, `budget.gpu_ms` up to 16.
+- 28 post passes, 64 options, `budget.gpu_ms` up to 16.
 - 32 settings pages of 64 items at most.
 - 256 KiB per WGSL file, 8 MiB per pack.
 - Per stage: 20000 naga expressions over all its functions, 64 texture reads (samples,
