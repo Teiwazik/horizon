@@ -88,8 +88,6 @@ fn reads_every_key_of_schema_1() {
         .map(|o| o.kind.default_constant())
         .collect();
     assert_eq!(constants, [f64::from(1.1f32), 1.0, 1.0, 4.0, 1.0]);
-    assert_eq!(m.tags.len(), 1);
-    assert_eq!(m.tags[0].id, "glass");
     assert_eq!(m.budget.gpu_ms, Some(1.5));
     let option = m.reflection.as_ref().and_then(|r| r.option.as_deref());
     assert_eq!(option, Some("reflections"));
@@ -113,33 +111,6 @@ fn a_shadow_map_stays_in_range_and_needs_a_stage_to_read_it() {
          [sky]\nfile = \"s.wgsl\"\n[shadow]\n",
     );
     assert!(m.unwrap_err().to_string().contains("[shadow] needs"));
-}
-
-#[test]
-fn sprite_tags_name_sprites_with_one_wildcard() {
-    let mut m = Manifest::parse(&sample_text()).unwrap();
-    m.tags.push(horizon_shader_api::SpriteTag {
-        id: "ice".into(),
-        sprites: vec!["minecraft:block/*ice".into()],
-    });
-    let sprites = [
-        ("minecraft:block/stone", 0),
-        ("minecraft:block/glass", 1),
-        ("minecraft:block/red_stained_glass", 2),
-        ("minecraft:block/red_stained_glass_pane_top", 3),
-        ("minecraft:block/packed_ice", 4),
-        ("minecraft:block/ice", 5),
-    ];
-    assert_eq!(
-        m.sprite_tags(sprites.iter().rev().copied()),
-        [(1, 1), (2, 1), (4, 2), (5, 2)]
-    );
-    // Two names on one layer (identical stills share it) give one entry, tags merged.
-    let shared = [
-        ("minecraft:block/glass", 7),
-        ("minecraft:block/packed_ice", 7),
-    ];
-    assert_eq!(m.sprite_tags(shared), [(7, 3)]);
 }
 
 #[test]

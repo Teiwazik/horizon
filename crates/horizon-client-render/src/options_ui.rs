@@ -4508,6 +4508,10 @@ impl OptionsUi {
         shift: bool,
     ) -> Vec<Event> {
         use winit::keyboard::KeyCode as K;
+        if self.preview {
+            self.preview = false;
+            return Vec::new();
+        }
         if self.page() == Page::HdrCalibration
             && let Some(c) = &mut self.calibration
         {
