@@ -99,8 +99,9 @@ pub fn camera(settings: &Settings) -> Shadow {
         distance: settings.distance,
         render_mul: 1.0,
         interval: SNAP,
-        near: -256.0,
-        far: 256.0_f32.max(settings.distance * 2.0),
+        euclidean_snap: true,
+        near: 256.0,
+        far: super::pack_uniforms::SHADOW_EYE + 2.0 * settings.distance + 384.0,
         ..Shadow::default()
     }
 }
@@ -802,7 +803,9 @@ impl NativeShadow {
         ShadowView {
             cull: super::pack_uniforms::shadow_culling(frame, &self.camera),
             light: super::pack_uniforms::shadow_light(frame, &self.camera),
-            distance: Some(self.camera.distance),
+            // The light's box culls: on the ground it reaches further than `distance`
+            // along the sun's azimuth while the sun is low.
+            distance: None,
             unculled: None,
         }
     }
