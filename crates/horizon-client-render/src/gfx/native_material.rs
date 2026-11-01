@@ -529,41 +529,38 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
         towards[found] = vec4<f32>(toward, d);
         found += 1u;
     }
-    var traced = vec3<f32>(0.0);
-    var untraced = vec3<f32>(0.0);
-    var seen_part = 0.0;
-    var whole_part = 0.0;
+    // With more sources than rays, each ray picks one by chance, the stronger the likelier, and
+    // counts for what the rest would give. Always tracing the strongest few makes a hard edge
+    // wherever that set changes; this makes noise, for the temporal filter to average.
+    var total = 0.0;
+    for (var i = 0u; i < found; i++) {
+        total += strengths[i];
+    }
+    var sum = vec3<f32>(0.0);
     for (var ray = 0u; ray < min(budget, found); ray++) {
-        var best = 0u;
-        for (var i = 1u; i < found; i++) {
-            if strengths[i] > strengths[best] {
-                best = i;
+        var pick = ray;
+        var weight = 1.0;
+        if found > budget {
+            var left = horizon_ray_noise(71.0 + f32(ray)) * total;
+            for (var i = 0u; i < found; i++) {
+                pick = i;
+                if left <= strengths[i] {
+                    break;
+                }
+                left -= strengths[i];
             }
+            weight = total / (strengths[pick] * f32(budget));
         }
-        if strengths[best] <= 0.0 {
-            break;
-        }
-        let strength = strengths[best];
-        strengths[best] = -strength;
-        let source = horizon_ray_sources[ids[best]];
-        let d = towards[best].w;
-        let dir = horizon_ray_jitter(towards[best].xyz, 0.5 / max(d, 0.5), f32(ray));
+        let source = horizon_ray_sources[ids[pick]];
+        let d = towards[pick].w;
+        let dir = horizon_ray_jitter(towards[pick].xyz, 0.5 / max(d, 0.5), f32(ray));
         // The ray ends where it would enter the source's block: a full block doesn't stand in
         // the way of its own light.
         let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
         let seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - inside, 0.01));
-        traced += source.color.rgb * seen * strength;
-        seen_part += max(seen.r, max(seen.g, seen.b)) * strength;
-        whole_part += strength;
+        sum += source.color.rgb * seen * strengths[pick] * weight;
     }
-    for (var i = 0u; i < found; i++) {
-        if strengths[i] > 0.0 {
-            untraced += horizon_ray_sources[ids[i]].color.rgb * strengths[i];
-        }
-    }
-    // Past the budget a source is seen about as much as the strongest ones here were, and
-    // however many pile up the light saturates rather than climbing.
-    let sum = traced + untraced * seen_part / max(whole_part, 0.0001);
+    // However many pile up the light saturates rather than climbing.
     return sum / (1.0 + max(sum.r, max(sum.g, sum.b)) * 0.5);
 }
 ";
