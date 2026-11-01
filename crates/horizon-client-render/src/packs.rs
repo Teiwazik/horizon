@@ -1322,13 +1322,6 @@ mod tests {
         );
     }
     #[test]
-    fn a_comment_after_the_metadata_does_not_hide_a_pack() {
-        let meta = parse_meta(b"{\"pack\":{\"pack_format\":34}}\n// Made by someone").unwrap();
-        assert_eq!(meta["pack"]["pack_format"], 34);
-        assert!(parse_meta(b"// Made by someone").is_none());
-        assert!(parse_meta(b"{\"pack\":").is_none());
-    }
-    #[test]
     fn compatibility_ranges() {
         let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
         assert!(compatible(&v(

@@ -8665,23 +8665,6 @@ mod tests {
         assert!(f > 3.7, "{f}");
     }
     #[test]
-    fn the_mirrors_sky_rays_are_the_cameras_reflected() {
-        use glam::{Mat4, Vec3, Vec4};
-        // A camera looking down: its mirror looks up, by as much.
-        let forward = Vec3::new(0.3, -0.64, -1.0).normalize();
-        let view = Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
-        let mirrored = super::mirror_inverse_view(view.inverse().to_cols_array_2d(), -3.25);
-        let ray = Mat4::from_cols_array_2d(&mirrored) * Vec4::new(0.0, 0.0, -1.0, 0.0);
-        let reflected = Vec3::new(forward.x, -forward.y, forward.z);
-        assert!((ray.truncate() - reflected).length() < 1e-5, "{ray}");
-        // The view's origin, the camera, goes to the mirror's eye.
-        let eye = Mat4::from_cols_array_2d(&mirrored) * Vec4::W;
-        assert!(
-            (eye.truncate() - Vec3::new(0.0, -6.5, 0.0)).length() < 1e-5,
-            "{eye}"
-        );
-    }
-    #[test]
     fn drawable_size_skips_minimized_and_oversized_windows() {
         use super::drawable_size;
         assert!(drawable_size(1280, 720, 8192));

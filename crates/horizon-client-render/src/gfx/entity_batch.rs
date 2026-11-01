@@ -258,12 +258,12 @@ mod tests {
         .collect();
         let mut batch = EntityBatch::default();
         // Off: the tag changes nothing, the quads keep their place.
-        let counts = batch.update(&entities, &[], &[], &[], false);
+        let counts = batch.update(&entities, &[], &[], &[], &[], false);
         assert_eq!(counts, [4, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
         let xs: Vec<f32> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
         assert_eq!(xs, [0.0, 1.0, 2.0, 4.0, 3.0]);
         // On: the tagged quads come last, in order.
-        let counts = batch.update(&entities, &[], &[], &[], true);
+        let counts = batch.update(&entities, &[], &[], &[], &[], true);
         assert_eq!(counts, [2, 0, 0, 0, 0, 0, 1, 0, 0, 2]);
         let xs: Vec<f32> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
         assert_eq!(xs, [0.0, 2.0, 3.0, 1.0, 4.0]);
@@ -287,12 +287,12 @@ mod tests {
         let entities: Vec<Vertex> = quad(0, 0.0).collect();
         let mut batch = EntityBatch::default();
         // Off: untouched.
-        let counts = batch.update(&entities, &additive, &[], &[], false);
+        let counts = batch.update(&entities, &additive, &[], &[], &[], false);
         assert_eq!((counts[9], batch.moved_additive), (0, 0));
         assert_eq!(batch.combined.len(), 12);
         assert_eq!(batch.combined[4].layer, 2 | OIT_ENTITY | 3 << 16);
         // On: the eyes are an entity quad without the additive overlay, the ray stays.
-        let counts = batch.update(&entities, &additive, &[], &[], true);
+        let counts = batch.update(&entities, &additive, &[], &[], &[], true);
         assert_eq!((counts[0], counts[9], batch.moved_additive), (1, 1, 1));
         let xs: Vec<f32> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
         assert_eq!(xs, [0.0, 1.0, 2.0]);

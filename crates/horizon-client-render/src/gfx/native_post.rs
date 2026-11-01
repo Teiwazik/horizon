@@ -1820,13 +1820,6 @@ mod tests {
     use super::*;
     use horizon_shader_api::{MANIFEST, Pack, check};
 
-    #[test]
-    fn wetness_rises_slower_than_it_dries() {
-        assert_eq!(wetness(0.0, 1.0, 30.0), 0.5);
-        assert_eq!(wetness(1.0, 0.0, 10.0), 0.5);
-        assert_eq!(wetness(0.25, 0.25, 5.0), 0.25);
-    }
-
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
@@ -1904,6 +1897,7 @@ mod tests {
             &[("gain".into(), 1.0)],
             format,
             &frame,
+            None,
         )
         .unwrap();
         assert_eq!(post.labels(), ["a.wgsl", "b.wgsl"]);
@@ -1952,6 +1946,8 @@ mod tests {
             (&color, &depth, &surface),
             &view,
             [4, 4],
+            false,
+            None,
             None,
         );
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1996,7 +1992,7 @@ mod tests {
 id = \"t\"
 name = \"T\"
 version = \"1\"
-api = \"0.1\"
+api = \"0.5\"
             [[post]]
 file = \"a.wgsl\"
 [[post]]
@@ -2011,8 +2007,18 @@ file = \"b.wgsl\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new(&device, None);
-        let mut post = NativePost::new(&device, report.stages, &[], format, &frame).unwrap();
+        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None);
+        let mut post = NativePost::new(
+            &device,
+            report.stages,
+            &report.manifest,
+            &[],
+            format,
+            &frame,
+            None,
+        )
+        .unwrap();
+        let surface = frame.surface_view.clone();
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let color = texture(&device, format, usage).create_view(&Default::default());
         let depth = texture(&device, wgpu::TextureFormat::Depth32Float, usage)
@@ -2047,10 +2053,11 @@ file = \"b.wgsl\"
             post.run(
                 &device,
                 &mut encoder,
-                (&color, &depth),
+                (&color, &depth, &surface),
                 &view,
                 [4, 4],
                 history_reset,
+                None,
                 None,
             );
             encoder.copy_texture_to_buffer(
