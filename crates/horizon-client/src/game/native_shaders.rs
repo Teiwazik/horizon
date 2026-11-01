@@ -115,8 +115,10 @@ impl Game<'_> {
                 .filter(|m| m.translucent)
                 .map(|m| m.id)
                 .collect();
-            let translucent: Vec<bool> =
-                materials.iter().map(|id| translucent_ids.contains(id)).collect();
+            let translucent: Vec<bool> = materials
+                .iter()
+                .map(|id| translucent_ids.contains(id))
+                .collect();
             let labels = renderer
                 .set_native_shader_pack(Some((report, constants)), &materials, lights)
                 .map_err(|e| vec![e])?;

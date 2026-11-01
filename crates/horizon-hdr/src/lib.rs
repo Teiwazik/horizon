@@ -97,3 +97,9 @@ pub fn set_metadata(
     #[cfg(target_os = "macos")]
     let _ = (device, surface, paper_white, peak, black);
 }
+
+/// wgpu's experimental features, for the ray tracing prototype behind `HORIZON_RT`.
+pub fn experimental_features() -> wgpu::ExperimentalFeatures {
+    // Safety: only that prototype asks for them, and it accepts their bugs.
+    unsafe { wgpu::ExperimentalFeatures::enabled() }
+}

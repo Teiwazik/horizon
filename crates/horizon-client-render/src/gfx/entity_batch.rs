@@ -210,7 +210,10 @@ mod tests {
         hand: &[Vertex],
     ) {
         let (expected, counts) = baseline(entities, additive, hand);
-        assert_eq!(batch.update(entities, additive, hand, &[], &[], false), counts);
+        assert_eq!(
+            batch.update(entities, additive, hand, &[], &[], false),
+            counts
+        );
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(&batch.combined),
             bytemuck::cast_slice::<_, u8>(&expected)
@@ -368,7 +371,14 @@ mod tests {
                 before.push(start.elapsed().as_nanos() / 100);
                 let start = Instant::now();
                 for _ in 0..100 {
-                    black_box(batch.update(black_box(&entities), &additive, &hand, &[], &[], false));
+                    black_box(batch.update(
+                        black_box(&entities),
+                        &additive,
+                        &hand,
+                        &[],
+                        &[],
+                        false,
+                    ));
                     black_box(&batch.combined);
                 }
                 after.push(start.elapsed().as_nanos() / 100);

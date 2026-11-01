@@ -105,6 +105,8 @@ fn scaled(size: [u32; 2], scale: f32) -> [u32; 2] {
 /// The `frame` every stage of a pack reads (group 3, binding 0), written once a frame, and
 /// what the material stage reads besides.
 pub struct NativeFrame {
+    /// The ray tracing prototype's scene (binding 14), with `HORIZON_RT`.
+    pub rays: Option<super::native_rt::RayScene>,
     pub(super) buffer: wgpu::Buffer,
     /// Group 3 of the stages that read the frame and the reflection buffer (the sky and
     /// the material).
@@ -292,6 +294,18 @@ impl NativeFrame {
             array_entry(13),
         ];
         entries.extend(pack_texture_entries(textures.len()));
+        let rays = super::native_rt::RayScene::new(device);
+        let mut entries = entries.to_vec();
+        if rays.is_some() {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 14,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::AccelerationStructure {
+                    vertex_return: false,
+                },
+                count: None,
+            });
+        }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack frame"),
             entries: &entries,
@@ -356,10 +370,11 @@ impl NativeFrame {
                 &materials,
                 &textures,
                 (&opaque_depth, &opaque_color),
-                (&block_light, &pbr),
+                (&block_light, &pbr, rays.as_ref().map(|r| &r.tlas)),
             ),
         );
         Self {
+            rays,
             buffer,
             layout,
             group,
@@ -398,11 +413,15 @@ impl NativeFrame {
             &wgpu::Buffer,
             &[(wgpu::TextureView, wgpu::Sampler)],
             (&wgpu::Texture, &wgpu::Texture),
-            (&super::block_light::BlockLight, &[wgpu::TextureView; 2]),
+            (
+                &super::block_light::BlockLight,
+                &[wgpu::TextureView; 2],
+                Option<&wgpu::Tlas>,
+            ),
         ),
     ) -> wgpu::BindGroup {
         let (opaque_depth, opaque_color) = opaque_depth;
-        let (block_light, pbr) = block_light;
+        let (block_light, pbr, tlas) = block_light;
         let opaque_view = opaque_depth.create_view(&Default::default());
         let opaque_color_view = opaque_color.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -469,6 +488,12 @@ impl NativeFrame {
                 resource: wgpu::BindingResource::TextureView(&pbr[1]),
             },
         ];
+        if let Some(tlas) = tlas {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::AccelerationStructure(tlas),
+            });
+        }
         entries.extend(pack_texture_group_entries(textures));
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Native shader pack frame"),
@@ -494,7 +519,11 @@ impl NativeFrame {
                 &self.materials,
                 &self.textures,
                 (&self.opaque_depth, &self.opaque_color),
-                (&self.block_light, &self.pbr),
+                (
+                    &self.block_light,
+                    &self.pbr,
+                    self.rays.as_ref().map(|r| &r.tlas),
+                ),
             ),
         );
         self.reflection = Some(view);
@@ -541,7 +570,11 @@ impl NativeFrame {
                 &self.materials,
                 &self.textures,
                 (&self.opaque_depth, &self.opaque_color),
-                (&self.block_light, &self.pbr),
+                (
+                    &self.block_light,
+                    &self.pbr,
+                    self.rays.as_ref().map(|r| &r.tlas),
+                ),
             ),
         );
     }
@@ -1089,7 +1122,10 @@ impl NativePost {
             .groups
             .as_ref()
             .is_some_and(|((color, depth, surface), blank, _)| {
-                color == world.0 && depth == world.1 && surface == world.2 && *blank == blank_history
+                color == world.0
+                    && depth == world.1
+                    && surface == world.2
+                    && *blank == blank_history
             })
         {
             return;
@@ -1097,7 +1133,9 @@ impl NativePost {
         let history = if blank_history {
             &self.history_blank
         } else {
-            self.history.as_ref().map_or(&self.history_blank, |(_, t)| t)
+            self.history
+                .as_ref()
+                .map_or(&self.history_blank, |(_, t)| t)
         }
         .create_view(&Default::default());
         let blank = self.history_blank.create_view(&Default::default());

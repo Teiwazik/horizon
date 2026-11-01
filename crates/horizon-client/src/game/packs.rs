@@ -321,7 +321,9 @@ impl Game<'_> {
                     // Its textures were made in place of none: dropped, they free what they
                     // hold, and the working renderer stays.
                     (Some(e), _) => {
-                        log::warn!("Horizon: the new pack's textures do not fit video memory ({e})");
+                        log::warn!(
+                            "Horizon: the new pack's textures do not fit video memory ({e})"
+                        );
                         Err(OUT_OF_VIDEO_MEMORY.into())
                     }
                     (None, Ok(_)) if validation.is_some() => {

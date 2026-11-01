@@ -120,6 +120,20 @@ impl Arena {
         };
         Self::with_usage(device, stride, capacity, usage)
     }
+    /// Terrain's vertices: as `new`, and `rays` when ray tracing builds structures from them.
+    pub fn terrain(
+        device: &wgpu::Device,
+        stride: u64,
+        capacity: u64,
+        storage: bool,
+        rays: bool,
+    ) -> Self {
+        let mut arena = Self::new(device, stride, capacity, storage);
+        if rays {
+            arena.usage |= wgpu::BufferUsages::BLAS_INPUT;
+        }
+        arena
+    }
     /// Sorted translucent indices; `storage` when compute passes read them.
     pub fn indices(device: &wgpu::Device, capacity: u64, storage: bool) -> Self {
         let usage = if storage {

@@ -320,6 +320,15 @@ fn block_specular_map(uv: vec2<f32>) -> vec4<f32> {
 fn block_specular_map_level(uv: vec2<f32>, lod: f32) -> vec4<f32> {
     return horizon_block_pbr(uv, horizon_block_layer, lod, 1u);
 }
+// Ray tracing (a prototype, `HORIZON_RT=1`): whether this device traces rays here.
+fn ray_tracing() -> bool {
+    return horizon_ray_available();
+}
+// Whether solid terrain near the camera blocks the ray from the camera-relative `origin`
+// along the unit `direction`, up to `distance` blocks. False without ray tracing.
+fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return horizon_ray_occluded(origin, direction, distance);
+}
 // The LabPBR maps' size, in texels (they may be smaller than `block_texture_size`).
 fn block_pbr_size() -> vec2<f32> {
     return horizon_block_pbr_size();
@@ -382,6 +391,12 @@ fn horizon_block_pbr_present() -> bool {
 }
 fn horizon_block_pbr_size() -> vec2<f32> {
     return vec2<f32>(16.0);
+}
+fn horizon_ray_available() -> bool {
+    return false;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return false;
 }
 "
     };

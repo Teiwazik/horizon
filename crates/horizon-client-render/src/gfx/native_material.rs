@@ -335,11 +335,34 @@ fn horizon_material_displace(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: v
 }
 ";
 
+/// The material prelude's `ray_occluded`, where the device has ray queries.
+const RAYS: &str = "
+@group(3) @binding(14) var horizon_scene: acceleration_structure;
+fn horizon_ray_available() -> bool {
+    return true;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    var query: ray_query;
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0xFFu, 0.0, distance, origin, direction));
+    rayQueryProceed(&query);
+    return rayQueryGetCommittedIntersection(&query).kind != RAY_QUERY_INTERSECTION_NONE;
+}
+";
+const NO_RAYS: &str = "
+fn horizon_ray_available() -> bool {
+    return false;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return false;
+}
+";
+
 /// The terrain shader for the pack's material stage `source` (with its vertex stage's
 /// file, when `vertex`, and `[displacement]`'s grid when `displaced`).
-fn shader_source(source: &str, vertex: bool, displaced: bool) -> String {
+fn shader_source(source: &str, vertex: bool, displaced: bool, rays: bool) -> String {
     format!(
-        "{source}\n// Horizon's terrain (terrain.wgsl)\n{}{}{ENTRIES}{}{}",
+        "{}{source}\n// Horizon's terrain (terrain.wgsl)\n{}{}{ENTRIES}{}{}{}",
+        if rays { "enable wgpu_ray_query;\n" } else { "" },
         vanilla_terrain(),
         if vertex {
             DISPLACE_PACK
@@ -351,13 +374,19 @@ fn shader_source(source: &str, vertex: bool, displaced: bool) -> String {
             super::displace::GRID.to_owned() + DISPLACED_ENTRIES
         } else {
             String::new()
-        }
+        },
+        if rays { RAYS } else { NO_RAYS },
     )
 }
 
 /// The material's naga module, its errors in the stage's file.
-fn module(stage: &CheckedStage, vertex: bool, displaced: bool) -> Result<naga::Module, String> {
-    let text = shader_source(&stage.source, vertex, displaced);
+fn module(
+    stage: &CheckedStage,
+    vertex: bool,
+    displaced: bool,
+    rays: bool,
+) -> Result<naga::Module, String> {
+    let text = shader_source(&stage.source, vertex, displaced, rays);
     naga::front::wgsl::parse_str(&text)
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
 }
@@ -374,7 +403,8 @@ impl NativeMaterial {
         vertex: bool,
         displaced: Option<&DisplacedShape<'_>>,
     ) -> Result<Self, String> {
-        let module = module(stage, vertex, displaced.is_some())?;
+        let rays = frame.rays.is_some();
+        let module = module(stage, vertex, displaced.is_some(), rays)?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [
             "horizon_terrain_SPRITE_ARRAYS",
@@ -631,7 +661,7 @@ mod tests {
                 let frame_of = vec4(cross(input.normal, input.tangent.xyz) * input.tangent.w, kind);\n    \
                 return Surface(apply_fog(sprite(lit)) + (behind + frame_of) * 0.0);\n}\n";
         let stage = stage(own);
-        let module = module(&stage, false, false).unwrap();
+        let module = module(&stage, false, false, false).unwrap();
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -640,7 +670,7 @@ mod tests {
         .unwrap_or_else(|e| {
             panic!(
                 "{}",
-                e.emit_to_string(&shader_source(&stage.source, false, false))
+                e.emit_to_string(&shader_source(&stage.source, false, false, false))
             )
         });
         let entries: Vec<&str> = module
@@ -676,7 +706,7 @@ mod tests {
             .into();
         let mut report = check(&Pack::from_files(files).unwrap()).unwrap();
         let stage = report.stages.remove(0);
-        let module = module(&stage, false, true).unwrap();
+        let module = module(&stage, false, true, false).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -685,7 +715,7 @@ mod tests {
         .unwrap_or_else(|e| {
             panic!(
                 "{}",
-                e.emit_to_string(&shader_source(&stage.source, false, true))
+                e.emit_to_string(&shader_source(&stage.source, false, true, false))
             )
         });
         assert!(

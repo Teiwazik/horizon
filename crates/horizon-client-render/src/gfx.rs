@@ -96,6 +96,7 @@ mod native_material;
 mod native_pack;
 mod native_post;
 pub mod native_render;
+mod native_rt;
 mod native_shadow;
 mod native_sky;
 mod occlusion;
@@ -1458,6 +1459,16 @@ async fn open_backend(
                 | wgpu::Features::VERTEX_WRITABLE_STORAGE
                 | wgpu::Features::CLEAR_TEXTURE
                 | wgpu::Features::TEXTURE_ATOMIC));
+    // The ray tracing prototype (`gfx/native_rt.rs`).
+    let rays = std::env::var_os("HORIZON_RT").is_some()
+        && adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    let features = if rays {
+        features | wgpu::Features::EXPERIMENTAL_RAY_QUERY
+    } else {
+        features
+    };
     let driver = format!("{} {}", info.driver, info.driver_info);
     startup_step(format_args!(
         "requesting the device (driver {}) with features [{features}] and the adapter's \
@@ -1474,6 +1485,11 @@ async fn open_backend(
         label: Some("Horizon device"),
         required_features: features,
         required_limits: limits,
+        experimental_features: if rays {
+            horizon_hdr::experimental_features()
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        },
         ..Default::default()
     };
     #[cfg(not(target_os = "macos"))]
@@ -3126,11 +3142,14 @@ impl Renderer {
         });
         let flat_wanted = flat::wanted(&adapter, &device);
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
-        let arena = arena::Arena::new(
+        let arena = arena::Arena::terrain(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
             flat_wanted,
+            device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
         );
         // Sections as one index list per frame where multi-draw is emulated.
         let flat = flat_wanted.then(|| {
@@ -3448,7 +3467,14 @@ impl Renderer {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Quad indices"),
             contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: if device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            {
+                wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT
+            } else {
+                wgpu::BufferUsages::INDEX
+            },
         })
     }
     fn offscreen_target(
@@ -3842,6 +3868,9 @@ impl Renderer {
         }
     }
     fn release_section(&mut self, key: SectionKey) {
+        if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
+            rt.forget(key);
+        }
         if let Some(s) = self.sections.remove(key) {
             self.release_mesh(s);
         }
@@ -6073,6 +6102,28 @@ impl Renderer {
         // One of Horizon's own packs: this frame's inputs; in a timed frame its sky draws in a
         // pass of its own, so that it has a time of its own.
         let mut native_sky_pass = false;
+        // The ray tracing prototype: the sections the camera and the light see.
+        if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
+            let list = if frame.title {
+                Vec::new()
+            } else {
+                visible
+                    .iter()
+                    .chain(shadow_visible.iter())
+                    .map(|v| {
+                        let s = self.sections.get(v.slot);
+                        native_rt::RaySection {
+                            key: v.key,
+                            origin: v.origin,
+                            first_vertex: s.start as u32,
+                            quads: s.solid,
+                            vertices: self.arena.buffer(s.page),
+                        }
+                    })
+                    .collect()
+            };
+            rt.update(&self.device, &mut encoder, list, &self.indices);
+        }
         if !frame.title
             && let Some(native) = &mut self.native
         {
