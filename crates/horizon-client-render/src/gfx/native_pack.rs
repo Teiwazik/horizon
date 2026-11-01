@@ -211,7 +211,17 @@ impl NativePack {
             })
             .transpose()?;
         let post = (!post.is_empty())
-            .then(|| NativePost::new(device, post, &report.manifest, constants, format, &frame))
+            .then(|| {
+                NativePost::new(
+                    device,
+                    post,
+                    &report.manifest,
+                    constants,
+                    format,
+                    &frame,
+                    Some((terrain.globals, terrain.sprites)),
+                )
+            })
             .transpose()?;
         let mut labels: Vec<String> = sky.iter().map(|s| s.label.clone()).collect();
         labels.extend(

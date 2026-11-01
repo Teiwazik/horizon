@@ -337,7 +337,7 @@ fn horizon_material_displace(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: v
 ";
 
 /// The material prelude's `ray_occluded`, where the device has ray queries.
-const RAYS: &str = "
+pub(super) const RAYS: &str = "
 @group(3) @binding(14) var horizon_scene: acceleration_structure;
 @group(3) @binding(15) var<storage, read> horizon_ray_vertices: array<u32>;
 struct HorizonRayLight {
@@ -350,6 +350,10 @@ fn horizon_ray_available() -> bool {
 }
 // A candidate's texel: its section's vertices, as `TerrainVertex` (24 bytes, 6 words).
 fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> vec4<f32> {
+    // Entities: another vertex format, drawn solid.
+    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+        return vec4<f32>(1.0);
+    }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
     let second = 1u + (hit.primitive_index & 1u);
     let a = first * 6u;
@@ -395,6 +399,56 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
         return vec3<f32>(0.0);
     }
     return light;
+}
+fn horizon_ray_position(word: u32) -> vec3<f32> {
+    return vec3<f32>(bitcast<f32>(horizon_ray_vertices[word]),
+        bitcast<f32>(horizon_ray_vertices[word + 1u]), bitcast<f32>(horizon_ray_vertices[word + 2u]));
+}
+fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    var query: ray_query;
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x00u, 0x01u, 0.0, distance, origin, direction));
+    var steps = 0u;
+    while rayQueryProceed(&query) {
+        steps += 1u;
+        if steps > 32u {
+            break;
+        }
+        let candidate = rayQueryGetCandidateIntersection(&query);
+        var tint = vec3<f32>(1.0);
+        if horizon_ray_texel(candidate, &tint).a >= 0.5 {
+            rayQueryConfirmIntersection(&query);
+        }
+    }
+    let hit = rayQueryGetCommittedIntersection(&query);
+    if hit.kind == RAY_QUERY_INTERSECTION_NONE {
+        return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    }
+    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+        return RayHit(true, hit.t, vec3<f32>(0.4), -direction, 0.5, 0.0);
+    }
+    let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
+    let second = 1u + (hit.primitive_index & 1u);
+    let a = first * 6u;
+    let b = (first + second) * 6u;
+    let c = (first + second + 1u) * 6u;
+    var normal = cross(horizon_ray_position(b) - horizon_ray_position(a),
+        horizon_ray_position(c) - horizon_ray_position(a));
+    let size = length(normal);
+    normal = select(-direction, normal / size, size > 1e-6);
+    if dot(normal, direction) > 0.0 {
+        normal = -normal;
+    }
+    let word = horizon_ray_vertices[a + 4u];
+    let w = 1.0 - hit.barycentrics.x - hit.barycentrics.y;
+    let uv = horizon_ray_uv_word(horizon_ray_vertices[a + 3u]) * w
+        + horizon_ray_uv_word(horizon_ray_vertices[b + 3u]) * hit.barycentrics.x
+        + horizon_ray_uv_word(horizon_ray_vertices[c + 3u]) * hit.barycentrics.y;
+    let color = horizon_ray_vertices[a + 5u];
+    let tint = vec3<f32>(f32(color & 255u), f32((color >> 8u) & 255u), f32((color >> 16u) & 255u)) / 255.0;
+    // A low mip: the bounce wants the block's colour, without its grain.
+    let albedo = horizon_block_sample(uv, word & 0x7fffu, 3.0).rgb * tint;
+    return RayHit(true, hit.t, albedo, normal,
+        f32((word >> 16u) & 255u) / 240.0, f32((word >> 24u) & 255u) / 240.0);
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return all(horizon_ray_trace(origin, direction, distance) == vec3<f32>(0.0));
@@ -467,6 +521,9 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
 }
 ";
 

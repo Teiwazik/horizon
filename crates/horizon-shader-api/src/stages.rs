@@ -179,6 +179,29 @@ fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let view = frame.projection_inverse * clip;
     return (frame.view_inverse * vec4<f32>(view.xyz / view.w, 0.0)).xyz;
 }
+// Ray tracing (a prototype, `HORIZON_RT=1`): whether this device traces rays here.
+fn ray_tracing() -> bool {
+    return horizon_ray_available();
+}
+// Whether solid terrain near the camera blocks the ray. False without ray tracing.
+fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return horizon_ray_occluded(origin, direction, distance);
+}
+var<private> horizon_ray_pixel: vec2<f32>;
+// What a ray met: `hit` false past its distance. `albedo` is the texture's colour with the
+// block's tint, `normal` faces the ray, `sky` and `block` are the light stored there, 0..1.
+struct RayHit {
+    hit: bool,
+    distance: f32,
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    sky: f32,
+    block: f32,
+}
+// The nearest solid thing along the ray (a prototype, `HORIZON_RT=1`).
+fn ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return horizon_ray_hit(origin, direction, distance);
+}
 // The solid terrain's surface at a pixel, as the material stage's `set_surface` left it.
 struct SurfaceData {
     // false where the pixel shows something else: the sky, an entity, water, glass, a particle.
@@ -208,7 +231,9 @@ fn surface_at(texel: vec2<i32>) -> SurfaceData {
 
 /// The post stage's entry points, as the renderer builds them: a full-screen
 /// triangle, and a fragment that calls the pack's `post` for each pixel.
-const POST_ENTRIES: &str = "\
+macro_rules! post_entry_points {
+    () => {
+        "\
 struct HorizonPostOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -224,7 +249,37 @@ struct HorizonPostOut {
     let color = textureSampleLevel(previous, linear_sampler, in.uv, 0.0);
     return post(PostInput(in.uv, in.position.xy, color, depth_at(in.uv)));
 }
+"
+    };
+}
+/// The post stage's entry points alone, for a renderer that gives the prelude real rays.
+pub const POST_ENTRY_POINTS: &str = post_entry_points!();
+/// What the check and a device without rays give the post prelude's rays.
+pub const POST_RAY_STUB: &str = "
+fn horizon_ray_available() -> bool {
+    return false;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return false;
+}
+fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+}
 ";
+const POST_ENTRIES: &str = concat!(
+    "
+fn horizon_ray_available() -> bool {
+    return false;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return false;
+}
+fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+}
+",
+    post_entry_points!()
+);
 
 /// The material stage's resources: the frame, the reflection buffer and its sampler, the
 /// shadow map and its sampler.
@@ -329,6 +384,20 @@ fn ray_tracing() -> bool {
 fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return horizon_ray_occluded(origin, direction, distance);
 }
+// What a ray met: `hit` false past its distance. `albedo` is the texture's colour with the
+// block's tint, `normal` faces the ray, `sky` and `block` are the light stored there, 0..1.
+struct RayHit {
+    hit: bool,
+    distance: f32,
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    sky: f32,
+    block: f32,
+}
+// The nearest solid thing along the ray (a prototype, `HORIZON_RT=1`).
+fn ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return horizon_ray_hit(origin, direction, distance);
+}
 var<private> horizon_ray_pixel: vec2<f32>;
 // The light that reaches `origin` along `direction` (a body `radius` wide, the tangent of its
 // half angle, for a soft edge): 0 behind anything solid, tinted through translucent terrain.
@@ -414,6 +483,9 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
 }
 "
     };

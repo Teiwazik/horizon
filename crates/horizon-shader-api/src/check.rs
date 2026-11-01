@@ -224,6 +224,10 @@ pub fn check_stage(pack: &Pack, kind: StageKind, file: &str) -> Result<CheckedSt
         let mut checked = own.clone();
         checked.text += crate::stages::BLOCK_SAMPLING_STUB;
         parse(&checked)?
+    } else if kind == StageKind::Post {
+        let mut checked = own.clone();
+        checked.text += crate::stages::POST_RAY_STUB;
+        parse(&checked)?
     } else {
         parse(&own)?
     };
@@ -410,6 +414,8 @@ fn api_rules(module: &naga::Module, own: &Composed) -> Vec<Problem> {
     let mut text = own.text[own.parts[0].1.clone()].to_owned();
     if text.contains("fn block_texture(") {
         text += crate::stages::BLOCK_SAMPLING_STUB;
+    } else if text.contains("fn ray_hit(") {
+        text += crate::stages::POST_RAY_STUB;
     }
     let prelude = naga::front::wgsl::parse_str(&text).expect("the prelude parses");
     let ours = names(&prelude);

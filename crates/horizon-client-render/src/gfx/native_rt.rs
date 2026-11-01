@@ -22,6 +22,9 @@ const DATA_VERTICES: u64 = (192 << 20) / 24;
 pub const MAX_LIGHTS: usize = 48;
 /// `instance_custom_data` of translucent terrain.
 const TRANSLUCENT: u32 = 1 << 23;
+/// `instance_custom_data` of the entities, whose vertices aren't in the scene's buffer: the
+/// vertex buffer never fills to its very last vertex.
+const ENTITY: u32 = (1 << 23) - 1;
 /// Instance masks: what `ray_light` and `ray_occluded` ask for.
 const MASK_SOLID: u8 = 1;
 const MASK_TRANSLUCENT: u8 = 2;
@@ -390,7 +393,7 @@ impl RayScene {
         }
         if let Some(b) = &entity_blas {
             let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-            instances.push(wgpu::TlasInstance::new(b, identity, 0, MASK_SOLID));
+            instances.push(wgpu::TlasInstance::new(b, identity, ENTITY, MASK_SOLID));
         }
         let count = instances.len();
         let slots = self

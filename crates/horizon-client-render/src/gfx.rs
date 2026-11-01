@@ -7304,6 +7304,7 @@ impl Renderer {
                 size,
                 history_reset,
                 native.timing.as_mut(),
+                native.frame.rays.as_ref().map(|rays| (&self.group, rays)),
             );
         } else if scaled.is_some() {
             self.world_post

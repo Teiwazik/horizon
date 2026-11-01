@@ -52,7 +52,38 @@ pub struct NativePost {
     format: wgpu::TextureFormat,
     /// Pass-dump state, when `HORIZON_PASS_DUMP` names a directory.
     dump: Option<Dump>,
+    /// Whether the passes trace rays: group 0 has the terrain's sprites, and the frame's group
+    /// the scene.
+    rays: bool,
 }
+
+/// The post prelude's rays where the device has them: the material's, on the terrain's sprites.
+const POST_RAY_SPRITES: &str = "
+@group(0) @binding(1) var horizon_terrain_sprites: texture_2d_array<f32>;
+@group(0) @binding(2) var horizon_terrain_sprite_sampler: sampler;
+@group(0) @binding(5) var horizon_terrain_sprites_1: texture_2d_array<f32>;
+@group(0) @binding(6) var horizon_terrain_sprites_2: texture_2d_array<f32>;
+@group(0) @binding(7) var horizon_terrain_sprites_3: texture_2d_array<f32>;
+@group(0) @binding(8) var horizon_terrain_sprites_4: texture_2d_array<f32>;
+@group(0) @binding(9) var horizon_terrain_sprites_5: texture_2d_array<f32>;
+@group(0) @binding(10) var horizon_terrain_sprites_6: texture_2d_array<f32>;
+@group(0) @binding(11) var horizon_terrain_sprites_7: texture_2d_array<f32>;
+override horizon_terrain_SPRITE_SPLIT: u32 = 2048u;
+fn horizon_block_sample(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
+    let s = horizon_terrain_sprite_sampler;
+    let l = i32(layer % horizon_terrain_SPRITE_SPLIT);
+    switch layer / horizon_terrain_SPRITE_SPLIT {
+        case 0u: { return textureSampleLevel(horizon_terrain_sprites, s, uv, l, lod); }
+        case 1u: { return textureSampleLevel(horizon_terrain_sprites_1, s, uv, l, lod); }
+        case 2u: { return textureSampleLevel(horizon_terrain_sprites_2, s, uv, l, lod); }
+        case 3u: { return textureSampleLevel(horizon_terrain_sprites_3, s, uv, l, lod); }
+        case 4u: { return textureSampleLevel(horizon_terrain_sprites_4, s, uv, l, lod); }
+        case 5u: { return textureSampleLevel(horizon_terrain_sprites_5, s, uv, l, lod); }
+        case 6u: { return textureSampleLevel(horizon_terrain_sprites_6, s, uv, l, lod); }
+        default: { return textureSampleLevel(horizon_terrain_sprites_7, s, uv, l, lod); }
+    }
+}
+";
 
 /// Where a post pass draws.
 #[derive(Clone, Copy, PartialEq)]
@@ -922,6 +953,7 @@ impl NativePost {
         constants: &[(String, f64)],
         format: wgpu::TextureFormat,
         frame: &NativeFrame,
+        terrain: Option<(&wgpu::BindGroupLayout, [f64; 2])>,
     ) -> Result<Self, String> {
         let targets = manifest.post_targets();
         let outputs: Vec<Option<usize>> = manifest
@@ -949,6 +981,29 @@ impl NativePost {
             texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
         ];
         entries.extend(pack_texture_entries(frame.textures.len()));
+        let rays = terrain.filter(|_| frame.rays.is_some());
+        if rays.is_some() {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 14,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::AccelerationStructure {
+                    vertex_return: false,
+                },
+                count: None,
+            });
+            for binding in [15, 40] {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+            }
+        }
         entries
             .extend((0..targets.len() as u32).map(|j| {
                 texture_entry(horizon_shader_api::stages::POST_TARGET_BINDING + j, float)
@@ -959,6 +1014,7 @@ impl NativePost {
         });
         let mut groups: [Option<&wgpu::BindGroupLayout>; GROUP as usize + 1] = Default::default();
         groups[GROUP as usize] = Some(&layout);
+        groups[0] = rays.map(|r| r.0);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Native shader pack post"),
             bind_group_layouts: &groups,
@@ -967,11 +1023,27 @@ impl NativePost {
         let count = stages.len();
         let mut passes = Vec::with_capacity(count);
         for (i, stage) in stages.into_iter().enumerate() {
-            let present = present_constants(&stage.module, constants);
+            let traced = rays
+                .map(|_| {
+                    let text = format!(
+                        "enable wgpu_ray_query;\n{}{POST_RAY_SPRITES}{}{}",
+                        stage.source,
+                        super::native_material::RAYS,
+                        horizon_shader_api::stages::POST_ENTRY_POINTS,
+                    );
+                    naga::front::wgsl::parse_str(&text)
+                        .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
+                })
+                .transpose()?;
+            let ir = traced.unwrap_or(stage.module);
+            let mut present = present_constants(&ir, constants);
+            if let Some((_, sprites)) = rays {
+                present.push(("horizon_terrain_SPRITE_SPLIT", sprites[1]));
+            }
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&stage.label),
-                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(stage.module)),
+                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(ir)),
             });
             let options = wgpu::PipelineCompilationOptions {
                 constants: &present,
@@ -1037,6 +1109,7 @@ impl NativePost {
             targets: None,
             scales: targets.iter().map(|t| t.1).collect(),
             named: None,
+            rays: rays.is_some(),
             plan,
             groups: None,
             history_valid: false,
@@ -1059,6 +1132,7 @@ impl NativePost {
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
         size: [u32; 2],
         history_reset: bool,
+        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene)>,
     ) {
         let chain = self
             .plan
@@ -1209,6 +1283,20 @@ impl NativePost {
                     },
                 ];
                 entries.extend(pack_texture_group_entries(&self.textures));
+                if let Some(rays) = rays.filter(|_| self.rays) {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: wgpu::BindingResource::AccelerationStructure(&rays.1.tlas),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: rays.1.data.as_entire_binding(),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 40,
+                        resource: rays.1.lights.as_entire_binding(),
+                    });
+                }
                 // The pack's targets, a blank one in place of the one this pass writes.
                 if let Some((_, views)) = &self.named {
                     entries.extend(views.iter().enumerate().map(|(j, view)| {
@@ -1248,8 +1336,9 @@ impl NativePost {
         size: [u32; 2],
         history_reset: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
+        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene)>,
     ) {
-        self.prepare(device, world, size, history_reset);
+        self.prepare(device, world, size, history_reset, rays);
         // Copies made last frame: write them before this frame's copies ask for more.
         if let Some(dump) = &mut self.dump {
             dump.flush(device);
@@ -1297,6 +1386,9 @@ impl NativePost {
                 ..Default::default()
             });
             pass.set_pipeline(pipeline);
+            if let Some(rays) = rays.filter(|_| self.rays) {
+                pass.set_bind_group(0, rays.0, &[]);
+            }
             pass.set_bind_group(GROUP, group, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
