@@ -149,6 +149,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     let albedo = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
     // What the prelude's `block_texture` reads: this sprite, at this point's mip level.
     horizon_block_layer = in.layer & 0x7fffu;
+    horizon_ray_pixel = in.clip.xy;
     let texels = in.uv * horizon_block_size();
     let footprint = max(dot(dpdx(texels), dpdx(texels)), dot(dpdy(texels), dpdy(texels)));
     horizon_block_lod = max(0.5 * log2(max(footprint, 1e-8)), 0.0);
@@ -338,14 +339,120 @@ fn horizon_material_displace(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: v
 /// The material prelude's `ray_occluded`, where the device has ray queries.
 const RAYS: &str = "
 @group(3) @binding(14) var horizon_scene: acceleration_structure;
+@group(3) @binding(15) var<storage, read> horizon_ray_vertices: array<u32>;
+struct HorizonRayLight {
+    position: vec4<f32>,
+    color: vec4<f32>,
+}
+@group(3) @binding(40) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
 fn horizon_ray_available() -> bool {
     return true;
 }
-fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+// A candidate's texel: its section's vertices, as `TerrainVertex` (24 bytes, 6 words).
+fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> vec4<f32> {
+    let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
+    let second = 1u + (hit.primitive_index & 1u);
+    let a = first * 6u;
+    let b = (first + second) * 6u;
+    let c = (first + second + 1u) * 6u;
+    let word = horizon_ray_vertices[a + 4u];
+    let layer = word & 0xffffu;
+    // Opaque quads need no texture.
+    if (layer & 0x8000u) != 0u {
+        return vec4<f32>(1.0);
+    }
+    let w = 1.0 - hit.barycentrics.x - hit.barycentrics.y;
+    let uv = horizon_ray_uv_word(horizon_ray_vertices[a + 3u]) * w + horizon_ray_uv_word(horizon_ray_vertices[b + 3u]) * hit.barycentrics.x
+        + horizon_ray_uv_word(horizon_ray_vertices[c + 3u]) * hit.barycentrics.y;
+    let color = horizon_ray_vertices[a + 5u];
+    *tint = vec3<f32>(f32(color & 255u), f32((color >> 8u) & 255u), f32((color >> 16u) & 255u)) / 255.0;
+    return horizon_block_sample(uv, layer & 0x7fffu, 0.0);
+}
+fn horizon_ray_uv_word(word: u32) -> vec2<f32> {
+    return vec2<f32>(f32(word & 0xffffu), f32(word >> 16u)) / 32768.0;
+}
+// The light left of 1 after the ray: 0 past anything solid, tinted by translucent terrain.
+fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     var query: ray_query;
-    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0xFFu, 0.0, distance, origin, direction));
-    rayQueryProceed(&query);
-    return rayQueryGetCommittedIntersection(&query).kind != RAY_QUERY_INTERSECTION_NONE;
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x03u, 0.0, distance, origin, direction));
+    var light = vec3<f32>(1.0);
+    var steps = 0u;
+    while rayQueryProceed(&query) {
+        steps += 1u;
+        if steps > 32u {
+            break;
+        }
+        let hit = rayQueryGetCandidateIntersection(&query);
+        var tint = vec3<f32>(1.0);
+        let texel = horizon_ray_texel(hit, &tint);
+        if (hit.instance_custom_data & 0x800000u) != 0u {
+            light *= mix(vec3<f32>(1.0), texel.rgb * tint, texel.a);
+        } else if texel.a >= 0.5 {
+            rayQueryConfirmIntersection(&query);
+        }
+    }
+    if rayQueryGetCommittedIntersection(&query).kind != RAY_QUERY_INTERSECTION_NONE {
+        return vec3<f32>(0.0);
+    }
+    return light;
+}
+fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
+    return all(horizon_ray_trace(origin, direction, distance) == vec3<f32>(0.0));
+}
+// Interleaved gradient noise, moving each frame for the pack's temporal filter to average.
+fn horizon_ray_noise(salt: f32) -> f32 {
+    let p = horizon_ray_pixel + vec2<f32>(5.588238 * (f32(frame.frame_index % 64u) + salt));
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+// A direction within `radius` (the tangent of its half angle) of `direction`.
+fn horizon_ray_jitter(direction: vec3<f32>, radius: f32, salt: f32) -> vec3<f32> {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(direction.y) > 0.9);
+    let x = normalize(cross(up, direction));
+    let y = cross(direction, x);
+    let angle = horizon_ray_noise(salt) * 6.2831853;
+    let r = sqrt(horizon_ray_noise(salt + 17.0)) * radius;
+    return normalize(direction + (x * cos(angle) + y * sin(angle)) * r);
+}
+fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return horizon_ray_trace(origin, horizon_ray_jitter(direction, radius, 0.0), distance);
+}
+fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let count = u32(horizon_ray_sources[0].position.x);
+    var sum = vec3<f32>(0.0);
+    // Rays get fewer with distance: the nearest lights are soft, the rest take one and stop.
+    var rays = 0u;
+    for (var i = 1u; i <= count; i++) {
+        let source = horizon_ray_sources[i];
+        let to = source.position.xyz - position;
+        let d2 = dot(to, to);
+        let reach = source.position.w;
+        if d2 >= reach * reach || d2 < 0.0001 {
+            continue;
+        }
+        let d = sqrt(d2);
+        let toward = to / d;
+        let facing = dot(normal, toward);
+        if facing <= 0.0 {
+            continue;
+        }
+        // The inverse square at a sphere's size, brought to 0 at the block light's reach.
+        let edge = saturate(1.0 - pow(d2 / (reach * reach), 2.0));
+        let intensity = reach * reach / 225.0 * edge * edge / (1.0 + d2 * 0.12);
+        let strength = intensity * facing;
+        if strength < 0.002 {
+            continue;
+        }
+        var seen = vec3<f32>(1.0);
+        if rays < 12u {
+            rays += 1u;
+            // The source is a small sphere: its near edge is what the ray must reach.
+            let dir = horizon_ray_jitter(toward, 0.3 / max(d, 0.5), f32(i));
+            seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - 0.55, 0.01));
+        }
+        // Light adds in linear space, colour by colour.
+        sum += source.color.rgb * seen * strength;
+    }
+    return sum;
 }
 ";
 const NO_RAYS: &str = "
@@ -354,6 +461,12 @@ fn horizon_ray_available() -> bool {
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;
+}
+fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 ";
 

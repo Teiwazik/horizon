@@ -329,6 +329,17 @@ fn ray_tracing() -> bool {
 fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return horizon_ray_occluded(origin, direction, distance);
 }
+var<private> horizon_ray_pixel: vec2<f32>;
+// The light that reaches `origin` along `direction` (a body `radius` wide, the tangent of its
+// half angle, for a soft edge): 0 behind anything solid, tinted through translucent terrain.
+fn ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return horizon_ray_light(origin, direction, distance, radius);
+}
+// The direct light of the block and dynamic lights near `position`, on a surface facing
+// `normal`, each shadowed and tinted by the rays to it, added in linear space.
+fn ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return horizon_ray_lights(position, normal);
+}
 // The LabPBR maps' size, in texels (they may be smaller than `block_texture_size`).
 fn block_pbr_size() -> vec2<f32> {
     return horizon_block_pbr_size();
@@ -397,6 +408,12 @@ fn horizon_ray_available() -> bool {
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;
+}
+fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 "
     };

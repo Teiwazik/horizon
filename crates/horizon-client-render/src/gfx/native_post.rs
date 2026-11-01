@@ -305,6 +305,18 @@ impl NativeFrame {
                 },
                 count: None,
             });
+            for binding in [15, 40] {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+            }
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack frame"),
@@ -370,7 +382,7 @@ impl NativeFrame {
                 &materials,
                 &textures,
                 (&opaque_depth, &opaque_color),
-                (&block_light, &pbr, rays.as_ref().map(|r| &r.tlas)),
+                (&block_light, &pbr, rays.as_ref()),
             ),
         );
         Self {
@@ -416,12 +428,12 @@ impl NativeFrame {
             (
                 &super::block_light::BlockLight,
                 &[wgpu::TextureView; 2],
-                Option<&wgpu::Tlas>,
+                Option<&super::native_rt::RayScene>,
             ),
         ),
     ) -> wgpu::BindGroup {
         let (opaque_depth, opaque_color) = opaque_depth;
-        let (block_light, pbr, tlas) = block_light;
+        let (block_light, pbr, rays) = block_light;
         let opaque_view = opaque_depth.create_view(&Default::default());
         let opaque_color_view = opaque_color.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -488,10 +500,18 @@ impl NativeFrame {
                 resource: wgpu::BindingResource::TextureView(&pbr[1]),
             },
         ];
-        if let Some(tlas) = tlas {
+        if let Some(rays) = rays {
             entries.push(wgpu::BindGroupEntry {
                 binding: 14,
-                resource: wgpu::BindingResource::AccelerationStructure(tlas),
+                resource: wgpu::BindingResource::AccelerationStructure(&rays.tlas),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 15,
+                resource: rays.data.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 40,
+                resource: rays.lights.as_entire_binding(),
             });
         }
         entries.extend(pack_texture_group_entries(textures));
@@ -519,11 +539,7 @@ impl NativeFrame {
                 &self.materials,
                 &self.textures,
                 (&self.opaque_depth, &self.opaque_color),
-                (
-                    &self.block_light,
-                    &self.pbr,
-                    self.rays.as_ref().map(|r| &r.tlas),
-                ),
+                (&self.block_light, &self.pbr, self.rays.as_ref()),
             ),
         );
         self.reflection = Some(view);
@@ -570,11 +586,7 @@ impl NativeFrame {
                 &self.materials,
                 &self.textures,
                 (&self.opaque_depth, &self.opaque_color),
-                (
-                    &self.block_light,
-                    &self.pbr,
-                    self.rays.as_ref().map(|r| &r.tlas),
-                ),
+                (&self.block_light, &self.pbr, self.rays.as_ref()),
             ),
         );
     }

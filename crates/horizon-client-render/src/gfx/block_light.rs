@@ -67,6 +67,11 @@ impl BlockLight {
         }
     }
 
+    /// The light each block state gives off.
+    pub fn table(&self) -> &LightTable {
+        &self.table
+    }
+
     /// Places the grid around `camera`, rebuilding it when it moved or `revision` (of
     /// `sections`' sources) changed.
     pub fn update(

@@ -3137,7 +3137,9 @@ impl Renderer {
         let entity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Entity vertices"),
             size: entity_capacity * std::mem::size_of::<Vertex>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST
+                | native_rt::input_usage(&device),
             mapped_at_creation: false,
         });
         let flat_wanted = flat::wanted(&adapter, &device);
@@ -5778,7 +5780,9 @@ impl Renderer {
             self.entity_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Entity vertices"),
                 size: self.entity_capacity * std::mem::size_of::<Vertex>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | native_rt::input_usage(&self.device),
                 mapped_at_creation: false,
             });
         }
@@ -6102,7 +6106,8 @@ impl Renderer {
         // One of Horizon's own packs: this frame's inputs; in a timed frame its sky draws in a
         // pass of its own, so that it has a time of its own.
         let mut native_sky_pass = false;
-        // The ray tracing prototype: the sections the camera and the light see.
+        // The ray tracing prototype: the sections the camera and the light see, the entities
+        // and the light sources.
         if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
             let list = if frame.title {
                 Vec::new()
@@ -6115,14 +6120,36 @@ impl Renderer {
                         native_rt::RaySection {
                             key: v.key,
                             origin: v.origin,
-                            first_vertex: s.start as u32,
-                            quads: s.solid,
+                            first_vertex: s.start,
+                            solid: s.solid,
+                            translucent: s.translucent,
                             vertices: self.arena.buffer(s.page),
                         }
                     })
                     .collect()
             };
-            rt.update(&self.device, &mut encoder, list, &self.indices);
+            let entities = (!frame.title).then(|| native_rt::RayEntities {
+                vertices: &self.entity_buffer,
+                stride: std::mem::size_of::<Vertex>() as u64,
+                quads: entity_quads,
+                shadow_only: (
+                    entity_vertices as u32 - shadow_only_quads * 4,
+                    shadow_only_quads,
+                ),
+            });
+            rt.update(&self.device, &mut encoder, list, entities, &self.indices);
+        }
+        if let Some(native) = self.native.as_ref().filter(|_| !frame.title)
+            && let Some(rt) = &native.frame.rays
+        {
+            rt.update_lights(
+                &self.queue,
+                frame.camera,
+                &self.light_blocks,
+                native.frame.block_light.table(),
+                frame.dynamic_lights,
+                frame.colored_lights,
+            );
         }
         if !frame.title
             && let Some(native) = &mut self.native
