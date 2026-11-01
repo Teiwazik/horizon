@@ -461,10 +461,15 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return all(horizon_ray_trace(origin, direction, distance) == vec3<f32>(0.0));
 }
-// Interleaved gradient noise, moving each frame for the pack's temporal filter to average.
+// A new number each frame for the pack's temporal filter to average, independent for each salt:
+// taken from one noise with an offset, a ray's angle and radius follow each other, the directions
+// lie along a curve and a soft shadow comes out as hard edges and arcs.
 fn horizon_ray_noise(salt: f32) -> f32 {
-    let p = horizon_ray_pixel + vec2<f32>(5.588238 * (f32(frame.frame_index % 64u) + salt));
-    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+    let pixel = vec2<u32>(horizon_ray_pixel);
+    let seed = pixel.x + pixel.y * 4099u + u32(salt) * 65537u + (frame.frame_index % 4096u) * 16777259u;
+    let state = seed * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return f32((word >> 22u) ^ word) / 4294967296.0;
 }
 // A direction within `radius` (the tangent of its half angle) of `direction`.
 fn horizon_ray_jitter(direction: vec3<f32>, radius: f32, salt: f32) -> vec3<f32> {
@@ -482,50 +487,78 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return horizon_ray_lights_budget(position, normal, 8u);
 }
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
-    // The sources reaching this place, strongest first.
-    let cell = vec3<i32>(floor((position - horizon_ray_sources[0].position.yzw) / 8.0));
+    // The sources reaching this place. The cell's edge is dithered, so two cells' lists blend.
+    let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 4.0;
+    let cell = vec3<i32>(floor((position + dither - horizon_ray_sources[0].position.yzw) / 8.0));
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
         return vec3<f32>(0.0);
     }
     let first = u32((cell.z * 20 + cell.y) * 20 + cell.x) * 8u;
-    let count = horizon_ray_light_cells[first] & 0xffffu;
-    var traced = vec3<f32>(0.0);
-    var untraced = vec3<f32>(0.0);
-    var seen_part = 0.0;
-    var whole_part = 0.0;
-    var rays = 0u;
+    let count = min(horizon_ray_light_cells[first] & 0xffffu, 15u);
+    // How strong each is here, not at the cell's middle: the budget goes to the strongest at
+    // this very point, so what gets a shadow doesn't jump along a surface.
+    var strengths: array<f32, 16>;
+    var ids: array<u32, 16>;
+    var towards: array<vec4<f32>, 16>;
+    var found = 0u;
     for (var n = 1u; n <= count; n++) {
         let word = horizon_ray_light_cells[first + n / 2u];
-        let source = horizon_ray_sources[(word >> ((n % 2u) * 16u)) & 0xffffu];
+        let id = (word >> ((n % 2u) * 16u)) & 0xffffu;
+        let source = horizon_ray_sources[id];
         let to = source.position.xyz - position;
         let d2 = dot(to, to);
         let reach = source.position.w;
-        if d2 >= reach * reach || d2 < 0.0001 {
+        if d2 >= reach * reach {
             continue;
         }
-        let d = sqrt(d2);
-        let toward = to / d;
+        let d = sqrt(max(d2, 0.0001));
+        let toward = select(to / d, normal, d2 < 0.0001);
         let facing = dot(normal, toward);
         if facing <= 0.0 {
             continue;
         }
         // The inverse square at a sphere's size, brought to 0 at the block light's reach.
         let edge = saturate(1.0 - pow(d2 / (reach * reach), 2.0));
-        let intensity = reach * reach / 225.0 * edge * edge / (1.0 + d2 * 0.12);
+        let intensity = reach * reach / 225.0 * edge * edge / (1.0 + d2 * 0.07);
         let strength = intensity * facing;
         if strength < 0.002 {
             continue;
         }
-        if rays < budget {
-            rays += 1u;
-            // The source is a small sphere: its near edge is what the ray must reach.
-            let dir = horizon_ray_jitter(toward, 0.3 / max(d, 0.5), f32(n));
-            let seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - 0.55, 0.01));
-            traced += source.color.rgb * seen * strength;
-            seen_part += max(seen.r, max(seen.g, seen.b)) * strength;
-            whole_part += strength;
-        } else {
-            untraced += source.color.rgb * strength;
+        strengths[found] = strength;
+        ids[found] = id;
+        towards[found] = vec4<f32>(toward, d);
+        found += 1u;
+    }
+    var traced = vec3<f32>(0.0);
+    var untraced = vec3<f32>(0.0);
+    var seen_part = 0.0;
+    var whole_part = 0.0;
+    for (var ray = 0u; ray < min(budget, found); ray++) {
+        var best = 0u;
+        for (var i = 1u; i < found; i++) {
+            if strengths[i] > strengths[best] {
+                best = i;
+            }
+        }
+        if strengths[best] <= 0.0 {
+            break;
+        }
+        let strength = strengths[best];
+        strengths[best] = -strength;
+        let source = horizon_ray_sources[ids[best]];
+        let d = towards[best].w;
+        let dir = horizon_ray_jitter(towards[best].xyz, 0.5 / max(d, 0.5), f32(ray));
+        // The ray ends where it would enter the source's block: a full block doesn't stand in
+        // the way of its own light.
+        let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
+        let seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - inside, 0.01));
+        traced += source.color.rgb * seen * strength;
+        seen_part += max(seen.r, max(seen.g, seen.b)) * strength;
+        whole_part += strength;
+    }
+    for (var i = 0u; i < found; i++) {
+        if strengths[i] > 0.0 {
+            untraced += horizon_ray_sources[ids[i]].color.rgb * strengths[i];
         }
     }
     // Past the budget a source is seen about as much as the strongest ones here were, and
