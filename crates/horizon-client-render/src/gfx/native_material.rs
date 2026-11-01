@@ -539,7 +539,8 @@ fn horizon_ray_seen(origin: vec3<f32>, direction: vec3<f32>, distance: f32, sour
     let crossing = vec3<f32>(at.x, surface_y, at.y);
     let near_leg = crossing - origin;
     let near_length = max(length(near_leg), 0.0001);
-    let far_leg = target_at - crossing;
+    // To the block's middle: past the waves a random point of it scatters the caustic into grain.
+    let far_leg = source_at - crossing;
     let far_length = max(length(far_leg), 0.0001);
     let far_dir = far_leg / far_length;
     // Up to where the ray enters the source's block.
