@@ -180,6 +180,7 @@ fn surface_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     surface: &wgpu::TextureView,
+    albedo: &wgpu::TextureView,
     depth: &wgpu::TextureView,
     clear: bool,
 ) -> wgpu::RenderPass<'e> {
@@ -198,6 +199,16 @@ fn surface_pass<'e>(
             }),
             Some(wgpu::RenderPassColorAttachment {
                 view: surface,
+                resolve_target: None,
+                depth_slice: None,
+                ops: keep(if clear {
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                } else {
+                    wgpu::LoadOp::Load
+                }),
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: albedo,
                 resolve_target: None,
                 depth_slice: None,
                 ops: keep(if clear {
@@ -6106,15 +6117,16 @@ impl Renderer {
         // One of Horizon's own packs: this frame's inputs; in a timed frame its sky draws in a
         // pass of its own, so that it has a time of its own.
         let mut native_sky_pass = false;
-        // The ray tracing prototype: the sections the camera and the light see, the entities
-        // and the light sources.
+        // The ray tracing prototype: every section near, in sight or not, the entities and the
+        // light sources.
         if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
             let list = if frame.title {
                 Vec::new()
             } else {
-                visible
-                    .iter()
-                    .chain(shadow_visible.iter())
+                let mut near = Vec::new();
+                self.sections
+                    .within(frame.camera, f64::from(native_rt::RADIUS), &mut near);
+                near.iter()
                     .map(|v| {
                         let s = self.sections.get(v.slot);
                         native_rt::RaySection {
@@ -6491,7 +6503,11 @@ impl Renderer {
         // `scene_surface`), in passes of its own between the sky and everything else.
         let surface = material
             .is_some()
-            .then(|| self.native.as_ref().map(|n| n.frame.surface_view.clone()))
+            .then(|| {
+                self.native
+                    .as_ref()
+                    .map(|n| (n.frame.surface_view.clone(), n.frame.albedo_view.clone()))
+            })
             .flatten()
             .filter(|_| !pack_draws_terrain);
         {
@@ -6581,9 +6597,11 @@ impl Renderer {
                 }
             }
             let terrain_pass =
-                |encoder: &mut wgpu::CommandEncoder, surface: &wgpu::TextureView, clear: bool| {
+                |encoder: &mut wgpu::CommandEncoder,
+                 surface: &(wgpu::TextureView, wgpu::TextureView),
+                 clear: bool| {
                     // Its lifetime forgotten: a closure cannot tie it to `encoder`'s.
-                    let mut pass = surface_pass(encoder, world_view, surface, world_depth, clear)
+                    let mut pass = surface_pass(encoder, world_view, &surface.0, &surface.1, world_depth, clear)
                         .forget_lifetime();
                     pass.set_bind_group(0, &self.group, &[]);
                     pack_frame(&mut pass);
@@ -7304,7 +7322,11 @@ impl Renderer {
                 size,
                 history_reset,
                 native.timing.as_mut(),
-                native.frame.rays.as_ref().map(|rays| (&self.group, rays)),
+                native
+                    .frame
+                    .rays
+                    .as_ref()
+                    .map(|rays| (&self.group, rays, &native.frame.albedo_view)),
             );
         } else if scaled.is_some() {
             self.world_post

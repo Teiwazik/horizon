@@ -188,6 +188,15 @@ fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool 
     return horizon_ray_occluded(origin, direction, distance);
 }
 var<private> horizon_ray_pixel: vec2<f32>;
+// The direct light of the block and dynamic lights at `position`, on a surface facing `normal`,
+// with two shadow rays at most: for what a ray met.
+fn ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return horizon_ray_lights_budget(position, normal, 2u);
+}
+// The solid terrain's texture and tint at a pixel, before any light.
+fn albedo_at(texel: vec2<i32>) -> vec3<f32> {
+    return horizon_ray_albedo_at(texel).rgb;
+}
 // What a ray met: `hit` false past its distance. `albedo` is the texture's colour with the
 // block's tint, `normal` faces the ray, `sky` and `block` are the light stored there, 0..1.
 struct RayHit {
@@ -246,6 +255,7 @@ struct HorizonPostOut {
     return out;
 }
 @fragment fn horizon_fs_post(in: HorizonPostOut) -> @location(0) vec4<f32> {
+    horizon_ray_pixel = in.position.xy;
     let color = textureSampleLevel(previous, linear_sampler, in.uv, 0.0);
     return post(PostInput(in.uv, in.position.xy, color, depth_at(in.uv)));
 }
@@ -259,6 +269,12 @@ pub const POST_RAY_STUB: &str = "
 fn horizon_ray_available() -> bool {
     return false;
 }
+fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_albedo_at(texel: vec2<i32>) -> vec4<f32> {
+    return vec4<f32>(1.0);
+}
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;
 }
@@ -270,6 +286,12 @@ const POST_ENTRIES: &str = concat!(
     "
 fn horizon_ray_available() -> bool {
     return false;
+}
+fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_albedo_at(texel: vec2<i32>) -> vec4<f32> {
+    return vec4<f32>(1.0);
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;

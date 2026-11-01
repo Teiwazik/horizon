@@ -68,6 +68,11 @@ const POST_RAY_SPRITES: &str = "
 @group(0) @binding(9) var horizon_terrain_sprites_5: texture_2d_array<f32>;
 @group(0) @binding(10) var horizon_terrain_sprites_6: texture_2d_array<f32>;
 @group(0) @binding(11) var horizon_terrain_sprites_7: texture_2d_array<f32>;
+@group(3) @binding(12) var horizon_ray_albedo: texture_2d<f32>;
+fn horizon_ray_albedo_at(texel: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(horizon_ray_albedo));
+    return textureLoad(horizon_ray_albedo, clamp(texel, vec2<i32>(0), size - 1), 0);
+}
 override horizon_terrain_SPRITE_SPLIT: u32 = 2048u;
 fn horizon_block_sample(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
     let s = horizon_terrain_sprite_sampler;
@@ -174,6 +179,9 @@ pub struct NativeFrame {
     /// while the pack has a material stage, else a blank 1×1.
     pub surface: wgpu::Texture,
     pub surface_view: wgpu::TextureView,
+    /// The solid terrain's third target, for light the post stage adds.
+    albedo: wgpu::Texture,
+    pub albedo_view: wgpu::TextureView,
     /// The colour of block light around the camera (bindings 9 and 10).
     pub block_light: super::block_light::BlockLight,
     /// Last frame's view-projection, camera and time.
@@ -402,6 +410,8 @@ impl NativeFrame {
         };
         let surface = surface_target(device, [1, 1]);
         let surface_view = surface.create_view(&Default::default());
+        let albedo = albedo_target(device, [1, 1]);
+        let albedo_view = albedo.create_view(&Default::default());
         let block_light = super::block_light::BlockLight::new(device, lights);
         let group = Self::group(
             device,
@@ -435,6 +445,8 @@ impl NativeFrame {
             pbr,
             surface,
             surface_view,
+            albedo,
+            albedo_view,
             block_light,
             last: None,
             weather: [0.0; 3],
@@ -593,6 +605,8 @@ impl NativeFrame {
         if [self.surface.width(), self.surface.height()] != size {
             self.surface = surface_target(device, size);
             self.surface_view = self.surface.create_view(&Default::default());
+            self.albedo = albedo_target(device, size);
+            self.albedo_view = self.albedo.create_view(&Default::default());
         }
         let (color_size, format) = match color {
             Some(c) => ([c.width(), c.height()], c.format()),
@@ -775,6 +789,23 @@ fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::Bi
 }
 
 /// The solid terrain's surface target of `size` (`SURFACE_FORMAT`), drawn and read.
+fn albedo_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Native shader pack albedo"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: super::native_material::ALBEDO_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
 fn surface_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Native shader pack surface"),
@@ -987,6 +1018,10 @@ impl NativePost {
         entries.extend(pack_texture_entries(frame.textures.len()));
         let rays = terrain.filter(|_| frame.rays.is_some());
         if rays.is_some() {
+            entries.push(texture_entry(
+                12,
+                wgpu::TextureSampleType::Float { filterable: false },
+            ));
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 14,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1136,7 +1171,7 @@ impl NativePost {
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
         size: [u32; 2],
         history_reset: bool,
-        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene)>,
+        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene, &wgpu::TextureView)>,
     ) {
         let chain = self
             .plan
@@ -1289,6 +1324,10 @@ impl NativePost {
                 entries.extend(pack_texture_group_entries(&self.textures));
                 if let Some(rays) = rays.filter(|_| self.rays) {
                     entries.push(wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::TextureView(rays.2),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
                         binding: 14,
                         resource: wgpu::BindingResource::AccelerationStructure(&rays.1.tlas),
                     });
@@ -1344,7 +1383,7 @@ impl NativePost {
         size: [u32; 2],
         history_reset: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
-        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene)>,
+        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene, &wgpu::TextureView)>,
     ) {
         self.prepare(device, world, size, history_reset, rays);
         // Copies made last frame: write them before this frame's copies ask for more.

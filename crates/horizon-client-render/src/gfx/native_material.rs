@@ -150,6 +150,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     // What the prelude's `block_texture` reads: this sprite, at this point's mip level.
     horizon_block_layer = in.layer & 0x7fffu;
     horizon_ray_pixel = in.clip.xy;
+    horizon_material_albedo = albedo.rgb * in.tint.rgb;
     let texels = in.uv * horizon_block_size();
     let footprint = max(dot(dpdx(texels), dpdx(texels)), dot(dpdy(texels), dpdy(texels)));
     horizon_block_lod = max(0.5 * log2(max(footprint, 1e-8)), 0.0);
@@ -179,11 +180,14 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
         in.displaced)).color;
 }
 var<private> horizon_material_normal: vec3<f32>;
+var<private> horizon_material_albedo: vec3<f32>;
 struct HorizonMaterialSolid {
     @location(0) color: vec4<f32>,
     // The world target's surface data: `set_surface`'s, then the fragment's depth, which the
     // post stage's `surface_at` compares with the final depth.
     @location(1) surface: vec4<f32>,
+    // The texture and tint before any light, for light the post stage adds.
+    @location(2) albedo: vec4<f32>,
 }
 @fragment fn horizon_material_fs_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     if length(in.base) < horizon_displace_distance - 0.05 && horizon_displaced_layer(in.layer) {
@@ -201,6 +205,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     var out: HorizonMaterialSolid;
     out.color = horizon_material_fogged(vec4(color.rgb, 1.0), in.spherical, in.cylindrical);
     out.surface = vec4(horizon_surface.xyz, in.clip.z);
+    out.albedo = vec4(horizon_material_albedo, 1.0);
     return out;
 }
 // The depth pre-pass (`NativeMaterial::prepass`): the solid terrain's depth alone, cut out by
@@ -211,7 +216,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
         discard;
     }
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
-    return HorizonMaterialSolid(vec4(0.0), vec4(0.0));
+    return HorizonMaterialSolid(vec4(0.0), vec4(0.0), vec4(0.0));
 }
 @fragment fn horizon_material_fs_translucent(in: HorizonMaterialOut) -> @location(0) vec4<f32> {
     let color = horizon_material_color(in, true);
@@ -246,6 +251,8 @@ const DISPLACED_ENTRIES: &str = "
 /// `scene_surface`: x the normal (two snorm16 in its bits), y smoothness, z the pack's data, w
 /// depth.
 pub const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+/// The albedo target, for light the post stage adds.
+pub const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// What terrain pipelines are built against: the renderer's layouts and constants.
 pub struct TerrainShape<'a> {
@@ -472,6 +479,9 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
     return horizon_ray_trace(origin, horizon_ray_jitter(direction, radius, 0.0), distance);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return horizon_ray_lights_budget(position, normal, 8u);
+}
+fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     // The sources reaching this place, strongest first.
     let cell = vec3<i32>(floor((position - horizon_ray_sources[0].position.yzw) / 8.0));
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
@@ -506,7 +516,7 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         if strength < 0.002 {
             continue;
         }
-        if rays < 8u {
+        if rays < budget {
             rays += 1u;
             // The source is a small sphere: its near edge is what the ray must reach.
             let dir = horizon_ray_jitter(toward, 0.3 / max(d, 0.5), f32(n));
@@ -535,6 +545,9 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
     return vec3<f32>(1.0);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
@@ -657,7 +670,12 @@ impl NativeMaterial {
                 blend: None,
                 write_mask,
             });
-            let solid = [color.clone(), surface];
+            let albedo = Some(wgpu::ColorTargetState {
+                format: ALBEDO_FORMAT,
+                blend: None,
+                write_mask,
+            });
+            let solid = [color.clone(), surface, albedo];
             let translucent = [color];
             let targets: &[Option<wgpu::ColorTargetState>] = if blend.is_none() {
                 &solid

@@ -259,6 +259,33 @@ impl<T> Resident<T> {
     /// the frustum rejects holds no section it would accept, and one
     /// entirely inside holds none it would reject (its sections skip the
     /// test). `radius` is the render distance in chunks.
+    pub fn within(&self, camera: DVec3, radius: f64, out: &mut Vec<Visible>) {
+        // Every section whose middle is within `radius`, in sight or not: for rays, which see
+        // what the camera doesn't.
+        for column in &self.columns {
+            let ox = f64::from(column.x * 16) - camera.x;
+            let oz = f64::from(column.z * 16) - camera.z;
+            let (dx, dz) = (ox + 8.0, oz + 8.0);
+            let xz = dx * dx + dz * dz;
+            if xz > radius * radius {
+                continue;
+            }
+            for &(y, slot) in &column.sections {
+                let oy = f64::from(self.min_y + y * 16) - camera.y;
+                let dy = oy + 8.0;
+                let distance = xz + dy * dy;
+                if distance <= radius * radius {
+                    out.push(Visible {
+                        distance: distance.to_bits(),
+                        key: (column.x, y, column.z),
+                        slot,
+                        origin: [ox as f32, oy as f32, oz as f32],
+                    });
+                }
+            }
+        }
+    }
+
     pub fn visible(
         &self,
         camera: DVec3,

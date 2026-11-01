@@ -11,7 +11,7 @@ use super::block_light::LightTable;
 use glam::DVec3;
 
 /// Sections further than this from the camera, in blocks, are left out.
-const RADIUS: f32 = 128.0;
+pub const RADIUS: f32 = 128.0;
 /// Sections' structures built per frame, nearest first.
 const BUILDS_PER_FRAME: usize = 64;
 /// Top-level instances: two per section at most, and the entities.
