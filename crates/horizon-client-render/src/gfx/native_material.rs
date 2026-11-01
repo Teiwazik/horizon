@@ -400,8 +400,10 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
     var steps = 0u;
     while rayQueryProceed(&query) {
         steps += 1u;
+        // Through this much foliage hardly anything gets by. Called lit, whole blocks would flick
+        // on and off as the order of the candidates changes.
         if steps > 32u {
-            break;
+            return vec3<f32>(0.0);
         }
         let hit = rayQueryGetCandidateIntersection(&query);
         var tint = vec3<f32>(1.0);
