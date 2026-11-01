@@ -277,7 +277,7 @@ pub struct Stage {
 /// A post pass's sizes against the world's (`[[post]] scale`).
 pub const POST_SCALES: [f32; 3] = [1.0, 0.5, 0.25];
 /// Pack targets (`[[post]] output`) a pack may write.
-pub const MAX_POST_TARGETS: usize = 15;
+pub const MAX_POST_TARGETS: usize = 16;
 
 /// An option the player can change: a WGSL `override` constant of the
 /// same name, set when the pipelines are built.
