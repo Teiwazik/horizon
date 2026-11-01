@@ -192,6 +192,29 @@ fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool 
 fn ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     return horizon_ray_tint(origin, direction, distance);
 }
+// The light sources that may reach `position`, for a pack choosing among them itself.
+fn ray_light_count(position: vec3<f32>) -> u32 {
+    return horizon_ray_light_count(position);
+}
+// One of them, `index` below `ray_light_count`. An id holds for this frame alone.
+fn ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    return horizon_ray_light_id(position, index);
+}
+// How strongly the source would light a surface facing `normal` at `position`, seen or not.
+fn ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return horizon_ray_light_strength(id, position, normal);
+}
+fn ray_light_color(id: u32) -> vec3<f32> {
+    return horizon_ray_light_color(id);
+}
+// Where the source's block is, camera-relative: what names it from one frame to the next.
+fn ray_light_position(id: u32) -> vec3<f32> {
+    return horizon_ray_light_position(id);
+}
+// The light left of the source at `position` after one ray: glass tints it, water bends it.
+fn ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    return horizon_ray_light_seen(id, position, normal, salt);
+}
 var<private> horizon_ray_pixel: vec2<f32>;
 // The direct light of the block and dynamic lights at `position`, on a surface facing `normal`,
 // with two shadow rays at most: for what a ray met.
@@ -286,6 +309,24 @@ fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) 
 fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     return vec3<f32>(1.0);
 }
+fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return 0.0;
+}
+fn horizon_ray_light_color(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_position(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
 }
@@ -306,6 +347,24 @@ fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) 
 }
 fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     return vec3<f32>(1.0);
+}
+fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return 0.0;
+}
+fn horizon_ray_light_color(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_position(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
@@ -519,6 +578,24 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 }
 fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     return vec3<f32>(1.0);
+}
+fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return 0.0;
+}
+fn horizon_ray_light_color(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_position(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);

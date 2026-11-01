@@ -344,7 +344,7 @@ impl NativeFrame {
                 },
                 count: None,
             });
-            for binding in [15, 40, 41] {
+            for binding in [15, 50, 51] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -553,11 +553,11 @@ impl NativeFrame {
                 resource: rays.data.as_entire_binding(),
             });
             entries.push(wgpu::BindGroupEntry {
-                binding: 40,
+                binding: 50,
                 resource: rays.lights.as_entire_binding(),
             });
             entries.push(wgpu::BindGroupEntry {
-                binding: 41,
+                binding: 51,
                 resource: rays.light_cells.as_entire_binding(),
             });
         }
@@ -1030,7 +1030,7 @@ impl NativePost {
                 },
                 count: None,
             });
-            for binding in [15, 40, 41] {
+            for binding in [15, 50, 51] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1336,11 +1336,11 @@ impl NativePost {
                         resource: rays.1.data.as_entire_binding(),
                     });
                     entries.push(wgpu::BindGroupEntry {
-                        binding: 40,
+                        binding: 50,
                         resource: rays.1.lights.as_entire_binding(),
                     });
                     entries.push(wgpu::BindGroupEntry {
-                        binding: 41,
+                        binding: 51,
                         resource: rays.1.light_cells.as_entire_binding(),
                     });
                 }

@@ -351,8 +351,8 @@ struct HorizonRayLight {
     position: vec4<f32>,
     color: vec4<f32>,
 }
-@group(3) @binding(40) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
-@group(3) @binding(41) var<storage, read> horizon_ray_light_cells: array<u32>;
+@group(3) @binding(50) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
+@group(3) @binding(51) var<storage, read> horizon_ray_light_cells: array<u32>;
 fn horizon_ray_available() -> bool {
     return true;
 }
@@ -644,6 +644,57 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return horizon_ray_lights_budget(position, normal, 4u);
 }
+// Which word of the source grid starts the list for this place, past the end if none. The cell's
+// edge is dithered, so two cells' lists blend.
+fn horizon_ray_light_cell(position: vec3<f32>) -> u32 {
+    let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 4.0;
+    let cell = vec3<i32>(floor((position + dither - horizon_ray_sources[0].position.yzw) / 8.0));
+    if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
+        return 0xffffffffu;
+    }
+    return u32((cell.z * 20 + cell.y) * 20 + cell.x) * 8u;
+}
+fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
+    let first = horizon_ray_light_cell(position);
+    if first == 0xffffffffu {
+        return 0u;
+    }
+    return min(horizon_ray_light_cells[first] & 0xffffu, 15u);
+}
+fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    let n = index + 1u;
+    let word = horizon_ray_light_cells[horizon_ray_light_cell(position) + n / 2u];
+    return (word >> ((n % 2u) * 16u)) & 0xffffu;
+}
+fn horizon_ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let source = horizon_ray_sources[id];
+    let to = source.position.xyz - position;
+    let d2 = dot(to, to);
+    let reach = source.position.w;
+    if d2 >= reach * reach {
+        return 0.0;
+    }
+    let facing = dot(normal, select(to / sqrt(max(d2, 0.0001)), normal, d2 < 0.0001));
+    if facing <= 0.0 {
+        return 0.0;
+    }
+    let edge = saturate(1.0 - pow(d2 / (reach * reach), 2.0));
+    return reach * reach / 225.0 * edge * edge / (1.0 + d2 * 0.07) * facing;
+}
+fn horizon_ray_light_color(id: u32) -> vec3<f32> {
+    return horizon_ray_sources[id].color.rgb;
+}
+fn horizon_ray_light_position(id: u32) -> vec3<f32> {
+    return horizon_ray_sources[id].position.xyz;
+}
+fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    let center = horizon_ray_sources[id].position.xyz;
+    let to = center - position;
+    let d = max(length(to), 0.0001);
+    let dir = horizon_ray_jitter(to / d, 0.5 / max(d, 0.5), salt);
+    let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
+    return horizon_ray_seen(position + normal * 0.03, dir, max(d - inside, 0.01), center, normal, salt);
+}
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     // The sources reaching this place. The cell's edge is dithered, so two cells' lists blend.
     let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 4.0;
@@ -740,6 +791,24 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
 }
 fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     return vec3<f32>(1.0);
+}
+fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
+    return 0u;
+}
+fn horizon_ray_light_strength(id: u32, position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return 0.0;
+}
+fn horizon_ray_light_color(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_position(id: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
