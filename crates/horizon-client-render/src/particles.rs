@@ -4101,6 +4101,9 @@ impl ParticleEngine {
         pitch: f32,
         partial: f32,
         light_at: &dyn Fn([i32; 3]) -> u8,
+        // All in the translucent layer: the rays take the opaque entity quads solid, and a
+        // particle would cast its whole quad.
+        all_translucent: bool,
         out: &mut Vec<Vertex>,
     ) {
         // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
@@ -4230,10 +4233,13 @@ impl ParticleEngine {
                 ] {
                     let v = center + rotation * FVec3::new(n.0, n.1, 0.0) * size;
                     out.push(Vertex {
-                        normal: [0; 4],
+                        // Up, with w 0 so that the classic pass keeps the baked colour: a shader
+                        // pack lights a particle by it, and with none it stays out of the shade.
+                        // Also how the shadow pass knows a particle, which casts nothing.
+                        normal: [0, 127, 0, 0],
                         pos: v.to_array(),
                         uv,
-                        layer: if layer {
+                        layer: if layer || all_translucent {
                             crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
                         } else {
                             0

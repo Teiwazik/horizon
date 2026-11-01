@@ -3902,6 +3902,10 @@ impl Renderer {
     pub fn section_count(&self) -> usize {
         self.sections.len()
     }
+    /// Whether the world is being ray traced this frame.
+    pub fn rays_on(&self) -> bool {
+        self.native.as_ref().is_some_and(|n| n.frame.rays.is_some())
+    }
     /// Whether one of Horizon's own packs with `[shadow]` draws, whose shadow pass takes the
     /// frame's `shadow_only` quads.
     pub fn native_shadow(&self) -> bool {

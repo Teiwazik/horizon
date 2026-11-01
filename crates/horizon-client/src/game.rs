@@ -10709,6 +10709,7 @@ impl Game<'_> {
         self.thrown_potion_geometry(camera, alpha, &mut out);
         // Particles (ParticleEngine.extract): camera-facing quads.
         self.mark_stage(out.len(), "PARTICLES");
+        let rays_on = self.renderer.as_ref().is_some_and(|r| r.rays_on());
         let world = &self.world;
         self.particles.render(
             camera,
@@ -10716,6 +10717,7 @@ impl Game<'_> {
             self.pitch,
             alpha as f32,
             &|b| world.light(b[0], b[1], b[2]),
+            rays_on,
             &mut out,
         );
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.

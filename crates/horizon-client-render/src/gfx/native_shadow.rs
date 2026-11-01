@@ -361,13 +361,15 @@ struct HorizonEntityShadowOut {
     @location(1) alpha: f32,
 }
 @vertex fn horizon_entity_shadow_vs(@location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>, @location(2) overlay: u32, @location(3) color: vec4<f32>)
-    -> HorizonEntityShadowOut {
+    @location(1) uv: vec2<f32>, @location(2) overlay: u32, @location(3) color: vec4<f32>,
+    @location(5) normal: vec4<f32>) -> HorizonEntityShadowOut {
     let clip = frame.shadow_view_proj * vec4(position, 1.0);
     let k = frame.shadow_distortion;
     let xy = clip.xy / (length(clip.xy) * k + 1.0 - k);
+    // A particle (particles.rs's normal): a quad turned to the camera has no shape to cast.
+    let particle = normal.w == 0.0 && normal.y > 0.99;
     let unlit = (overlay >= 2u && overlay <= 4u) || overlay == 6u
-        || (overlay >= 9u && overlay <= 12u);
+        || (overlay >= 9u && overlay <= 12u) || particle;
     var out: HorizonEntityShadowOut;
     // Unlit geometry lands outside the clip volume.
     out.clip = select(vec4(xy, clamp(clip.z, 0.0, 1.0), 1.0), vec4(2.0, 2.0, 2.0, 1.0), unlit);
@@ -495,7 +497,7 @@ fn entity_pipeline(
         ..Default::default()
     });
     let attributes =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint32, 3 => Unorm8x4];
+        wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Unorm8x4,4=>Uint8x4,5=>Snorm8x4,6=>Float32x2];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Native shader pack entity shadow"),
         layout: Some(&layout),
