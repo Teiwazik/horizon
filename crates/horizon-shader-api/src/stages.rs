@@ -187,6 +187,11 @@ fn ray_tracing() -> bool {
 fn ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return horizon_ray_occluded(origin, direction, distance);
 }
+// The colour that stained glass and other translucent terrain leave of light along the ray, 1
+// through air and water. Solid terrain doesn't stop it: end it where `ray_hit` did.
+fn ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    return horizon_ray_tint(origin, direction, distance);
+}
 var<private> horizon_ray_pixel: vec2<f32>;
 // The direct light of the block and dynamic lights at `position`, on a surface facing `normal`,
 // with two shadow rays at most: for what a ray met.
@@ -278,6 +283,9 @@ fn horizon_ray_albedo_at(texel: vec2<i32>) -> vec4<f32> {
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;
 }
+fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
 }
@@ -295,6 +303,9 @@ fn horizon_ray_albedo_at(texel: vec2<i32>) -> vec4<f32> {
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return false;
+}
+fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
@@ -505,6 +516,9 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);

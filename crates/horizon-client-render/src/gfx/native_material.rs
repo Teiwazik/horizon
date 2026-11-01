@@ -385,6 +385,13 @@ fn horizon_ray_uv_word(word: u32) -> vec2<f32> {
 }
 // Whether water lets the ray through untinted, its absorption being accounted for by length.
 var<private> horizon_ray_clear_water = false;
+// What a pane of translucent terrain leaves of light: a filter passes its own colour whole and
+// holds back the rest. All the light crosses the pane, so half a texture alpha filters it whole.
+fn horizon_ray_pane(texel: vec4<f32>, tint: vec3<f32>) -> vec3<f32> {
+    let color = texel.rgb * tint;
+    let filter_color = color / max(max(color.r, max(color.g, color.b)), 0.001);
+    return mix(vec3<f32>(1.0), filter_color * filter_color, saturate(texel.a * 2.0));
+}
 // The light left of 1 after the ray: 0 past anything solid, tinted by translucent terrain.
 fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     var query: ray_query;
@@ -400,10 +407,13 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
         var tint = vec3<f32>(1.0);
         let texel = horizon_ray_texel(hit, &tint);
         if (hit.instance_custom_data & 0x800000u) != 0u {
-            if horizon_ray_clear_water && horizon_ray_is_water(hit) {
+            if horizon_ray_is_water(hit) {
+                if !horizon_ray_clear_water {
+                    light *= mix(vec3<f32>(1.0), texel.rgb * tint, texel.a);
+                }
                 continue;
             }
-            light *= mix(vec3<f32>(1.0), texel.rgb * tint, texel.a);
+            light *= horizon_ray_pane(texel, tint);
         } else if texel.a >= 0.5 {
             rayQueryConfirmIntersection(&query);
         }
@@ -421,6 +431,25 @@ fn horizon_ray_is_water(hit: RayIntersection) -> bool {
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
     let high = horizon_ray_vertices[first * 6u + 5u] >> 28u;
     return high >= 8u && (high & 7u) < 6u;
+}
+fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    var query: ray_query;
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x00u, 0x02u, 0.0, distance, origin, direction));
+    var light = vec3<f32>(1.0);
+    var steps = 0u;
+    while rayQueryProceed(&query) {
+        steps += 1u;
+        if steps > 16u {
+            break;
+        }
+        let hit = rayQueryGetCandidateIntersection(&query);
+        if (hit.instance_custom_data & 0x800000u) != 0u && !horizon_ray_is_water(hit) {
+            var tint = vec3<f32>(1.0);
+            let texel = horizon_ray_texel(hit, &tint);
+            light *= horizon_ray_pane(texel, tint);
+        }
+    }
+    return light;
 }
 // The height of the highest water the ray crosses, -1e9 if none. It asks for translucent terrain
 // alone: a ray stopping at solid blocks may end before it has been shown the water in front.
@@ -708,6 +737,9 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 }
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_tint(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
