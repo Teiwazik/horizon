@@ -6139,8 +6139,8 @@ impl Renderer {
             });
             rt.update(&self.device, &mut encoder, list, entities, &self.indices);
         }
-        if let Some(native) = self.native.as_ref().filter(|_| !frame.title)
-            && let Some(rt) = &native.frame.rays
+        if let Some(native) = self.native.as_mut().filter(|_| !frame.title)
+            && let Some(rt) = &mut native.frame.rays
         {
             rt.update_lights(
                 &self.queue,

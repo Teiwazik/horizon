@@ -336,7 +336,7 @@ impl NativeFrame {
                 },
                 count: None,
             });
-            for binding in [15, 40] {
+            for binding in [15, 40, 41] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -543,6 +543,10 @@ impl NativeFrame {
             entries.push(wgpu::BindGroupEntry {
                 binding: 40,
                 resource: rays.lights.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 41,
+                resource: rays.light_cells.as_entire_binding(),
             });
         }
         entries.extend(pack_texture_group_entries(textures));
@@ -991,7 +995,7 @@ impl NativePost {
                 },
                 count: None,
             });
-            for binding in [15, 40] {
+            for binding in [15, 40, 41] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1295,6 +1299,10 @@ impl NativePost {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 40,
                         resource: rays.1.lights.as_entire_binding(),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 41,
+                        resource: rays.1.light_cells.as_entire_binding(),
                     });
                 }
                 // The pack's targets, a blank one in place of the one this pass writes.

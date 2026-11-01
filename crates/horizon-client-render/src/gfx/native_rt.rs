@@ -19,7 +19,12 @@ const MAX_INSTANCES: usize = 8192;
 /// Terrain vertices the shader can read (24 bytes each).
 const DATA_VERTICES: u64 = (192 << 20) / 24;
 /// Light sources the shader loops over: the strongest here.
-pub const MAX_LIGHTS: usize = 48;
+pub const MAX_LIGHTS: usize = 2048;
+/// The grid of which sources reach where: cells along a side, a cell's blocks, and a cell's
+/// words: 16 bits of count, then up to 15 sources by 16 bits each, strongest first.
+const LIGHT_GRID: u32 = 20;
+const LIGHT_CELL: f32 = 8.0;
+const LIGHT_CELL_WORDS: usize = 8;
 /// `instance_custom_data` of translucent terrain.
 const TRANSLUCENT: u32 = 1 << 23;
 /// `instance_custom_data` of the entities, whose vertices aren't in the scene's buffer: the
@@ -82,6 +87,9 @@ pub struct RayScene {
     pub data: wgpu::Buffer,
     /// `lights[0].position.x` the count, the lights after it.
     pub lights: wgpu::Buffer,
+    /// Each grid cell's list of `lights`.
+    pub light_cells: wgpu::Buffer,
+    light_grid: Vec<u32>,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Free ranges of `data`, in vertices, in order.
     free: Vec<(u64, u64)>,
@@ -141,6 +149,13 @@ impl RayScene {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            light_cells: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Ray traced light grid"),
+                size: u64::from(LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) * LIGHT_CELL_WORDS as u64 * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            light_grid: vec![0; (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize * LIGHT_CELL_WORDS],
             lights: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Ray traced lights"),
                 size: ((MAX_LIGHTS + 1) * size_of::<Light>()) as u64,
@@ -189,7 +204,7 @@ impl RayScene {
     /// This frame's light sources: the block lights in `sections` and the dynamic ones,
     /// strongest here first.
     pub fn update_lights(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         camera: DVec3,
         sections: &crate::fast_hash::FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
@@ -197,15 +212,19 @@ impl RayScene {
         dynamic: &[[f32; 4]],
         colored: &[crate::dynamic_light::Colored],
     ) {
-        let mut lights: Vec<(f32, Light)> = Vec::new();
-        let mut add = |at: [f32; 3], reach: f32, color: [f32; 3]| {
+        // Sources by how much they matter to the camera, with a stable order among equals.
+        let mut lights: Vec<(f32, [i32; 3], Light)> = Vec::new();
+        let mut add = |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3]| {
             let d2 = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
-            if reach > 0.0 && d2 < (reach + 48.0) * (reach + 48.0) {
+            if reach > 0.0 && d2 < (reach + 80.0) * (reach + 80.0) {
+                // The brightness is the level's: `[[lights]]` colours go up to 4.
+                let top = color[0].max(color[1]).max(color[2]).max(0.001);
                 lights.push((
-                    reach * reach / (d2 + 1.0),
+                    d2 - reach * reach,
+                    key,
                     Light {
                         position: [at[0], at[1], at[2], reach],
-                        color: [color[0], color[1], color[2], 1.0],
+                        color: [color[0] / top, color[1] / top, color[2] / top, 1.0],
                     },
                 ));
             }
@@ -215,23 +234,62 @@ impl RayScene {
                 let p = (DVec3::new(f64::from(at[0]), f64::from(at[1]), f64::from(at[2])) + 0.5
                     - camera)
                     .as_vec3();
-                add(p.to_array(), f32::from(*level), *color);
+                add(p.to_array(), *at, f32::from(*level), *color);
             }
         }
+        // A source that moves has no block: after every block on ties.
         for l in dynamic {
-            add([l[0], l[1], l[2]], l[3], [1.0, 0.85, 0.65]);
+            add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], [1.0, 0.85, 0.65]);
         }
         for [p, c] in colored {
-            add([p[0], p[1], p[2]], p[3], [c[0], c[1], c[2]]);
+            add([p[0], p[1], p[2]], [i32::MAX; 3], p[3], [c[0], c[1], c[2]]);
         }
-        lights.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        lights.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         lights.truncate(MAX_LIGHTS);
+        // The grid sits on the world's cells, so a list doesn't change as the camera moves
+        // within one, and a far pile of sources takes nothing from the ones here.
+        let snap = (camera / f64::from(LIGHT_CELL)).floor() * f64::from(LIGHT_CELL);
+        let half = (LIGHT_GRID / 2) as f32 * LIGHT_CELL;
+        let origin = (snap - camera).as_vec3() - half;
+        self.light_grid.fill(0);
+        let mut cells = vec![Vec::<(f32, u16)>::new(); (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize];
+        for (i, (_, _, light)) in lights.iter().enumerate() {
+            let [x, y, z, reach] = light.position;
+            let cell = |v: f32, o: f32| ((v - o) / LIGHT_CELL).floor() as i32;
+            let span = |v: f32, o: f32| {
+                cell(v - reach, o).max(0)..=cell(v + reach, o).min(LIGHT_GRID as i32 - 1)
+            };
+            for cz in span(z, origin.z) {
+                for cy in span(y, origin.y) {
+                    for cx in span(x, origin.x) {
+                        // How strong it is at the cell's middle, by the shader's falloff.
+                        let middle = |c: i32, o: f32| o + (c as f32 + 0.5) * LIGHT_CELL;
+                        let (dx, dy, dz) =
+                            (x - middle(cx, origin.x), y - middle(cy, origin.y), z - middle(cz, origin.z));
+                        let d2 = dx * dx + dy * dy + dz * dz;
+                        let n = LIGHT_GRID as i32;
+                        cells[((cz * n + cy) * n + cx) as usize]
+                            .push((reach * reach / (1.0 + d2 * 0.12), i as u16 + 1));
+                    }
+                }
+            }
+        }
+        for (i, cell) in cells.iter_mut().enumerate() {
+            cell.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let words = &mut self.light_grid[i * LIGHT_CELL_WORDS..(i + 1) * LIGHT_CELL_WORDS];
+            let count = cell.len().min(LIGHT_CELL_WORDS * 2 - 1);
+            words[0] = count as u32;
+            for (j, (_, id)) in cell.iter().take(count).enumerate() {
+                words[(j + 1) / 2] |= u32::from(*id) << (((j + 1) % 2) * 16);
+            }
+        }
         let mut out = vec![Light {
-            position: [lights.len() as f32, 0.0, 0.0, 0.0],
+            position: [lights.len() as f32, origin.x, origin.y, origin.z],
             color: [0.0; 4],
         }];
-        out.extend(lights.into_iter().map(|l| l.1));
+        out.extend(lights.into_iter().map(|l| l.2));
         queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&out));
+        queue.write_buffer(&self.light_cells, 0, bytemuck::cast_slice(&self.light_grid));
     }
 
     /// This frame's top-level structure over `sections` and `entities`, building sections'
@@ -249,6 +307,16 @@ impl RayScene {
         sections.sort_by(|a, b| near(a.origin).total_cmp(&near(b.origin)));
         let mut seen = crate::fast_hash::FxHashMap::default();
         sections.retain(|s| seen.insert(s.key, ()).is_none());
+        // What left the rays' reach gives its room back.
+        let gone: Vec<SectionKey> = self
+            .built
+            .keys()
+            .filter(|key| !seen.contains_key(*key))
+            .copied()
+            .collect();
+        for key in gone {
+            self.forget(key);
+        }
         // Sections' structures, and what they are built from.
         struct New {
             section: usize,
@@ -263,7 +331,22 @@ impl RayScene {
                 continue;
             }
             let count = u64::from(s.solid + s.translucent) * 4;
-            let Some(data) = self.alloc(count) else {
+            // Full: the farthest sections give way to a nearer one.
+            let data = loop {
+                if let Some(data) = self.alloc(count) {
+                    break Some(data);
+                }
+                let farther = sections[i + 1..]
+                    .iter()
+                    .rev()
+                    .find(|o| self.built.contains_key(&o.key))
+                    .map(|o| o.key);
+                match farther {
+                    Some(key) => self.forget(key),
+                    None => break None,
+                }
+            };
+            let Some(data) = data else {
                 continue;
             };
             encoder.copy_buffer_to_buffer(

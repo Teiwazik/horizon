@@ -102,9 +102,9 @@ impl Game<'_> {
                     if state.emission == 0 {
                         continue;
                     }
-                    if let Some(color) = report.manifest.light_of(&state.name) {
-                        lights.insert(id as u32, (color, state.emission));
-                    }
+                    // A source the pack gives no colour still lights: warm, as block light is.
+                    let color = report.manifest.light_of(&state.name).unwrap_or([1.0, 0.75, 0.5]);
+                    lights.insert(id as u32, (color, state.emission));
                 }
             }
             // `[[materials]] translucent`: the layers of those ids, for the mesher.

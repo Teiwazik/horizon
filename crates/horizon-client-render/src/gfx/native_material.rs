@@ -345,6 +345,7 @@ struct HorizonRayLight {
     color: vec4<f32>,
 }
 @group(3) @binding(40) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
+@group(3) @binding(41) var<storage, read> horizon_ray_light_cells: array<u32>;
 fn horizon_ray_available() -> bool {
     return true;
 }
@@ -471,12 +472,21 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
     return horizon_ray_trace(origin, horizon_ray_jitter(direction, radius, 0.0), distance);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let count = u32(horizon_ray_sources[0].position.x);
-    var sum = vec3<f32>(0.0);
-    // Rays get fewer with distance: the nearest lights are soft, the rest take one and stop.
+    // The sources reaching this place, strongest first.
+    let cell = vec3<i32>(floor((position - horizon_ray_sources[0].position.yzw) / 8.0));
+    if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
+        return vec3<f32>(0.0);
+    }
+    let first = u32((cell.z * 20 + cell.y) * 20 + cell.x) * 8u;
+    let count = horizon_ray_light_cells[first] & 0xffffu;
+    var traced = vec3<f32>(0.0);
+    var untraced = vec3<f32>(0.0);
+    var seen_part = 0.0;
+    var whole_part = 0.0;
     var rays = 0u;
-    for (var i = 1u; i <= count; i++) {
-        let source = horizon_ray_sources[i];
+    for (var n = 1u; n <= count; n++) {
+        let word = horizon_ray_light_cells[first + n / 2u];
+        let source = horizon_ray_sources[(word >> ((n % 2u) * 16u)) & 0xffffu];
         let to = source.position.xyz - position;
         let d2 = dot(to, to);
         let reach = source.position.w;
@@ -496,17 +506,22 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         if strength < 0.002 {
             continue;
         }
-        var seen = vec3<f32>(1.0);
-        if rays < 12u {
+        if rays < 8u {
             rays += 1u;
             // The source is a small sphere: its near edge is what the ray must reach.
-            let dir = horizon_ray_jitter(toward, 0.3 / max(d, 0.5), f32(i));
-            seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - 0.55, 0.01));
+            let dir = horizon_ray_jitter(toward, 0.3 / max(d, 0.5), f32(n));
+            let seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - 0.55, 0.01));
+            traced += source.color.rgb * seen * strength;
+            seen_part += max(seen.r, max(seen.g, seen.b)) * strength;
+            whole_part += strength;
+        } else {
+            untraced += source.color.rgb * strength;
         }
-        // Light adds in linear space, colour by colour.
-        sum += source.color.rgb * seen * strength;
     }
-    return sum;
+    // Past the budget a source is seen about as much as the strongest ones here were, and
+    // however many pile up the light saturates rather than climbing.
+    let sum = traced + untraced * seen_part / max(whole_part, 0.0001);
+    return sum / (1.0 + max(sum.r, max(sum.g, sum.b)) * 0.5);
 }
 ";
 const NO_RAYS: &str = "
