@@ -634,7 +634,11 @@ fn horizon_ray_jitter(direction: vec3<f32>, radius: f32, salt: f32) -> vec3<f32>
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(direction.y) > 0.9);
     let x = normalize(cross(up, direction));
     let y = cross(direction, x);
-    let angle = horizon_ray_noise(salt) * 6.2831853;
+    // The angle evenly spread between neighbouring pixels, for a filter to average in few
+    // pixels; the radius apart from it, or the directions lie along a curve.
+    let moved = horizon_ray_pixel + 5.588238 * f32(frame.frame_index % 64u);
+    let even = fract(52.9829189 * fract(dot(moved, vec2<f32>(0.06711056, 0.00583715))) + salt * 0.61803399);
+    let angle = even * 6.2831853;
     let r = sqrt(horizon_ray_noise(salt + 17.0)) * radius;
     return normalize(direction + (x * cos(angle) + y * sin(angle)) * r);
 }
@@ -644,11 +648,10 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return horizon_ray_lights_budget(position, normal, 4u);
 }
-// Which word of the source grid starts the list for this place, past the end if none. The cell's
-// edge is dithered, so two cells' lists blend.
+// Which word of the source grid starts the list for this place, past the end if none. Not
+// dithered: a pack looking up a source it kept must find it, from every pixel of the place.
 fn horizon_ray_light_cell(position: vec3<f32>) -> u32 {
-    let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 4.0;
-    let cell = vec3<i32>(floor((position + dither - horizon_ray_sources[0].position.yzw) / 8.0));
+    let cell = vec3<i32>(floor((position - horizon_ray_sources[0].position.yzw) / 8.0));
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
         return 0xffffffffu;
     }
