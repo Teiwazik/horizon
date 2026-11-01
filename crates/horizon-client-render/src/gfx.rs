@@ -553,6 +553,8 @@ pub struct Frame<'a> {
     pub weather_time: crate::weather::Time,
     /// Horizon Extras' dynamic lights, nearest first (`dynamic_light::select`); empty when off.
     pub dynamic_lights: &'a [[f32; 4]],
+    /// What each of `dynamic_lights` shines as, for its colour in the rays.
+    pub dynamic_states: &'a [Option<u32>],
     pub colored_lights: &'a [crate::dynamic_light::Colored],
     pub emissive_layers: &'a [[u32; 4]],
     /// Cloud mesh inputs; geometry and GPU storage are retained by the renderer.
@@ -6507,6 +6509,7 @@ impl Renderer {
                 &self.light_blocks,
                 native.frame.block_light.table(),
                 frame.dynamic_lights,
+                frame.dynamic_states,
                 frame.colored_lights,
             );
         }

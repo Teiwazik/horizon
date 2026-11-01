@@ -210,6 +210,7 @@ impl RayScene {
         sections: &crate::fast_hash::FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
         table: &LightTable,
         dynamic: &[[f32; 4]],
+        dynamic_states: &[Option<u32>],
         colored: &[crate::dynamic_light::Colored],
     ) {
         // Sources by how much they matter to the camera, with a stable order among equals.
@@ -238,8 +239,15 @@ impl RayScene {
             }
         }
         // A source that moves has no block: after every block on ties.
-        for l in dynamic {
-            add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], [1.0, 0.85, 0.65]);
+        for (i, l) in dynamic.iter().enumerate() {
+            // The colour of the block it shines as, by the pack's `[[lights]]`.
+            let color = dynamic_states
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|state| table.get(&state))
+                .map_or([1.0, 0.85, 0.65], |(color, _)| *color);
+            add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], color);
         }
         for [p, c] in colored {
             add([p[0], p[1], p[2]], [i32::MAX; 3], p[3], [c[0], c[1], c[2]]);

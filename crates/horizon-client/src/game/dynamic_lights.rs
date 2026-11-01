@@ -10,6 +10,7 @@ impl Game<'_> {
     pub(super) fn gather_dynamic_lights(&mut self, camera: DVec3, alpha: f64) {
         let mut out = std::mem::take(&mut self.dynamic_lights);
         out.clear();
+        self.dynamic_states.clear();
         if !self.settings.extras.dynamic_lights {
             self.dynamic_lights = out;
             return;
@@ -18,7 +19,16 @@ impl Game<'_> {
             self.luminance = Some(Luminance::new(self.res.facts(), self.pack.assets.registry));
         }
         let lum = self.luminance.as_ref().expect("built above");
-        let held = |item: Option<&str>| item.map_or(0, |i| lum.of(i));
+        let held = |item: Option<&str>| item.map_or((0, None), |i| (lum.of(i), lum.state_of(i)));
+        // The brighter of two hands, with what it holds; fire if nothing held outshines it.
+        let brighter = |a: (u8, Option<u32>), b: (u8, Option<u32>), on_fire: bool| {
+            let top = if b.0 > a.0 { b } else { a };
+            if on_fire && BURNING > top.0 {
+                (BURNING, None)
+            } else {
+                top
+            }
+        };
         let mut sources = Vec::new();
         if let Some(p) = &self.player
             && !p.spectator
@@ -26,19 +36,24 @@ impl Game<'_> {
             let feet = self
                 .previous_position
                 .lerp(p.position, self.clock.camera_fraction());
-            let level = held(self.stack_in(self.selected).map(|s| &*s.item))
-                .max(held(self.stack_in(shield::OFFHAND_SLOT).map(|s| &*s.item)))
-                .max(if p.fire_ticks > 0 { BURNING } else { 0 });
+            let (level, state) = brighter(
+                held(self.stack_in(self.selected).map(|s| &*s.item)),
+                held(self.stack_in(shield::OFFHAND_SLOT).map(|s| &*s.item)),
+                p.fire_ticks > 0,
+            );
             // About where the hands are.
             sources.push(Source {
                 at: DVec3::new(feet.x, feet.y + 1.2, feet.z),
                 level,
+                state,
             });
         }
         for m in self.mobs.iter().filter(|m| !m.removed) {
-            let level = held(m.extra.main_hand.as_deref())
-                .max(held(m.extra.off_hand.as_deref()))
-                .max(if m.fire_ticks > 0 { BURNING } else { 0 });
+            let (level, state) = brighter(
+                held(m.extra.main_hand.as_deref()),
+                held(m.extra.off_hand.as_deref()),
+                m.fire_ticks > 0,
+            );
             if level == 0 {
                 continue;
             }
@@ -46,12 +61,15 @@ impl Game<'_> {
             sources.push(Source {
                 at: DVec3::new(at.x, at.y + f64::from(m.height()) * 0.6, at.z),
                 level,
+                state,
             });
         }
         for item in &self.dropped {
-            let level = lum
-                .of(&item.stack.item)
-                .max(if item.fire_ticks > 0 { BURNING } else { 0 });
+            let (level, state) = brighter(
+                held(Some(&*item.stack.item)),
+                (0, None),
+                item.fire_ticks > 0,
+            );
             if level == 0 {
                 continue;
             }
@@ -59,9 +77,12 @@ impl Game<'_> {
             sources.push(Source {
                 at: DVec3::new(at.x, at.y + 0.25, at.z),
                 level,
+                state,
             });
         }
-        dynamic_light::select(&sources, camera, &mut out);
+        let mut states = std::mem::take(&mut self.dynamic_states);
+        dynamic_light::select(&sources, camera, &mut out, &mut states);
+        self.dynamic_states = states;
         self.dynamic_lights = out;
     }
 }

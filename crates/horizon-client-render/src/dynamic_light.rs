@@ -51,24 +51,31 @@ const REACH: f64 = 96.0;
 
 /// How brightly each item glows when held or dropped.
 #[derive(Debug, Default)]
-pub struct Luminance(HashMap<String, u8>);
+pub struct Luminance(HashMap<String, u8>, HashMap<String, u32>);
 
 impl Luminance {
     /// A block item glows like its block's default state (`getLightEmission`): torches 14,
     /// lanterns and glowstone 15, a lit redstone torch 7; a furnace's item, unlit, not at all.
     pub fn new(facts: &BlockFacts, registry: &BlockRegistry) -> Self {
         let mut map = HashMap::new();
+        let mut states = HashMap::new();
         for (id, state) in facts.states.iter().enumerate() {
             if state.emission == 0 || *state.item != *state.name {
                 continue;
             }
             if registry.default_state(&state.name).map(|d| d.0 as usize) == Some(id) {
                 map.insert(state.item.to_string(), state.emission);
+                states.insert(state.item.to_string(), id as u32);
             }
         }
         // A bucket of lava glows as lava does.
         map.insert("minecraft:lava_bucket".into(), 15);
-        Self(map)
+        Self(map, states)
+    }
+
+    /// The block state an item shines as, whose colour a shader pack's `[[lights]]` give.
+    pub fn state_of(&self, item: &str) -> Option<u32> {
+        self.1.get(item).copied()
     }
 
     pub fn of(&self, item: &str) -> u8 {
@@ -77,7 +84,10 @@ impl Luminance {
 
     #[cfg(test)]
     fn from_pairs(pairs: &[(&str, u8)]) -> Self {
-        Self(pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+        Self(
+            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            HashMap::new(),
+        )
     }
 }
 
@@ -86,18 +96,27 @@ impl Luminance {
 pub struct Source {
     pub at: DVec3,
     pub level: u8,
+    /// The block state it shines as, for its colour; `None` for fire and the like.
+    pub state: Option<u32>,
 }
 
 /// The [`MAX`] sources nearest `camera` within reach, as the shaders read them: camera-relative
-/// position and level. Overwrites `out`.
-pub fn select(sources: &[Source], camera: DVec3, out: &mut Vec<[f32; 4]>) {
+/// position and level, and in `states` what each shines as. Overwrites both.
+pub fn select(
+    sources: &[Source],
+    camera: DVec3,
+    out: &mut Vec<[f32; 4]>,
+    states: &mut Vec<Option<u32>>,
+) {
     out.clear();
+    states.clear();
     let key = |s: &Source| s.at.distance_squared(camera);
     let mut near: Vec<&Source> = sources
         .iter()
         .filter(|s| s.level > 0 && key(s) <= REACH * REACH)
         .collect();
     near.sort_by(|a, b| key(a).total_cmp(&key(b)));
+    states.extend(near.iter().take(MAX).map(|s| s.state));
     out.extend(near.into_iter().take(MAX).map(|s| {
         let p = (s.at - camera).as_vec3();
         [p.x, p.y, p.z, f32::from(s.level.min(15))]
@@ -136,22 +155,27 @@ mod tests {
             .map(|i| Source {
                 at: camera + DVec3::new(f64::from(i), 0.0, 0.0),
                 level: 14,
+                state: Some(i as u32),
             })
             .collect();
         sources.push(Source {
             at: camera + DVec3::new(0.5, 0.0, 0.0),
             level: 0,
+            state: None,
         });
         sources.push(Source {
             at: camera + DVec3::new(0.0, 0.0, 200.0),
             level: 15,
+            state: None,
         });
         let mut out = Vec::new();
-        select(&sources, camera, &mut out);
+        let mut states = Vec::new();
+        select(&sources, camera, &mut out, &mut states);
         assert_eq!(out.len(), MAX);
+        assert_eq!(states[1], Some(1));
         assert_eq!(out[0], [0.0, 0.0, 0.0, 14.0]);
         assert_eq!(out[MAX - 1][0], (MAX - 1) as f32);
-        select(&[], camera, &mut out);
+        select(&[], camera, &mut out, &mut states);
         assert!(out.is_empty());
     }
 

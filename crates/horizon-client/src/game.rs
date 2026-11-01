@@ -2259,6 +2259,7 @@ struct Game<'a> {
     /// Horizon Extras' dynamic lights this frame (`dynamic_lights.rs`), and how brightly each
     /// item glows (built the first time the extra is on).
     dynamic_lights: Vec<[f32; 4]>,
+    dynamic_states: Vec<Option<u32>>,
     luminance: Option<horizon_client::dynamic_light::Luminance>,
     /// Name tags drawn over everything (`RenderPipelines.TEXT_SEE_THROUGH`).
     see_through_vertices: Vec<Vertex>,
@@ -15091,6 +15092,7 @@ impl Game<'_> {
             entity_spans: &entity_spans,
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
+            dynamic_states: &self.dynamic_states,
             colored_lights: &colored_lights,
             emissive_layers: &emissive_layers,
             lightning: horizon_client::gfx::lightning::Input {
@@ -17619,6 +17621,7 @@ impl<'a> Game<'a> {
             renderer: None,
             entity_vertices: Vec::new(),
             dynamic_lights: Vec::new(),
+            dynamic_states: Vec::new(),
             luminance: None,
             see_through_vertices: Vec::new(),
             shadow_only_vertices: Default::default(),
@@ -19204,6 +19207,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         entity_spans: &[],
         glowing: &[],
         dynamic_lights: &[],
+        dynamic_states: &[],
         colored_lights: &[],
         emissive_layers: &[],
         clouds: None,
