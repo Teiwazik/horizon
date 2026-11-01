@@ -4215,6 +4215,11 @@ impl ParticleEngine {
                 u32::from(packed & 15) * 16,
             );
             let light = sky_light | block_light << 8;
+            // The rain's splashes under a pack that paints its rain pale: the texture's saturated
+            // blue, multiplied away, would otherwise stand out as bright blue dots.
+            let rain_drop = all_translucent && matches!(p.ty, ParticleType::Rain | ParticleType::Splash);
+            let rgb = if rain_drop { [rgb[0], rgb[1], rgb[2] * 0.45] } else { rgb };
+            let alpha = if rain_drop { alpha * 0.6 } else { alpha };
             let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
             let color = c(alpha) << 24 | c(rgb[2]) << 16 | c(rgb[1]) << 8 | c(rgb[0]);
             let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
