@@ -383,6 +383,8 @@ fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> ve
 fn horizon_ray_uv_word(word: u32) -> vec2<f32> {
     return vec2<f32>(f32(word & 0xffffu), f32(word >> 16u)) / 32768.0;
 }
+// Whether water lets the ray through untinted, its absorption being accounted for by length.
+var<private> horizon_ray_clear_water = false;
 // The light left of 1 after the ray: 0 past anything solid, tinted by translucent terrain.
 fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     var query: ray_query;
@@ -398,6 +400,9 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
         var tint = vec3<f32>(1.0);
         let texel = horizon_ray_texel(hit, &tint);
         if (hit.instance_custom_data & 0x800000u) != 0u {
+            if horizon_ray_clear_water && horizon_ray_is_water(hit) {
+                continue;
+            }
             light *= mix(vec3<f32>(1.0), texel.rgb * tint, texel.a);
         } else if texel.a >= 0.5 {
             rayQueryConfirmIntersection(&query);
@@ -407,6 +412,130 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
         return vec3<f32>(0.0);
     }
     return light;
+}
+// A translucent quad the mesher marked as a fluid's (`fluid_face`).
+fn horizon_ray_is_water(hit: RayIntersection) -> bool {
+    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+        return false;
+    }
+    let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
+    let high = horizon_ray_vertices[first * 6u + 5u] >> 28u;
+    return high >= 8u && (high & 7u) < 6u;
+}
+// The height of the highest water the ray crosses, -1e9 if none. It asks for translucent terrain
+// alone: a ray stopping at solid blocks may end before it has been shown the water in front.
+fn horizon_ray_water_surface(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
+    var query: ray_query;
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x00u, 0x02u, 0.0, distance, origin, direction));
+    var surface = -1e9;
+    var steps = 0u;
+    while rayQueryProceed(&query) {
+        steps += 1u;
+        if steps > 16u {
+            break;
+        }
+        let hit = rayQueryGetCandidateIntersection(&query);
+        if (hit.instance_custom_data & 0x800000u) != 0u && horizon_ray_is_water(hit) {
+            surface = max(surface, origin.y + direction.y * hit.t);
+        }
+    }
+    return surface;
+}
+// The water's surface at a world place: its slope and curvature, from a few travelling waves.
+struct HorizonWave {
+    slope: vec2<f32>,
+    xx: f32,
+    zz: f32,
+    xz: f32,
+}
+fn horizon_ray_wave(world: vec2<f32>) -> HorizonWave {
+    const WAVES = array<vec4<f32>, 5>(
+        vec4<f32>(3.1, 1.3, 0.030, 0.9), vec4<f32>(-1.7, 3.3, 0.026, 1.1),
+        vec4<f32>(4.3, -2.1, 0.016, 1.4), vec4<f32>(-3.7, -4.1, 0.012, 1.7),
+        vec4<f32>(1.1, 5.3, 0.012, 1.9));
+    var out = HorizonWave(vec2<f32>(0.0), 0.0, 0.0, 0.0);
+    for (var i = 0; i < 5; i++) {
+        let w = WAVES[i];
+        let phase = dot(w.xy, world) + w.w * frame.time;
+        out.slope += w.xy * w.z * cos(phase);
+        let bend = -w.z * sin(phase);
+        out.xx += w.x * w.x * bend;
+        out.zz += w.y * w.y * bend;
+        out.xz += w.x * w.y * bend;
+    }
+    return out;
+}
+// The light of a source reaching `origin` along `direction`, bending where it crosses water:
+// Snell's law for the path over the flat surface, Fresnel's for what crosses it (nothing beyond
+// the critical angle), absorption along the way in water, and the waves gathering the light
+// into caustics: how much a patch of the receiver's surface is squeezed is how much brighter.
+fn horizon_ray_seen(origin: vec3<f32>, direction: vec3<f32>, distance: f32, source_at: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
+    // A point of the block, not its middle: a source that size gives soft edges past the water too.
+    let target_at = source_at + (vec3<f32>(horizon_ray_noise(83.0 + salt), horizon_ray_noise(89.0 + salt), horizon_ray_noise(97.0 + salt)) - 0.5) * 0.9;
+    let surface_y = horizon_ray_water_surface(origin, direction, distance);
+    if surface_y < -1e8 || (origin.y - surface_y) * (target_at.y - surface_y) >= 0.0 {
+        return horizon_ray_trace(origin, direction, distance);
+    }
+    let above = origin.y > surface_y;
+    let near_h = abs(origin.y - surface_y);
+    let far_h = abs(target_at.y - surface_y);
+    let near_n = select(1.33, 1.0, above);
+    let far_n = select(1.0, 1.33, above);
+    let across = target_at.xz - origin.xz;
+    let span = length(across);
+    let side = across / max(span, 0.0001);
+    var low = 0.0;
+    var high = span;
+    for (var i = 0; i < 10; i++) {
+        let x = (low + high) * 0.5;
+        let near_sin = x / max(length(vec2<f32>(x, near_h)), 0.0001);
+        let far_sin = (span - x) / max(length(vec2<f32>(span - x, far_h)), 0.0001);
+        if near_n * near_sin > far_n * far_sin {
+            high = x;
+        } else {
+            low = x;
+        }
+    }
+    // Where on the waves the light that lands here crossed, and how it was gathered.
+    let flat_at = origin.xz + side * (low + high) * 0.5;
+    let shift = near_h * select(0.25, 0.33, above);
+    var at = flat_at;
+    for (var i = 0; i < 3; i++) {
+        at = flat_at - shift * horizon_ray_wave(at + frame.camera_position.xz).slope;
+    }
+    let wave = horizon_ray_wave(at + frame.camera_position.xz);
+    let squeeze = (1.0 + shift * wave.xx) * (1.0 + shift * wave.zz) - shift * shift * wave.xz * wave.xz;
+    let caustic = min(1.0 / max(abs(squeeze), 0.15), 6.0);
+
+    let crossing = vec3<f32>(at.x, surface_y, at.y);
+    let near_leg = crossing - origin;
+    let near_length = max(length(near_leg), 0.0001);
+    let far_leg = target_at - crossing;
+    let far_length = max(length(far_leg), 0.0001);
+    let far_dir = far_leg / far_length;
+    // Up to where the ray enters the source's block.
+    let safe = select(far_dir, vec3<f32>(0.001), abs(far_dir) < vec3<f32>(0.001));
+    let box_a = (source_at - 0.52 - crossing) / safe;
+    let box_b = (source_at + 0.52 - crossing) / safe;
+    let box_near = min(box_a, box_b);
+    let enters = max(box_near.x, max(box_near.y, box_near.z));
+    horizon_ray_clear_water = true;
+    let seen_near = horizon_ray_trace(origin, near_leg / near_length, max(near_length - 0.001, 0.001));
+    let seen_far = horizon_ray_trace(crossing, far_dir, max(min(enters, far_length), 0.001));
+    horizon_ray_clear_water = false;
+
+    let near_cos = near_h / near_length;
+    let far_cos = far_h / far_length;
+    let water_cos = select(near_cos, far_cos, above);
+    let air_cos = select(far_cos, near_cos, above);
+    let s = (1.33 * water_cos - air_cos) / (1.33 * water_cos + air_cos);
+    let r = (1.33 * air_cos - water_cos) / (1.33 * air_cos + water_cos);
+    let through = 1.0 - 0.5 * (s * s + r * r);
+    let water_length = select(near_length, far_length, above);
+    let absorbed = exp(-vec3<f32>(0.35, 0.07, 0.03) * water_length);
+    // The surface is lit from where the light now comes from.
+    let turned = min(max(dot(normal, near_leg / near_length), 0.0) / max(dot(normal, direction), 0.05), 3.0);
+    return seen_near * seen_far * through * absorbed * caustic * turned;
 }
 fn horizon_ray_position(word: u32) -> vec3<f32> {
     return vec3<f32>(bitcast<f32>(horizon_ray_vertices[word]),
@@ -484,7 +613,7 @@ fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, rad
     return horizon_ray_trace(origin, horizon_ray_jitter(direction, radius, 0.0), distance);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    return horizon_ray_lights_budget(position, normal, 8u);
+    return horizon_ray_lights_budget(position, normal, 4u);
 }
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     // The sources reaching this place. The cell's edge is dithered, so two cells' lists blend.
@@ -557,7 +686,7 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
         // The ray ends where it would enter the source's block: a full block doesn't stand in
         // the way of its own light.
         let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
-        let seen = horizon_ray_trace(position + normal * 0.03, dir, max(d - inside, 0.01));
+        let seen = horizon_ray_seen(position + normal * 0.03, dir, max(d - inside, 0.01), source.position.xyz, normal, f32(ray));
         sum += source.color.rgb * seen * strengths[pick] * weight;
     }
     // However many pile up the light saturates rather than climbing.
