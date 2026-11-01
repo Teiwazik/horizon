@@ -697,8 +697,9 @@ fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt:
     let center = horizon_ray_sources[id].position.xyz;
     let to = center - position;
     let d = max(length(to), 0.0001);
-    let dir = horizon_ray_jitter(to / d, 0.5 / max(d, 0.5), salt);
-    let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
+    let size = horizon_ray_sources[id].color.w;
+    let dir = horizon_ray_jitter(to / d, size / max(d, size), salt);
+    let inside = 1.04 * size * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
     return horizon_ray_seen(position + normal * 0.03, dir, max(d - inside, 0.01), center, normal, salt);
 }
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
@@ -768,10 +769,10 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
         }
         let source = horizon_ray_sources[ids[pick]];
         let d = towards[pick].w;
-        let dir = horizon_ray_jitter(towards[pick].xyz, 0.5 / max(d, 0.5), f32(ray));
+        let dir = horizon_ray_jitter(towards[pick].xyz, source.color.w / max(d, source.color.w), f32(ray));
         // The ray ends where it would enter the source's block: a full block doesn't stand in
         // the way of its own light.
-        let inside = 0.52 * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
+        let inside = 1.04 * source.color.w * min(min(1.0 / max(abs(dir.x), 0.001), 1.0 / max(abs(dir.y), 0.001)), 1.0 / max(abs(dir.z), 0.001));
         let seen = horizon_ray_seen(position + normal * 0.03, dir, max(d - inside, 0.01), source.position.xyz, normal, f32(ray));
         sum += source.color.rgb * seen * strengths[pick] * weight;
     }

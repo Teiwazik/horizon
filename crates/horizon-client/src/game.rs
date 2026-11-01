@@ -14789,7 +14789,7 @@ impl Game<'_> {
         // Fireflies light what's around them in the rays, moving and fading as they do. Behind the
         // list's others, which the classic shaders read first; the rays read all of them.
         if self.title.is_none() && self.renderer.as_ref().is_some_and(|r| r.rays_on()) {
-            const FIREFLY_REACH: f32 = 5.0;
+            const FIREFLY_REACH: f32 = 4.0;
             let partial = self.clock.camera_fraction() as f32;
             let mut near: Vec<[[f32; 4]; 2]> = self
                 .particles
@@ -14798,7 +14798,7 @@ impl Game<'_> {
                 .filter(|(_, fade)| *fade > 0.02)
                 .map(|(at, fade)| {
                     let p = (glam::DVec3::from(at) - camera).as_vec3();
-                    [[p.x, p.y, p.z, FIREFLY_REACH * fade], [0.72, 1.0, 0.3, 1.0]]
+                    [[p.x, p.y, p.z, FIREFLY_REACH * fade], [0.85, 1.0, 0.5, 0.0]]
                 })
                 .collect();
             near.sort_by(|a, b| {
