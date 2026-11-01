@@ -3,7 +3,9 @@ use crate::weather::{Time, Vertex};
 
 pub(super) struct Weather {
     pipeline: wgpu::RenderPipeline,
-    /// The group 1 layout (the fall clock), for a native pack's weather pipeline.
+    /// The layouts of groups 0 (the entities') and 1 (the fall clock), for a native pack's
+    /// weather pipeline.
+    pub entity_layout: wgpu::BindGroupLayout,
     pub time_layout: wgpu::BindGroupLayout,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -86,6 +88,7 @@ impl Weather {
         });
         Self {
             pipeline,
+            entity_layout: entities.clone(),
             time_layout: bindings,
             group,
             uniform,
@@ -141,8 +144,8 @@ impl Weather {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw_indexed(0..self.count / 4 * 6, 0, 0..1);
     }
-    /// Draws the streaks, through a native pack's weather stage when `native` is given
-    /// (its pipeline and the pack's frame group).
+    /// Draws the streaks, through a native pack's weather stage when `native` is given (its
+    /// pipeline and the pack's frame group).
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -164,6 +167,19 @@ impl Weather {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         // The renderer binds the shared triangle-list quad indices.
         pass.draw_indexed(0..self.count / 4 * 6, 0, 0..1);
+    }
+}
+
+
+/// RenderPipelines.WEATHER: depth-tested, but no depth write, so the water
+/// and glass drawn behind the rain still show through it.
+fn depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth32Float,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+        stencil: Default::default(),
+        bias: Default::default(),
     }
 }
 
@@ -206,6 +222,14 @@ struct HorizonWeatherOut {
 }
 ";
 
+/// The shader of a native pack's weather stage `source`.
+fn native_source(source: &str) -> String {
+    format!(
+        "{source}\n// Horizon's weather (entity.wgsl)\n{}{NATIVE_ENTRIES}",
+        super::wgsl_prefix::prefixed(&super::entity_shader(), "horizon_entity_")
+    )
+}
+
 /// A native pack's weather pipeline: its `stage` (with the option values `constants`), then
 /// entity.wgsl with every name prefixed, then the entries above. Group 0 is the entities',
 /// 1 the fall clock (`time_layout`), 3 the pack's frame.
@@ -219,11 +243,7 @@ pub(super) fn native_pipeline(
     constants: &[(String, f64)],
 ) -> Result<wgpu::RenderPipeline, String> {
     use horizon_shader_api::stages::GROUP;
-    let text = format!(
-        "{}\n// Horizon's weather (entity.wgsl)\n{}{NATIVE_ENTRIES}",
-        stage.source,
-        super::wgsl_prefix::prefixed(&super::entity_shader(), "horizon_entity_")
-    );
+    let text = native_source(&stage.source);
     let module = naga::front::wgsl::parse_str(&text)
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))?;
     let present = super::native_post::present_constants(&module, constants);
@@ -264,15 +284,7 @@ pub(super) fn native_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             ..Default::default()
         },
-        // Streaks are see-through: they neither hide what draws after them nor move the
-        // depth the pack's post passes read.
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
+        depth_stencil: Some(depth_stencil()),
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
             module: &module,
@@ -301,20 +313,26 @@ pub(super) fn native_pipeline(
     Ok(pipeline)
 }
 
-/// RenderPipelines.WEATHER: depth-tested, but no depth write, so the water
-/// and glass drawn behind the rain still show through it.
-fn depth_stencil() -> wgpu::DepthStencilState {
-    wgpu::DepthStencilState {
-        format: wgpu::TextureFormat::Depth32Float,
-        depth_write_enabled: Some(false),
-        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-        stencil: Default::default(),
-        bias: Default::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::native_source;
+
+    #[test]
+    fn a_native_weather_stage_validates() {
+        use horizon_shader_api::stages::StageKind;
+        let source = StageKind::Weather.prelude()
+            + "fn weather(input: WeatherInput) -> vec4<f32> {\n    \
+               return input.color * vec4(input.light, input.position.x, f32(input.snow));\n}\n";
+        let text = native_source(&source);
+        let module = naga::front::wgsl::parse_str(&text)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+    }
     use crate::weather::{Parameters, Time};
     use wgpu::util::DeviceExt;
 

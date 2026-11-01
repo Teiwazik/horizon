@@ -124,6 +124,15 @@ impl Game<'_> {
                 .map_err(|e| vec![e])?;
             Ok((pack.manifest, labels, translucent))
         });
+        // The resources were loaded without a native pack, so without the resource packs'
+        // LabPBR maps its material stage reads: load them once, now that one runs.
+        if result.as_ref().is_ok_and(|(m, _, _)| m.material.is_some())
+            && !horizon_client::sprites::labpbr_maps()
+        {
+            horizon_client::sprites::set_labpbr_maps(true);
+            log::info!("Horizon: reloading resources for the LabPBR maps a native pack reads");
+            self.reload_packs();
+        }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         match result {
             Ok((m, labels, translucent)) => {

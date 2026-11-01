@@ -177,7 +177,7 @@ fn build(
             }
         }
     }
-    for (cell, s) in cells.chunks_exact_mut(4).zip(&sum) {
+    for (cell, s) in cells.as_chunks_mut::<4>().0.iter_mut().zip(&sum) {
         if s[3] <= 0.0 {
             continue;
         }

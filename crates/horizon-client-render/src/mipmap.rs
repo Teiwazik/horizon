@@ -38,6 +38,21 @@ pub struct Settings {
     pub alpha_cutoff_bias: f32,
     pub has_transparent: bool,
     pub item: bool,
+    /// Whether a high-resolution cutout's small levels are dithered ([`dither_cutout_levels`]).
+    pub dither_cutouts: bool,
+}
+
+/// The `ditherCutoutMips` setting, for textures loaded from now on.
+static DITHER_CUTOUTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sets `ditherCutoutMips`; true if that changes it, when the textures must load again.
+pub fn set_dither_cutouts(on: bool) -> bool {
+    DITHER_CUTOUTS.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+
+/// The `ditherCutoutMips` setting.
+pub fn dither_cutouts() -> bool {
+    DITHER_CUTOUTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A square or rectangular RGBA8 image, rows top to bottom.
@@ -362,13 +377,13 @@ fn generate_native(mut base: Image, levels: u32, settings: Settings) -> Vec<Imag
         }
         out.push(data);
     }
-    if cutout && out[0].width >= DITHERED_CUTOUT_SIZE {
+    if settings.dither_cutouts && cutout && out[0].width >= DITHERED_CUTOUT_SIZE {
         dither_cutout_levels(&mut out);
     }
     out
 }
 
-/// From this size a cutout texture's mips are dithered ([`dither_cutout_levels`]).
+/// From this size a cutout texture's mips can be dithered ([`dither_cutout_levels`]).
 const DITHERED_CUTOUT_SIZE: u32 = 64;
 /// A high-resolution cutout's detail is finer than its small mips: grass blades a few
 /// texels wide at 2048 average to about the same alpha everywhere at 64, and no scale of
@@ -411,11 +426,48 @@ fn dither_cutout_levels(levels: &mut [Image]) {
 mod dither_tests {
     use super::*;
     #[test]
+    fn the_dither_only_runs_when_asked_for_and_from_its_size() {
+        let cutout = |side: u32| Image {
+            width: side,
+            height: side,
+            pixels: (0..side * side)
+                .map(|i| {
+                    [
+                        90,
+                        140,
+                        40,
+                        if (i % side).is_multiple_of(4) { 255 } else { 0 },
+                    ]
+                })
+                .collect(),
+        };
+        let settings = |dither_cutouts| Settings {
+            has_transparent: true,
+            dither_cutouts,
+            ..Settings::default()
+        };
+        assert_ne!(
+            generate(cutout(128), 4, settings(false)),
+            generate(cutout(128), 4, settings(true))
+        );
+        assert_eq!(
+            generate(cutout(32), 4, settings(false)),
+            generate(cutout(32), 4, settings(true))
+        );
+    }
+    #[test]
     fn a_high_resolution_cutouts_fine_detail_keeps_its_coverage_in_small_mips() {
         // Blades one texel wide, one column in four: too fine for the mips to hold.
         let side = 128u32;
         let pixels = (0..side * side)
-            .map(|i| [90, 140, 40, if (i % side) % 4 == 0 { 255 } else { 0 }])
+            .map(|i| {
+                [
+                    90,
+                    140,
+                    40,
+                    if (i % side).is_multiple_of(4) { 255 } else { 0 },
+                ]
+            })
             .collect();
         let base = Image {
             width: side,
@@ -424,6 +476,7 @@ mod dither_tests {
         };
         let settings = Settings {
             has_transparent: true,
+            dither_cutouts: true,
             ..Settings::default()
         };
         let mips = generate(base, 4, settings);

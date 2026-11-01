@@ -49,6 +49,12 @@ pub fn register_thrown_types(types: impl IntoIterator<Item = (String, String, f3
 pub fn thrown_types() -> &'static [ThrownType] {
     THROWN_TYPES.get().map_or(&[], Vec::as_slice)
 }
+/// the lib's tests' one mod type, `ruby:bolt` thrown from `ruby:gem`: the
+/// registry is set once per process, so every test registers the same.
+#[cfg(test)]
+pub(crate) fn register_test_types() {
+    let _ = register_thrown_types([("ruby:bolt".into(), "ruby:gem".into(), 2.0)]);
+}
 /// the mod type with entity type `id`; out of line, as vanilla's never are.
 #[cold]
 #[inline(never)]
@@ -110,6 +116,19 @@ pub enum ProjectileKind {
     Thrown(&'static ThrownType),
 }
 impl ProjectileKind {
+    /// Wind charges take no push from an explosion (vanilla leaves their motion at 0).
+    pub fn ignores_blast(&self) -> bool {
+        matches!(self, Self::WindCharge | Self::BreezeWindCharge)
+    }
+    /// `EntityType.Builder.eyeHeight`: 0.13 for arrows and tridents, 0 for
+    /// wind charges, else the default 0.85 of the box height.
+    pub fn eye_height(&self) -> f64 {
+        match self {
+            Self::Arrow { .. } | Self::Trident => f64::from(0.13_f32),
+            Self::WindCharge | Self::BreezeWindCharge => 0.0,
+            _ => f64::from(self.size() as f32 * 0.85_f32),
+        }
+    }
     /// The width and height of its entity type's `sized(...)`.
     pub fn size(&self) -> f64 {
         match self {
@@ -1021,11 +1040,10 @@ mod tests {
         ));
     }
 
-    /// the only test that registers: the registry is set once per process.
+    /// the registry is set once per process: every test registers the same.
     #[test]
     fn mod_thrown_types_are_found_by_id_and_item_once_registered() {
-        let bolt = ("ruby:bolt".to_owned(), "ruby:gem".to_owned(), 2.0);
-        assert!(register_thrown_types([bolt]));
+        register_test_types();
         assert!(!register_thrown_types([(
             "ruby:late".into(),
             "ruby:x".into(),
