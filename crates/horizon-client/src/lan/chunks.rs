@@ -2,8 +2,8 @@
 //! (sections with their paletted containers, block entities and the sky and
 //! block DataLayers) and the section block-change batches.
 use crate::{
-    chunk::{Chunk, Light, MIN_Y, SECTIONS, Section},
-    containers::BlockEntity,
+    chunk::{Chunk, ColumnLayout, LevelShape, Light, Section},
+    containers::{BlockEntity, ModBlockEntity},
     fast_hash::FxHashMap,
     mobs::spawner::{SpawnDataExt, SpawnerExt},
     section_mask::SectionMask,
@@ -13,10 +13,10 @@ use horizon_protocol::{
     chunk::{
         BIOMES, BLOCKS, BlockEntityInfo, ChunkData, Heightmaps, LightData, Paletted, Strategy,
     },
-    packets::play::LevelChunkWithLight,
+    packets::play::{ChunkBiomeData, LevelChunkWithLight},
     registry::{Builtin, ceil_log2},
 };
-use horizon_world::nbt::Tag;
+use horizon_world::nbt::{Compound, Tag};
 use std::{
     collections::HashMap,
     sync::{
@@ -28,6 +28,10 @@ use std::{
 const NON_AIR: u8 = 1;
 const FLUID: u8 = 2;
 const ENTITY: u8 = 4;
+
+/// A mod block entity's update tag (`BlockEntity.getUpdateTag`), what
+/// clients get of it; none sends no tag.
+pub type ModUpdateTag = fn([i32; 3], &ModBlockEntity) -> Option<Compound>;
 
 /// The vanilla block entity type of a block (BlockEntityType.validBlocks).
 pub fn block_entity_type(name: &str) -> Option<&'static str> {
@@ -95,7 +99,12 @@ pub struct ChunkEncoder {
     /// What encoding a section needs, shared with the warm-up threads.
     coder: Arc<SectionCoder>,
     /// Block entity type id per state (-1 for none).
-    entity_types: Vec<i16>,
+    entity_types: Vec<i32>,
+    /// Whether the state is a mod block's: its type is the block's own, and
+    /// it has a block entity only when the mod made one.
+    mod_entities: Vec<bool>,
+    /// The mods' update tags (`native_block_entity_update_tag`).
+    pub mod_update_tag: Option<ModUpdateTag>,
     /// The block registry id of each state's block, for BlockEvent.
     pub block_ids: Vec<i32>,
     /// The save's tables, for the heightmaps.
@@ -107,6 +116,8 @@ pub struct ChunkEncoder {
     /// The level's sections among a column's: all of them in the Overworld,
     /// y 0 to 255 in the Nether and the End (`DimensionType` min_y and height).
     sections: std::ops::Range<usize>,
+    /// The column of the level's chunks, which `sections` counts in.
+    column: ColumnLayout,
     /// Whether the level has sky light (`DimensionType.hasSkyLight`).
     sky: bool,
 }
@@ -261,15 +272,6 @@ impl SectionCoder {
                 values.push(v as i32);
             }
         }
-        let biome_values: Vec<i32> = (0..BIOMES)
-            .map(|j| {
-                let internal = section.biomes.get(j) as u16;
-                self.biome_ids
-                    .get(usize::from(internal))
-                    .copied()
-                    .unwrap_or(0)
-            })
-            .collect();
         (
             horizon_protocol::chunk::Section {
                 non_empty,
@@ -286,10 +288,25 @@ impl SectionCoder {
                         crate::chunk::block_strategy().global_bits,
                     ),
                 },
-                biomes: Paletted::from_values(&biome_values, Strategy::Biomes, self.biome_bits),
+                biomes: self.biomes(section),
             },
             entities,
         )
+    }
+
+    /// The section's biome container (`PalettedContainerRO.write`'s), in
+    /// network biome ids.
+    fn biomes(&self, section: &Section) -> Paletted {
+        let values: Vec<i32> = (0..BIOMES)
+            .map(|j| {
+                let internal = section.biomes.get(j) as u16;
+                self.biome_ids
+                    .get(usize::from(internal))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect();
+        Paletted::from_values(&values, Strategy::Biomes, self.biome_bits)
     }
 }
 
@@ -306,8 +323,9 @@ const WARM_MIN: usize = 16;
 /// varying light, its layers).
 struct Warm {
     coder: Arc<SectionCoder>,
-    /// The heightmaps' tables and the level's (min_y, height).
-    heightmaps: Option<(Arc<crate::save::SaveTables>, i32, i32)>,
+    /// The heightmaps' tables, the column's min_y and the level's (min_y,
+    /// height).
+    heightmaps: Option<(Arc<crate::save::SaveTables>, i32, i32, i32)>,
     columns: Vec<((i32, i32), Vec<Arc<Section>>)>,
     heights: Vec<OnceLock<ColumnHeightmaps>>,
     sections: Vec<Arc<Section>>,
@@ -321,8 +339,14 @@ impl Warm {
         loop {
             let i = self.next.fetch_add(1, Ordering::Relaxed);
             if let Some((_, sections)) = self.columns.get(i) {
-                if let Some((tables, min_y, height)) = &self.heightmaps {
-                    let maps = crate::save::client_heightmaps_in(sections, tables, *min_y, *height);
+                if let Some((tables, column_min_y, min_y, height)) = &self.heightmaps {
+                    let maps = crate::save::client_heightmaps_in(
+                        sections,
+                        *column_min_y,
+                        tables,
+                        *min_y,
+                        *height,
+                    );
                     let _ = self.heights[i].set(Arc::new(maps));
                 }
                 continue;
@@ -395,6 +419,7 @@ impl ChunkEncoder {
         let blocks = builtin.get("minecraft:block");
         let mut flags = Vec::new();
         let mut entity_types = Vec::new();
+        let mut mod_entities = Vec::new();
         let mut block_ids = Vec::new();
         for (name, has_fluid) in states {
             let air = matches!(
@@ -408,14 +433,22 @@ impl ChunkEncoder {
                     f |= FLUID;
                 }
             }
-            let t = block_entity_type(&name)
-                .and_then(|t| types.and_then(|ids| ids.id(t)))
-                .map_or(-1, |v| v as i16);
+            // A mod block's block entity type is named after the block
+            // (`mod_content`: registries.json).
+            let modded = !name.starts_with("minecraft:");
+            let t = if modded {
+                Some(&*name)
+            } else {
+                block_entity_type(&name)
+            }
+            .and_then(|t| types.and_then(|ids| ids.id(t)))
+            .unwrap_or(-1);
             if t >= 0 {
                 f |= ENTITY;
             }
             flags.push(f);
             entity_types.push(t);
+            mod_entities.push(modded && t >= 0);
             block_ids.push(blocks.and_then(|b| b.id(&name)).unwrap_or(0));
         }
         let biome_ids = biome_names
@@ -434,13 +467,26 @@ impl ChunkEncoder {
                 biome_bits: ceil_log2(biome_registry.len()),
             }),
             entity_types,
+            mod_entities,
+            mod_update_tag: None,
             block_ids,
             tables: None,
             cache: Default::default(),
             heights: Default::default(),
-            sections: 0..SECTIONS,
+            sections: 0..ColumnLayout::VANILLA.sections(),
+            column: ColumnLayout::VANILLA,
             sky: true,
         }
+    }
+
+    /// `ClientboundChunksBiomesPacket.ChunkBiomeData`: the column's biome
+    /// containers, one per section of the level (`extractChunkData`).
+    pub fn biome_data(&self, chunk: &Chunk) -> ChunkBiomeData {
+        let biomes: Vec<Paletted> = chunk.sections[self.sections.clone()]
+            .iter()
+            .map(|s| self.coder.biomes(s))
+            .collect();
+        ChunkBiomeData::from_biomes([chunk.x, chunk.z], &biomes)
     }
 
     /// The client heightmaps (Heightmap.prime over the column), from the
@@ -453,6 +499,7 @@ impl ChunkEncoder {
         let (min_y, height) = self.level();
         let maps = Arc::new(crate::save::client_heightmaps_in(
             &chunk.sections,
+            chunk.min_y(),
             tables,
             min_y,
             height,
@@ -464,7 +511,7 @@ impl ChunkEncoder {
     /// The level's min_y and height (`DimensionType`), the heightmaps' range.
     fn level(&self) -> (i32, i32) {
         (
-            MIN_Y + 16 * self.sections.start as i32,
+            self.column.section_y(self.sections.start),
             16 * self.sections.len() as i32,
         )
     }
@@ -520,15 +567,15 @@ impl ChunkEncoder {
         self.cached(section, |e| e.wire = Some(wire.clone()));
         wire
     }
-    /// Encode for a level of `min_y` and `height` (multiples of 16 within
-    /// the column), with or without sky light.
-    pub fn set_dimension(&mut self, min_y: i32, height: i32, sky: bool) {
-        let lo = usize::try_from((min_y - MIN_Y) >> 4)
-            .unwrap_or(0)
-            .min(SECTIONS);
-        let n = usize::try_from(height >> 4).unwrap_or(SECTIONS);
-        self.sections = lo..(lo + n).min(SECTIONS);
-        self.sky = sky;
+    /// Encode for a level of `shape`: its chunks hold `shape.column()`, of
+    /// which the level's own sections go on the wire.
+    pub fn set_dimension(&mut self, shape: LevelShape) {
+        let column = shape.column();
+        let lo = usize::try_from((shape.min_y - column.min_y()) >> 4).unwrap_or(0);
+        let n = usize::try_from(shape.height >> 4).unwrap_or(0);
+        self.column = column;
+        self.sections = lo.min(column.sections())..(lo + n).min(column.sections());
+        self.sky = shape.sky_light;
         // The heightmaps depend on the level's height.
         self.heights.get_mut().unwrap().clear();
     }
@@ -536,7 +583,25 @@ impl ChunkEncoder {
         self.entity_types
             .get(state as usize)
             .filter(|t| **t >= 0)
-            .map(|t| i32::from(*t))
+            .copied()
+    }
+    /// The update tag of the block entity at `pos` (`getUpdateTag`): a
+    /// mod's from its hook, a vanilla one's from [`entity_tag`].
+    pub fn update_tag(&self, pos: (i32, i32, i32), entity: &BlockEntity) -> Option<Tag> {
+        match entity {
+            BlockEntity::Mod(m) => self
+                .mod_update_tag
+                .and_then(|tag| tag([pos.0, pos.1, pos.2], m))
+                .map(Tag::Compound),
+            _ => entity_tag(entity),
+        }
+    }
+    /// Whether the state holds a fluid (water, lava, or a waterlogged block).
+    pub fn has_fluid(&self, state: u32) -> bool {
+        self.coder
+            .flags
+            .get(state as usize)
+            .is_some_and(|f| f & FLUID != 0)
     }
     pub fn is_air(&self, state: u32) -> bool {
         self.coder
@@ -559,13 +624,28 @@ impl ChunkEncoder {
         bits
     }
 
-    /// The non-air sections of the column and its neighbours, as bits.
-    fn around(&self, chunk: &Chunk, world: &crate::world::World) -> SectionMask {
+    /// The non-air sections of the column and its neighbours, as bits. A
+    /// neighbour still a proto chunk counts too, as vanilla's light storage
+    /// counts a neighbour at INITIALIZE_LIGHT (#4294).
+    fn around(
+        &self,
+        chunk: &Chunk,
+        world: &crate::world::World,
+        protos: &dyn Fn(i32, i32) -> Option<SectionMask>,
+    ) -> SectionMask {
         let mut around = SectionMask::EMPTY;
         for dz in -1..=1 {
             for dx in -1..=1 {
-                if let Some(c) = world.chunks.get(&(chunk.x + dx, chunk.z + dz)) {
+                let (x, z) = (chunk.x + dx, chunk.z + dz);
+                if let Some(c) = world.chunks.get(&(x, z)) {
                     around |= self.occupied(c);
+                } else if let Some(sections) = protos(x, z) {
+                    // Column sections: this level's range from 0.
+                    for i in sections.iter() {
+                        if self.sections.contains(&i) {
+                            around.insert(i - self.sections.start);
+                        }
+                    }
                 }
             }
         }
@@ -579,7 +659,53 @@ impl ChunkEncoder {
     /// sections and light layers go straight to it, with no packet built and
     /// copied again first.
     pub fn body_in(&self, chunk: &Chunk, world: &crate::world::World) -> Vec<u8> {
-        self.body(chunk, &world.block_entities, self.around(chunk, world))
+        self.body_with(chunk, world, &|_, _| None)
+    }
+    /// [`Self::body_in`], with `protos` giving the non-air sections of a
+    /// neighbour that is still a proto chunk.
+    pub fn body_with(
+        &self,
+        chunk: &Chunk,
+        world: &crate::world::World,
+        protos: &dyn Fn(i32, i32) -> Option<SectionMask>,
+    ) -> Vec<u8> {
+        self.body(
+            chunk,
+            &world.block_entities,
+            self.around(chunk, world, protos),
+        )
+    }
+
+    /// An encoder of the same level with caches of its own, for threads that encode saved chunks no
+    /// level holds (`lan::far`).
+    pub fn detached(&self) -> Self {
+        Self {
+            coder: self.coder.clone(),
+            entity_types: self.entity_types.clone(),
+            mod_entities: self.mod_entities.clone(),
+            mod_update_tag: self.mod_update_tag,
+            block_ids: self.block_ids.clone(),
+            tables: self.tables.clone(),
+            cache: Default::default(),
+            heights: Default::default(),
+            sections: self.sections.clone(),
+            column: self.column,
+            sky: self.sky,
+        }
+    }
+    /// The body of a column read from the save that no level holds: its own block entities, and every
+    /// light section (as `light_update`; no neighbour is at hand to tell which exist). Nothing of it
+    /// stays cached: the column is dropped once sent.
+    pub fn body_alone(&self, chunk: &Chunk) -> Vec<u8> {
+        let entities: HashMap<_, _> = chunk.block_entities.iter().cloned().collect();
+        let body = self.body(chunk, &entities, SectionMask::ALL);
+        let mut cache = self.cache.lock().unwrap();
+        for s in &chunk.sections {
+            cache.remove(&(Arc::as_ptr(s) as usize));
+        }
+        drop(cache);
+        self.heights.lock().unwrap().remove(&(chunk.x, chunk.z));
+        body
     }
 
     /// Make what these columns need and is not cached yet (their heightmaps
@@ -649,7 +775,10 @@ impl ChunkEncoder {
         let (min_y, height) = self.level();
         Some(Warm {
             coder: self.coder.clone(),
-            heightmaps: self.tables.clone().map(|t| (t, min_y, height)),
+            heightmaps: self
+                .tables
+                .clone()
+                .map(|t| (t, self.column.min_y(), min_y, height)),
             heights: stale.iter().map(|_| OnceLock::new()).collect(),
             columns: stale,
             done: sections.iter().map(|_| OnceLock::new()).collect(),
@@ -816,17 +945,23 @@ impl ChunkEncoder {
                     i32::from(index >> 8),
                     i32::from(index >> 4 & 15),
                 );
-                let wy = MIN_Y + (i as i32) * 16 + y;
+                let wy = chunk.min_y() + (i as i32) * 16 + y;
                 let pos = (chunk.x * 16 + x, wy, chunk.z * 16 + z);
+                let entity = block_entities.get(&pos);
+                // A mod block whose mod made no block entity has none to send.
+                if self.mod_entities[state as usize] && !matches!(entity, Some(BlockEntity::Mod(_)))
+                {
+                    continue;
+                }
                 entity_infos.push(BlockEntityInfo {
                     packed_xz: ((x << 4) | z) as i8,
                     y: wy as i16,
                     kind,
                     // BlockEntityInfo.create: an empty update tag is not sent.
-                    tag: block_entities
-                        .get(&pos)
-                        .and_then(entity_tag)
+                    tag: entity
+                        .and_then(|e| self.update_tag(pos, e))
                         .or_else(|| pot_tag(chunk, pos))
+                        .filter(|t| !matches!(t, Tag::Compound(c) if c.is_empty()))
                         .unwrap_or(Tag::End),
                 });
             }
@@ -951,6 +1086,14 @@ pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
             }
             Some(Tag::compound(entries))
         }
+        // StructureBlockEntity.getUpdateTag: saveCustomOnly.
+        BlockEntity::StructureBlock(b) => Some(Tag::compound(b.save())),
+        // JigsawBlockEntity.getUpdateTag: saveCustomOnly.
+        BlockEntity::JigsawBlock(b) => Some(Tag::compound(b.save())),
+        // TestBlockEntity.getUpdateTag: saveCustomOnly.
+        BlockEntity::TestBlock(b) => Some(Tag::compound(b.save())),
+        // TestInstanceBlockEntity.getUpdateTag: saveCustomOnly.
+        BlockEntity::TestInstanceBlock(b) => Some(Tag::compound(b.save())),
         BlockEntity::Shelf(s) => Some(Tag::compound([
             ("Items", crate::save::encode_items(&s.items)),
             (
@@ -980,9 +1123,6 @@ pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
             .next_spawn_data
             .as_ref()
             .map(|d| Tag::compound([("spawn_data", d.encode())])),
-        // CommandBlockEntity.getUpdateTag: saveWithoutMetadata, the command
-        // and its output settings (the edit screen reads them).
-        BlockEntity::CommandBlock(c) => Some(Tag::compound(c.save())),
         // SkullBlockEntity: the profile is the whole reason a head differs.
         BlockEntity::Skull(s) => {
             let mut entries = Vec::new();
@@ -997,6 +1137,37 @@ pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
             }
             Some(Tag::compound(entries))
         }
+        // BeaconBlockEntity.getUpdateTag: saveCustomOnly, the effects and the
+        // levels (no name or lock is kept here).
+        BlockEntity::Beacon(b) => {
+            let mut entries = Vec::new();
+            if let Some(effect) = &b.primary {
+                entries.push(("primary_effect", Tag::String(effect.as_str().into())));
+            }
+            if let Some(effect) = &b.secondary {
+                entries.push(("secondary_effect", Tag::String(effect.as_str().into())));
+            }
+            entries.push(("Levels", Tag::Int(b.levels)));
+            Some(Tag::compound(entries))
+        }
+        // TheEndGatewayBlockEntity.getUpdateTag: saveCustomOnly, so the age the
+        // client's beam counts from, the exit and ExactTeleport when set.
+        BlockEntity::EndGateway(g) => {
+            let mut entries = vec![("Age", Tag::Long(g.age))];
+            if let Some(exit) = g.exit_portal {
+                entries.push(("exit_portal", Tag::IntArray(exit.to_vec())));
+            }
+            if g.exact_teleport {
+                entries.push(("ExactTeleport", Tag::Byte(1)));
+            }
+            Some(Tag::compound(entries))
+        }
+        // CreakingHeartBlockEntity.getUpdateTag: saveCustomOnly, the protector.
+        BlockEntity::CreakingHeart(h) => Some(Tag::compound(
+            h.creaking
+                .map(|(_, uuid)| ("creaking", crate::save::uuid_tag(uuid))),
+        )),
+        // No getUpdatePacket: these, chests, hives, command blocks and the rest.
         BlockEntity::Jukebox(_) | BlockEntity::Lectern(_) => None,
         // CampfireBlockEntity.getUpdateTag: the items alone.
         BlockEntity::Campfire(c) => Some(Tag::compound([(
@@ -1152,6 +1323,8 @@ fn write_light(lights: &[(usize, SectionLight)], sky: bool, w: &mut Writer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{MIN_Y, SECTIONS};
+    use horizon_world::nbt::JavaString;
 
     #[test]
     fn block_entity_blocks_are_recognised() {
@@ -1237,6 +1410,60 @@ mod tests {
         assert_eq!(sent(&chunk), scan(&chunk));
     }
 
+    /// A mod block's block entity goes out with its block's own type and the
+    /// tag its mod gives; a mod block whose mod made none is left out.
+    #[test]
+    fn mod_block_entities_carry_their_blocks_type_and_the_mods_tag() {
+        let builtin = Builtin::parse(
+            r#"{"minecraft:block_entity_type": {"entries": {
+                "minecraft:chest": {"protocol_id": 1},
+                "test:machine": {"protocol_id": 49},
+                "test:casing": {"protocol_id": 50}}}}"#,
+        )
+        .unwrap();
+        let states =
+            ["minecraft:air", "test:machine", "test:casing"].map(|n| (Arc::<str>::from(n), false));
+        let mut encoder = ChunkEncoder::new(states, &builtin, &[], &[]);
+        encoder.mod_update_tag = Some(|pos, entity| {
+            let mut tag = Compound::new();
+            tag.insert(
+                "active".into(),
+                entity.nbt.get(&JavaString::from("active"))?.clone(),
+            );
+            tag.insert("x".into(), Tag::Int(pos[0]));
+            Some(tag)
+        });
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set(1, MIN_Y + 2, 3, 1);
+        chunk.set(5, MIN_Y + 2, 5, 2);
+        let mut machine = ModBlockEntity {
+            id: "test:machine".into(),
+            ..ModBlockEntity::default()
+        };
+        machine.nbt.insert("active".into(), Tag::Byte(1));
+        machine.nbt.insert("recipe".into(), Tag::Int(7));
+        let block_entities =
+            HashMap::from([((1, MIN_Y + 2, 3), BlockEntity::Mod(Box::new(machine)))]);
+        let infos = encoder.encode(&chunk, &block_entities).chunk.block_entities;
+        assert_eq!(infos.len(), 1, "the casing has no block entity");
+        assert_eq!((infos[0].kind, infos[0].y), (49, (MIN_Y + 2) as i16));
+        let mut expected = Compound::new();
+        expected.insert("active".into(), Tag::Byte(1));
+        expected.insert("x".into(), Tag::Int(1));
+        assert_eq!(infos[0].tag, Tag::Compound(expected));
+        // As does an encoder for saved chunks past the view distance (`lan::far`).
+        let far = encoder.detached().encode(&chunk, &block_entities);
+        assert_eq!(far.chunk.block_entities[0].tag, infos[0].tag);
+        // An empty tag is not sent either (BlockEntityInfo.create).
+        encoder.mod_update_tag = Some(|_, _| Some(Compound::new()));
+        let infos = encoder.encode(&chunk, &block_entities).chunk.block_entities;
+        assert_eq!(infos[0].tag, Tag::End);
+        // Without the hook, nothing of it is sent.
+        encoder.mod_update_tag = None;
+        let infos = encoder.encode(&chunk, &block_entities).chunk.block_entities;
+        assert_eq!(infos[0].tag, Tag::End);
+    }
+
     fn encoder() -> ChunkEncoder {
         let states = ["minecraft:air", "minecraft:stone", "minecraft:water"]
             .map(|n| (Arc::<str>::from(n), n.ends_with("water")));
@@ -1311,6 +1538,36 @@ mod tests {
         let second = encoder.encode(&chunk, &HashMap::new()).light;
         assert_ne!(first, second);
         assert_eq!(second, light_data(&chunk.sections, SectionMask::ALL));
+    }
+
+    /// A neighbour still a proto chunk counts for the light layers as it
+    /// will once loaded (#4294: vanilla counts a neighbour at
+    /// INITIALIZE_LIGHT).
+    #[test]
+    fn a_proto_neighbour_counts_for_the_light_layers() {
+        let encoder = encoder();
+        let mut world = crate::world::World::new(horizon_world::registry::BlockStateId(0), 0);
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let mut chunk = Chunk::empty(x, z);
+                chunk.set(0, MIN_Y, 0, 1);
+                world.chunks.insert((x, z), Arc::new(chunk));
+            }
+        }
+        // The neighbour east has a block ten sections up.
+        let mut tall = Chunk::empty(1, 0);
+        tall.set(0, MIN_Y, 0, 1);
+        tall.set(0, MIN_Y + 16 * 10, 0, 1);
+        world.chunks.insert((1, 0), Arc::new(tall));
+        let centre = world.chunks[&(0, 0)].clone();
+        let loaded = encoder.body_in(&centre, &world);
+        world.chunks.remove(&(1, 0));
+        assert_ne!(encoder.body_in(&centre, &world), loaded);
+        let mut sections = SectionMask::EMPTY;
+        sections.insert(0);
+        sections.insert(10);
+        let proto = |x, z| ((x, z) == (1, 0)).then_some(sections);
+        assert_eq!(encoder.body_with(&centre, &world, &proto), loaded);
     }
 
     #[test]
@@ -1396,7 +1653,7 @@ mod tests {
                 "around {around:?}"
             );
         }
-        encoder.set_dimension(0, 256, false);
+        encoder.set_dimension(LevelShape::NETHER);
         assert_eq!(
             encoder.body(&chunk, &entities, SectionMask::ALL),
             packet(&encoder, SectionMask::ALL)
@@ -1485,6 +1742,19 @@ mod tests {
         warmed.warm(&[]);
     }
 
+    /// A far chunk's body (`lan::far`) leaves nothing of it cached, and is the same each time.
+    #[test]
+    fn a_body_alone_leaves_nothing_cached() {
+        let encoder = encoder();
+        let mut chunk = Chunk::empty(3, -1);
+        chunk.set(1, 64, 1, 1);
+        let body = encoder.body_alone(&chunk);
+        assert!(encoder.cache.lock().unwrap().is_empty());
+        assert!(encoder.heights.lock().unwrap().is_empty());
+        assert_eq!(encoder.detached().body_alone(&chunk), body);
+        assert_eq!(encoder.body_alone(&chunk), body);
+    }
+
     #[test]
     fn a_nether_column_sends_its_sixteen_sections_without_sky_light() {
         let chunk = Chunk::empty(0, 0);
@@ -1495,7 +1765,7 @@ mod tests {
             &[],
         );
         let overworld = encoder.encode(&chunk, &HashMap::new());
-        encoder.set_dimension(0, 256, false);
+        encoder.set_dimension(LevelShape::NETHER);
         let nether = encoder.encode(&chunk, &HashMap::new());
         // An all-air section is the same bytes wherever it is.
         let per_section = overworld.chunk.buffer.len() / SECTIONS;
@@ -1510,5 +1780,97 @@ mod tests {
             &nether.light.empty_block_mask,
             18
         ));
+    }
+
+    #[test]
+    fn a_tall_column_sends_its_whole_height() {
+        let shape = LevelShape::new(-64, 2096, 2096, true).unwrap();
+        let mut chunk = Chunk::with_layout(0, 0, shape.column());
+        chunk.set(3, 2000, 4, 1);
+        let mut encoder = encoder();
+        let vanilla = encoder.encode(&Chunk::empty(0, 0), &HashMap::new());
+        encoder.set_dimension(shape);
+        let tall = encoder.encode(&chunk, &HashMap::new());
+        // 131 sections, one of them holding stone instead of air: longer than
+        // 131 air sections, and the sky light layers reach one above the top.
+        let per_section = vanilla.chunk.buffer.len() / SECTIONS;
+        assert!(tall.chunk.buffer.len() > per_section * 131);
+        assert_eq!(tall.light.sky.len(), 132);
+    }
+
+    #[test]
+    fn beacon_gateway_and_heart_update_tags_load_on_the_client() {
+        use crate::containers::{Beacon, CreakingHeart, EndGateway};
+        // What a client loads from the tag (handleBlockEntityData).
+        let load = |id: &str, entity: BlockEntity| {
+            let Some(Tag::Compound(mut tag)) = entity_tag(&entity) else {
+                panic!("no update tag for {id}");
+            };
+            tag.insert("id".into(), Tag::String(id.into()));
+            for k in ["x", "y", "z"] {
+                tag.insert(k.into(), Tag::Int(0));
+            }
+            crate::save::decode_block_entity(&Tag::Compound(tag))
+                .expect("loads")
+                .1
+        };
+        let beacon = Beacon {
+            levels: 4,
+            primary: Some("minecraft:speed".into()),
+            secondary: Some("minecraft:regeneration".into()),
+            ..Default::default()
+        };
+        let BlockEntity::Beacon(b) =
+            load("minecraft:beacon", BlockEntity::Beacon(Box::new(beacon)))
+        else {
+            panic!("not a beacon");
+        };
+        assert_eq!(b.levels, 4);
+        assert_eq!(b.primary.as_deref(), Some("minecraft:speed"));
+        assert_eq!(b.secondary.as_deref(), Some("minecraft:regeneration"));
+        let gateway = EndGateway {
+            age: 150,
+            exit_portal: Some([8, 100, 0]),
+            exact_teleport: false,
+        };
+        let tag = entity_tag(&BlockEntity::EndGateway(gateway.clone())).unwrap();
+        assert_eq!(tag.get("ExactTeleport"), None);
+        let BlockEntity::EndGateway(g) = load(
+            "minecraft:end_gateway",
+            BlockEntity::EndGateway(gateway.clone()),
+        ) else {
+            panic!("not a gateway");
+        };
+        assert_eq!(g, gateway);
+        let exact = EndGateway {
+            exact_teleport: true,
+            ..gateway
+        };
+        let tag = entity_tag(&BlockEntity::EndGateway(exact.clone())).unwrap();
+        assert_eq!(tag.get("ExactTeleport"), Some(&Tag::Byte(1)));
+        let BlockEntity::EndGateway(g) = load(
+            "minecraft:end_gateway",
+            BlockEntity::EndGateway(exact.clone()),
+        ) else {
+            panic!("not a gateway");
+        };
+        assert_eq!(g, exact);
+        let heart = CreakingHeart {
+            creaking: Some((Some(7), [1, 2, 3, 4])),
+            ..Default::default()
+        };
+        let BlockEntity::CreakingHeart(h) = load(
+            "minecraft:creaking_heart",
+            BlockEntity::CreakingHeart(Box::new(heart)),
+        ) else {
+            panic!("not a creaking heart");
+        };
+        assert_eq!(h.creaking, Some((None, [1, 2, 3, 4])));
+        // Without a protector the tag is empty.
+        let lone = entity_tag(&BlockEntity::CreakingHeart(Box::default()));
+        assert_eq!(
+            lone,
+            Some(Tag::Compound(horizon_world::nbt::Compound::new()))
+        );
     }
 }

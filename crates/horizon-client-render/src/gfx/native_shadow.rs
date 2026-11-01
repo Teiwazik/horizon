@@ -803,6 +803,7 @@ impl NativeShadow {
             cull: super::pack_uniforms::shadow_culling(frame, &self.camera),
             light: super::pack_uniforms::shadow_light(frame, &self.camera),
             distance: Some(self.camera.distance),
+            unculled: None,
         }
     }
 }

@@ -133,7 +133,7 @@ impl Zip {
             let Some(name) = archive.name_for_index(i) else {
                 continue;
             };
-            let name = name.replace('\\', "/");
+            let name = name.map_err(invalid)?.replace('\\', "/");
             match name.strip_suffix('/') {
                 Some(folder) => folders.insert(folder.to_owned(), i),
                 None => entries.insert(name, i),
@@ -526,7 +526,7 @@ mod tests {
                 .unwrap();
             let entry = archive.by_index_raw(index).unwrap();
             (
-                entry.data_start() as usize,
+                entry.data_start().unwrap() as usize,
                 entry.compressed_size() as usize,
             )
         };

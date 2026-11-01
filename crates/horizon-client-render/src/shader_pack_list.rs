@@ -23,12 +23,41 @@ pub struct Entry {
     /// The pack's own name for Horizon's packs, else `file`.
     pub title: String,
     pub kind: Kind,
-    /// A Horizon pack's `[[options]]`, and the value of each the player set
-    /// (`values_path`).
+    /// A Horizon pack's `[[options]]`, and the value of each the player set (`values_path`).
     pub options: Vec<PackOption>,
     pub values: Vec<f64>,
-    /// Its settings screen's `[[pages]]`; empty for one page of every option.
+    /// Its options page's `[[pages]]`; empty for one page of every option.
     pub pages: Vec<OptionPage>,
+}
+
+impl Entry {
+    /// Saves the player's option values, for the pack in the folder `dir`.
+    pub fn save_values(&self, dir: &Path) {
+        let path = dir.join(&self.file);
+        if let Err(e) = save_values(&path, &self.options, &self.values) {
+            log::warn!("shader pack options of {}: {e}", self.file);
+        }
+    }
+
+    /// The option `i` one value on (`back`: one before), or at its default (`reset`). Whether
+    /// the pack has that option.
+    pub fn step_option(&mut self, i: usize, back: bool, reset: bool) -> bool {
+        let (Some(o), Some(v)) = (self.options.get(i), self.values.get_mut(i)) else {
+            return false;
+        };
+        *v = if reset {
+            o.kind.default_constant()
+        } else {
+            step_value(&o.kind, *v, back)
+        };
+        true
+    }
+
+    /// Every option back to its default.
+    pub fn reset_options(&mut self) {
+        let defaults = self.options.iter().map(|o| o.kind.default_constant());
+        self.values = defaults.collect();
+    }
 }
 
 /// The packs in `dir`, Horizon's first, each kind by title. A missing folder has none.
@@ -61,10 +90,10 @@ fn entry(path: &Path) -> Option<Entry> {
                 .ok()
                 .map(|p| p.manifest)
         };
-        let title = manifest
-            .as_ref()
-            .map_or_else(|| file.clone(), |m| m.name.clone());
-        let (options, pages) = manifest.map(|m| (m.options, m.pages)).unwrap_or_default();
+        let (title, options, pages) = manifest.map_or_else(
+            || (file.clone(), Vec::new(), Vec::new()),
+            |m| (m.name, m.options, m.pages),
+        );
         let values = load_values(path, &options);
         return Some(Entry {
             file,
@@ -118,18 +147,12 @@ pub fn load_values(pack: &Path, options: &[PackOption]) -> Vec<f64> {
 
 /// Saves `values` of `options`; values at their defaults are left out, and with none left
 /// the file goes.
-pub fn save_values(pack: &Path, options: &[PackOption], values: &[f64]) -> std::io::Result<()> {
+fn save_values(pack: &Path, options: &[PackOption], values: &[f64]) -> std::io::Result<()> {
     let text: String = options
         .iter()
         .zip(values)
         .filter(|(o, v)| o.kind.default_constant() != **v)
-        .map(|(o, v)| {
-            format!(
-                "{}={v}
-",
-                o.id
-            )
-        })
+        .map(|(o, v)| format!("{}={v}\n", o.id))
         .collect();
     let path = values_path(pack);
     if text.is_empty() {
@@ -152,7 +175,7 @@ fn clamp(kind: &OptionKind, v: f64) -> f64 {
 }
 
 /// The option's next value (`back`: the one before), wrapping around at the ends.
-pub fn step_value(kind: &OptionKind, v: f64, back: bool) -> f64 {
+fn step_value(kind: &OptionKind, v: f64, back: bool) -> f64 {
     let dir = if back { -1.0 } else { 1.0 };
     match kind {
         OptionKind::Bool { .. } => f64::from(u8::from(v == 0.0)),
@@ -189,7 +212,11 @@ pub fn step_value(kind: &OptionKind, v: f64, back: bool) -> f64 {
 /// The value as the settings page shows it.
 pub fn show_value(kind: &OptionKind, v: f64) -> String {
     match kind {
-        OptionKind::Bool { .. } => if v != 0.0 { "On" } else { "Off" }.to_owned(),
+        OptionKind::Bool { .. } => crate::lang::get(if v != 0.0 {
+            "options.on"
+        } else {
+            "options.off"
+        }),
         OptionKind::Float { step, .. } => {
             let digits = if *step >= 1.0 {
                 0
@@ -218,7 +245,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.as_path();
         let manifest = "schema = 1\nid = \"warm\"\nname = \"Warm Light\"\nversion = \"1\"\n\
-            api = \"0.5\"\n[[post]]\nfile = \"p.wgsl\"\n";
+            api = \"0.1\"\n[[post]]\nfile = \"p.wgsl\"\n";
         std::fs::create_dir(d.join("warm")).unwrap();
         std::fs::write(d.join("warm").join(horizon_shader_api::MANIFEST), manifest).unwrap();
         std::fs::create_dir_all(d.join("Classic Folder/shaders")).unwrap();
@@ -263,6 +290,7 @@ mod tests {
         assert_eq!(step_value(&float, 1.0, false), 1.5);
         assert_eq!(step_value(&float, 2.0, false), 0.0);
         assert_eq!(step_value(&float, 0.0, true), 2.0);
+        assert_eq!(show_value(&float, 1.5), "1.5");
         let choice = OptionKind::Choice {
             values: vec!["a".into(), "b".into(), "c".into()],
             default: 0,
@@ -276,11 +304,8 @@ mod tests {
             max: 1,
         };
         assert_eq!(step_value(&int, 1.0, false), -1.0);
-        assert_eq!(
-            step_value(&OptionKind::Bool { default: true }, 1.0, false),
-            0.0
-        );
-        assert_eq!(show_value(&float, 1.5), "1.5");
+        let on = OptionKind::Bool { default: true };
+        assert_eq!(step_value(&on, 1.0, false), 0.0);
 
         let dir =
             std::env::temp_dir().join(format!("horizon-shader-values-{}", std::process::id()));
@@ -291,19 +316,8 @@ mod tests {
         // Only what differs from the defaults is written; out of range comes back clamped.
         save_values(&pack, &options, &[1.0, 2.0]).unwrap();
         let text = std::fs::read_to_string(values_path(&pack)).unwrap();
-        assert_eq!(
-            text,
-            "b=2
-"
-        );
-        std::fs::write(
-            values_path(&pack),
-            "a=9
-b=1
-zzz=4
-",
-        )
-        .unwrap();
+        assert_eq!(text, "b=2\n");
+        std::fs::write(values_path(&pack), "a=9\nb=1\nzzz=4\n").unwrap();
         assert_eq!(load_values(&pack, &options), [2.0, 1.0]);
         save_values(&pack, &options, &[1.0, 0.0]).unwrap();
         assert!(!values_path(&pack).exists());

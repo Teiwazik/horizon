@@ -51,6 +51,7 @@ wgsl_types! {
     [f32; 3] => "vec3<f32>",
     [f32; 4] => "vec4<f32>",
     [[f32; 4]; 4] => "mat4x4<f32>",
+    [[f32; 4]; 8] => "array<vec4<f32>, 8>",
 }
 
 /// A uniform struct: the Rust type the renderer uploads, and its WGSL.

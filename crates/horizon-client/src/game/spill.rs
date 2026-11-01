@@ -420,8 +420,21 @@ impl GameLevel<'_> {
         }
         let entity = self.world.block_entities.remove(&key);
         self.world.block_names.remove(&key);
+        self.world.forget_block_entity_source(key);
         let name = self.facts.get(old).name.clone();
-        let kind = removal::pre_remove(&name);
+        let kind = match &entity {
+            // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents.
+            Some(BlockEntity::Mod(m))
+                if !m.items.is_empty()
+                    && self.world.block_entities.mod_container(old.0).is_some() =>
+            {
+                PreRemove::Contents {
+                    slots: m.items.len(),
+                    furnace: false,
+                }
+            }
+            _ => removal::pre_remove(&name),
+        };
         let mut neighbour_updates = 0;
         if side_effects {
             match kind {
@@ -463,7 +476,7 @@ impl GameLevel<'_> {
                     // events and a neighbour update), the record pops, and
                     // onSongChanged updates the neighbours again.
                     if let Some(BlockEntity::Jukebox(j)) = &entity
-                        && let Some(record) = j.record.clone()
+                        && let Some(record) = j.record().cloned()
                     {
                         if j.playing {
                             self.jukebox_stopped(pos, old);
@@ -601,6 +614,14 @@ impl GameLevel<'_> {
             self.drop_item_stack(pos, stack);
         }
         true
+    }
+    /// `Containers.dropContents` for a mod block entity that left the world
+    /// during its own tick (the block broke itself): what it held spills as
+    /// vanilla's `preRemoveSideEffects` would, instead of vanishing with it.
+    pub(super) fn drop_lost_contents(&mut self, pos: BlockPos, items: Vec<Option<ItemStack>>) {
+        for stack in items {
+            self.drop_item_stack(pos, stack);
+        }
     }
     /// `Containers.dropItemStack` of one slot (an empty one still draws its spot).
     fn drop_item_stack(&mut self, pos: BlockPos, stack: Option<ItemStack>) {

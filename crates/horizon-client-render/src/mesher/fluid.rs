@@ -189,15 +189,24 @@ impl FluidFlowWorld for FlowView<'_> {
     }
 }
 /// Emits one fluid cell at section-relative `[x, y, z]`.
+/// `(nether, shader_pack_lighting)`: the Nether's face shading, or none when a shader pack lights
+/// the faces (`Mesher::shader_pack_lighting`).
 pub(super) fn tesselate(
     tables: &MeshTables,
-    nether: bool,
+    (nether, shader_pack_lighting): (bool, bool),
     pad: &Padded,
     water_color: u32,
     out: &mut SectionMesh,
     [x, y, z]: [i32; 3],
 ) {
     use horizon_assets::model::Direction as D;
+    let cardinal = |d: D| {
+        if shader_pack_lighting {
+            1.0
+        } else {
+            lighting::cardinal(nether, d)
+        }
+    };
     let info = &tables.info;
     let at = |p: [i32; 3]| &info[pad.blocks[pi(p[0], p[1], p[2])] as usize];
     let me = at([x, y, z]);
@@ -231,7 +240,7 @@ pub(super) fn tesselate(
     let emission = if water {
         0
     } else {
-        crate::mesher::INCANDESCENT
+        crate::mesher::hdr_tier("lava", 15)
     };
     let color = |by: f32| {
         let rgb = [16, 8, 0].map(|shift| lighting::scale((tint >> shift & 255) as i32, by) as u32);
@@ -311,12 +320,16 @@ pub(super) fn tesselate(
     } else {
         &mut out.solid
     };
+    let mut sprite_layers = Vec::new();
     let mut quad = |v: [([f32; 3], [f32; 2]); 4],
                     layer: u16,
                     color: u32,
                     light: u16,
                     back: bool,
                     face: usize| {
+        if tables.is_animated(layer) && !sprite_layers.contains(&layer) {
+            sprite_layers.push(layer);
+        }
         let color = fluid_face(color, face);
         let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
         target.extend(v.map(vertex));
@@ -369,7 +382,7 @@ pub(super) fn tesselate(
                 ([fx + 1.0, fy + ne, fz], uv[3]),
             ],
             layer,
-            color(lighting::cardinal(nether, D::Up)),
+            color(cardinal(D::Up)),
             light([x, y, z]),
             backward,
             Direction::Up as usize,
@@ -385,14 +398,14 @@ pub(super) fn tesselate(
                 ([fx, y0, fz + 1.0], [0.0, 1.0]),
             ],
             still,
-            color(lighting::cardinal(nether, D::Down)),
+            color(cardinal(D::Down)),
             light([x, y - 1, z]),
             false,
             Direction::Down as usize,
         );
     }
     let side_light = light([x, y, z]);
-    let up_shade = lighting::cardinal(nether, D::Up);
+    let up_shade = cardinal(D::Up);
     for (i, d) in [
         Direction::North,
         Direction::South,
@@ -427,9 +440,9 @@ pub(super) fn tesselate(
             _ => (flow, false),
         };
         let side = if matches!(d, Direction::North | Direction::South) {
-            lighting::cardinal(nether, D::North)
+            cardinal(D::North)
         } else {
-            lighting::cardinal(nether, D::West)
+            cardinal(D::West)
         };
         let (v0, v1) = ((1.0 - h0) * 0.5, (1.0 - h1) * 0.5);
         quad(
@@ -446,6 +459,7 @@ pub(super) fn tesselate(
             d as usize,
         );
     }
+    out.sprite_layers.extend(sprite_layers);
 }
 
 #[cfg(test)]

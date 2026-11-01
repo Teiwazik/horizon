@@ -335,7 +335,8 @@ impl Post {
                     view_formats: &[],
                 })
             };
-            // COPY_SRC: the pass dump reads them back.
+            // COPY_SRC: a native pack's material stage reads copies of them (`opaque_depth`,
+            // `opaque_color`).
             let sampled = wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC;
@@ -346,7 +347,7 @@ impl Post {
                 "Scaled world depth",
                 size,
                 wgpu::TextureFormat::Depth32Float,
-                sampled,
+                sampled | wgpu::TextureUsages::COPY_SRC,
             )
             .create_view(&Default::default());
             let group = self.bind(device, &color);

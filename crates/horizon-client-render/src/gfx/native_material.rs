@@ -624,7 +624,12 @@ mod tests {
             fn apply_fog(c: vec4<f32>) -> vec4<f32> { return c * gain; }\n\
             fn material(input: MaterialInput) -> Surface {\n    \
                 let lit = input.albedo * input.tint * vec4(input.lightmap, 1.0);\n    \
-                return Surface(apply_fog(sprite(lit)));\n}\n";
+                let t = vec2<i32>(input.screen * frame.resolution);\n    \
+                let behind = textureLoad(opaque_color, t, 0) * textureLoad(opaque_depth, t, 0);\n    \
+                let mirrored = textureSampleLevel(reflection, reflection_sampler, input.screen, 0.0);\n    \
+                let kind = f32(input.face + input.fluid) * input.emission * mirrored.a;\n    \
+                let frame_of = vec4(cross(input.normal, input.tangent.xyz) * input.tangent.w, kind);\n    \
+                return Surface(apply_fog(sprite(lit)) + (behind + frame_of) * 0.0);\n}\n";
         let stage = stage(own);
         let module = module(&stage, false, false).unwrap();
         let info = naga::valid::Validator::new(

@@ -33,6 +33,8 @@ pub struct NativePost {
     /// Last frame's input to the last pass (binding 8), and its size.
     history: Option<([u32; 2], wgpu::Texture)>,
     history_blank: wgpu::Texture,
+    /// Whether `history` holds a frame of this size.
+    history_valid: bool,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     /// Two targets of the world's size, written in turn by the chain's passes (none without
@@ -45,7 +47,7 @@ pub struct NativePost {
     scales: Vec<f32>,
     named: Option<([u32; 2], Vec<wgpu::TextureView>)>,
     /// One bind group per pass, for these world views.
-    groups: Option<(WorldViews, Vec<wgpu::BindGroup>)>,
+    groups: Option<(WorldViews, bool, Vec<wgpu::BindGroup>)>,
     /// The screen's colour format, the world target's too.
     format: wgpu::TextureFormat,
     /// Pass-dump state, when `HORIZON_PASS_DUMP` names a directory.
@@ -100,7 +102,8 @@ fn scaled(size: [u32; 2], scale: f32) -> [u32; 2] {
     size.map(|s| ((s as f32 * scale).ceil() as u32).max(1))
 }
 
-/// The `frame` every stage of a pack reads (group 3, binding 0), written once a frame.
+/// The `frame` every stage of a pack reads (group 3, binding 0), written once a frame, and
+/// what the material stage reads besides.
 pub struct NativeFrame {
     pub(super) buffer: wgpu::Buffer,
     /// Group 3 of the stages that read the frame and the reflection buffer (the sky and
@@ -142,12 +145,53 @@ pub struct NativeFrame {
     pub block_light: super::block_light::BlockLight,
     /// Last frame's view-projection, camera and time.
     last: Option<([[f32; 4]; 4], glam::DVec3, std::time::Instant)>,
+    /// A post stage must use black history after a long gap until it has rendered a frame.
+    history_reset: bool,
     /// `wetness`, `biome_rain` and `biome_snow`, eased from frame to frame.
     weather: [f32; 3],
     /// The eased eye light (sky, block) and being in water and lava (`write`).
     eye: [f32; 4],
     start: std::time::Instant,
     frames: u32,
+    /// `frame.wetness`, and when it was last written.
+    wetness: (f32, Option<std::time::Instant>),
+}
+
+/// A depth texture of `size` the world's depth is copied into.
+fn depth_copy(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+    copy_target(
+        device,
+        "Native shader pack opaque depth",
+        size,
+        wgpu::TextureFormat::Depth32Float,
+    )
+}
+
+/// A colour texture of `size` and `format` the world's colour is copied into.
+fn color_copy(device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) -> wgpu::Texture {
+    copy_target(device, "Native shader pack opaque colour", size, format)
+}
+
+fn copy_target(
+    device: &wgpu::Device,
+    label: &str,
+    size: [u32; 2],
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 /// The uniform `frame` at binding 0, read by `visibility`.
@@ -162,6 +206,11 @@ fn frame_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+/// The water mirror's targets at `size` of the world: half of it, rounded up.
+pub fn reflection_size(size: [u32; 2]) -> [u32; 2] {
+    size.map(|s| s.div_ceil(2).max(1))
 }
 
 /// Seconds between frames past which the last one is forgotten (`NativeFrame::write`).
@@ -334,6 +383,8 @@ impl NativeFrame {
             eye: [f32::NAN; 4],
             start: std::time::Instant::now(),
             frames: 0,
+            history_reset: true,
+            wetness: (0.0, None),
         }
     }
 
@@ -548,7 +599,10 @@ impl NativeFrame {
                 inputs.camera_motion = (frame.camera - camera).as_vec3().to_array();
                 inputs.delta_time = (now - time).as_secs_f32();
             }
-            _ => self.eye = [f32::NAN; 4],
+            _ => {
+                self.eye = [f32::NAN; 4];
+                self.history_reset = true;
+            }
         }
         // Eased toward this frame's weather by half-lives in seconds: rising, falling.
         let dt = inputs.delta_time;
@@ -584,6 +638,14 @@ impl NativeFrame {
         self.last = Some((view_proj, frame.camera, now));
         self.frames = self.frames.wrapping_add(1);
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&inputs));
+    }
+
+    /// Takes the post stage's pending history reset. It stays pending if post rendering is
+    /// skipped for a frame, so the first frame it does render still sees black history.
+    pub(super) fn take_history_reset(&mut self) -> bool {
+        let reset = self.history_reset;
+        self.history_reset = false;
+        reset
     }
 }
 
@@ -646,42 +708,6 @@ fn surface_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
         dimension: wgpu::TextureDimension::D2,
         format: super::native_material::SURFACE_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    })
-}
-
-/// A colour texture of `size` and `format` the world's colour is copied into.
-fn color_copy(device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Native shader pack opaque colour"),
-        size: wgpu::Extent3d {
-            width: size[0].max(1),
-            height: size[1].max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    })
-}
-
-/// A depth texture of `size` the world's depth is copied into.
-fn depth_copy(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Native shader pack opaque depth"),
-        size: wgpu::Extent3d {
-            width: size[0].max(1),
-            height: size[1].max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }
@@ -968,6 +994,7 @@ impl NativePost {
             named: None,
             plan,
             groups: None,
+            history_valid: false,
             format,
             dump: std::env::var_os("HORIZON_PASS_DUMP").map(|dir| Dump {
                 dir: dir.into(),
@@ -986,6 +1013,7 @@ impl NativePost {
         device: &wgpu::Device,
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
         size: [u32; 2],
+        history_reset: bool,
     ) {
         let chain = self
             .plan
@@ -1034,6 +1062,7 @@ impl NativePost {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: INTERMEDIATE,
+                        // COPY_SRC: the last pass's input is kept as next frame's `history`.
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::COPY_SRC,
@@ -1052,22 +1081,25 @@ impl NativePost {
                 size,
                 intermediate(device, "Native shader pack history", size),
             ));
+            self.history_valid = false;
             self.groups = None;
         }
+        let blank_history = history_reset || !self.history_valid;
         if self
             .groups
             .as_ref()
-            .is_some_and(|((color, depth, surface), _)| {
-                color == world.0 && depth == world.1 && surface == world.2
+            .is_some_and(|((color, depth, surface), blank, _)| {
+                color == world.0 && depth == world.1 && surface == world.2 && *blank == blank_history
             })
         {
             return;
         }
-        let history = self
-            .history
-            .as_ref()
-            .map_or(&self.history_blank, |(_, t)| t)
-            .create_view(&Default::default());
+        let history = if blank_history {
+            &self.history_blank
+        } else {
+            self.history.as_ref().map_or(&self.history_blank, |(_, t)| t)
+        }
+        .create_view(&Default::default());
         let blank = self.history_blank.create_view(&Default::default());
         let groups = (0..self.passes.len())
             .map(|i| {
@@ -1148,7 +1180,11 @@ impl NativePost {
                 })
             })
             .collect();
-        self.groups = Some(((world.0.clone(), world.1.clone(), world.2.clone()), groups));
+        self.groups = Some((
+            (world.0.clone(), world.1.clone(), world.2.clone()),
+            blank_history,
+            groups,
+        ));
     }
 
     /// Runs the passes over the world target `world` (colour, depth, surface) of `size`, the last onto
@@ -1160,9 +1196,10 @@ impl NativePost {
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
         screen: &wgpu::TextureView,
         size: [u32; 2],
+        history_reset: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
-        self.prepare(device, world, size);
+        self.prepare(device, world, size, history_reset);
         // Copies made last frame: write them before this frame's copies ask for more.
         if let Some(dump) = &mut self.dump {
             dump.flush(device);
@@ -1176,7 +1213,7 @@ impl NativePost {
                 "World (entities, water, the rest)",
             );
         }
-        let Some((_, groups)) = &self.groups else {
+        let Some((_, _, groups)) = &self.groups else {
             return;
         };
         let dump_now = self
@@ -1236,6 +1273,7 @@ impl NativePost {
                 history.as_image_copy(),
                 history.size(),
             );
+            self.history_valid = true;
         }
     }
 }
@@ -1593,6 +1631,13 @@ mod tests {
     use super::*;
     use horizon_shader_api::{MANIFEST, Pack, check};
 
+    #[test]
+    fn wetness_rises_slower_than_it_dries() {
+        assert_eq!(wetness(0.0, 1.0, 30.0), 0.5);
+        assert_eq!(wetness(1.0, 0.0, 10.0), 0.5);
+        assert_eq!(wetness(0.25, 0.25, 5.0), 0.25);
+    }
+
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
@@ -1748,6 +1793,113 @@ mod tests {
         assert!(
             near(pixel[0], 204) && near(pixel[1], 102) && near(pixel[2], 51) && near(pixel[3], 128),
             "{pixel:?}"
+        );
+    }
+
+    /// `history` is black on the first frame, then what the pass before the last wrote the
+    /// frame before.
+    #[test]
+    fn the_last_pass_reads_last_frames_input_as_history() {
+        let Some((device, queue)) = device() else {
+            return;
+        };
+        let manifest = "schema = 1
+id = \"t\"
+name = \"T\"
+version = \"1\"
+api = \"0.1\"
+            [[post]]
+file = \"a.wgsl\"
+[[post]]
+file = \"b.wgsl\"
+";
+        let a = "fn post(input: PostInput) -> vec4<f32> { return vec4<f32>(input.color.rgb * 0.5, 1.0); }
+";
+        let b = "fn post(input: PostInput) -> vec4<f32> { return textureLoad(history, vec2<i32>(input.pixel), 0); }
+";
+        let files = [(MANIFEST, manifest), ("a.wgsl", a), ("b.wgsl", b)]
+            .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+            .into();
+        let report = check(&Pack::from_files(files).unwrap()).unwrap();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let frame = NativeFrame::new(&device, None);
+        let mut post = NativePost::new(&device, report.stages, &[], format, &frame).unwrap();
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let color = texture(&device, format, usage).create_view(&Default::default());
+        let depth = texture(&device, wgpu::TextureFormat::Depth32Float, usage)
+            .create_view(&Default::default());
+        let screen = texture(
+            &device,
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let view = screen.create_view(&Default::default());
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT * 4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut frame_pixel = |history_reset| {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            post.run(
+                &device,
+                &mut encoder,
+                (&color, &depth),
+                &view,
+                [4, 4],
+                history_reset,
+                None,
+            );
+            encoder.copy_texture_to_buffer(
+                screen.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                        rows_per_image: Some(4),
+                    },
+                },
+                screen.size(),
+            );
+            queue.submit([encoder.finish()]);
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let pixel = buffer.slice(..).get_mapped_range().unwrap()[..4].to_vec();
+            buffer.unmap();
+            pixel
+        };
+        assert_eq!(
+            frame_pixel(true)[..3],
+            [0, 0, 0],
+            "black on the first frame"
+        );
+        let second = frame_pixel(false);
+        assert!(
+            second[..3].iter().all(|&v| v.abs_diff(128) <= 1),
+            "{second:?}"
+        );
+        assert_eq!(frame_pixel(true)[..3], [0, 0, 0], "black after a frame gap");
+        let fourth = frame_pixel(false);
+        assert!(
+            fourth[..3].iter().all(|&v| v.abs_diff(128) <= 1),
+            "{fourth:?}"
         );
     }
 }

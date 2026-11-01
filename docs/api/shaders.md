@@ -74,6 +74,10 @@ steps_option = "relief_steps"  # optional: a bool option: while on, each cell is
 [reflection]               # optional, needs [material]: when the water mirror (`reflection`) is drawn
 option = "water_reflections"  # optional: drawn while this option is not 0 (else whenever the stage reads it)
 
+[shadow]                   # optional, needs [material] or [[post]]: a shadow map from the sun (the moon by night)
+resolution = 2048          # its side in texels, 256 to 8192
+distance = 128.0           # half the side of the square it covers, in blocks, 32 to 512
+
 [[post]]                   # full-screen passes, in the order they run (8 at most)
 file = "post/grade.wgsl"
 name = "Colour grade"      # optional: the GPU time overlay's label
@@ -106,6 +110,9 @@ items = ["saturation"]
 
 [budget]
 gpu_ms = 1.5               # optional: the GPU time the pack aims to add (0 to 16 ms)
+
+[reflection]               # optional, needs [material]: when the water mirror (`reflection`) is drawn
+option = "reflections"     # optional: drawn while this option is not 0 (else whenever the material reads it)
 ```
 
 An option's `override` has the type of its kind: `bool`, `f32`, `i32`, or `u32` for a choice (the index of the
@@ -127,7 +134,7 @@ pack exist ([stability.md](stability.md)).
 
 ## Not there yet
 
-Option values other than the defaults (the three stages run, with hot reload), then the overlay, lighting and shadow
+Option values other than the defaults (the three stages run, with hot reload), then the overlay and lighting
 stages.
 
 ## Changelog
