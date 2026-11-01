@@ -4093,6 +4093,20 @@ impl ParticleEngine {
         }
     }
 
+    /// The fireflies as lights, for the rays: where each is this frame and how far it has faded in.
+    pub fn firefly_lights(&self, partial: f32) -> Vec<([f64; 3], f32)> {
+        self.particles
+            .iter()
+            .filter(|p| matches!(p.behaviour, Behaviour::Firefly))
+            .map(|p| {
+                let f = f64::from(partial);
+                let at = std::array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * f);
+                let progress = p.lifetime_progress(p.age as f32 + partial);
+                (at, fade_amount(progress, 0.3, 0.5))
+            })
+            .collect()
+    }
+
     /// Camera-facing quads (`QuadParticleRenderState.renderRotatedQuad`).
     pub fn render(
         &self,

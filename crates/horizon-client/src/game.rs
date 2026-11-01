@@ -14781,11 +14781,33 @@ impl Game<'_> {
         let g = self.debug_gizmos(alpha as f32, camera.to_array());
         lines.extend(g.lines);
         let on_top = g.on_top;
-        let colored_lights = if self.title.is_none() {
+        let mut colored_lights = if self.title.is_none() {
             self.native_frame_visuals(camera, &mut lines)
         } else {
             Vec::new()
         };
+        // Fireflies light what's around them in the rays, moving and fading as they do. Behind the
+        // list's others, which the classic shaders read first; the rays read all of them.
+        if self.title.is_none() && self.renderer.as_ref().is_some_and(|r| r.rays_on()) {
+            const FIREFLY_REACH: f32 = 5.0;
+            let partial = self.clock.camera_fraction() as f32;
+            let mut near: Vec<[[f32; 4]; 2]> = self
+                .particles
+                .firefly_lights(partial)
+                .into_iter()
+                .filter(|(_, fade)| *fade > 0.02)
+                .map(|(at, fade)| {
+                    let p = (glam::DVec3::from(at) - camera).as_vec3();
+                    [[p.x, p.y, p.z, FIREFLY_REACH * fade], [0.72, 1.0, 0.3, 1.0]]
+                })
+                .collect();
+            near.sort_by(|a, b| {
+                let d = |l: &[[f32; 4]; 2]| l[0][0] * l[0][0] + l[0][1] * l[0][1] + l[0][2] * l[0][2];
+                d(a).total_cmp(&d(b))
+            });
+            near.truncate(64);
+            colored_lights.extend(near);
+        }
         let emissive_layers = if self.title.is_none() {
             let mut requests = Vec::new();
             self.native_emissive(&mut requests);

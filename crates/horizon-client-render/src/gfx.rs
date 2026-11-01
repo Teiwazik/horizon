@@ -6760,12 +6760,20 @@ impl Renderer {
                     0,
                     bytemuck::bytes_of(&mirror_globals),
                 );
+                // With the rays the pack draws the sky in the water itself, with its clouds: here it
+                // only needs to know where no terrain stands, by alpha 0.
+                let mirror_sky_by_pack = self.rays_on();
+                let mirror_clear = if mirror_sky_by_pack {
+                    wgpu::Color { a: 0.0, ..clear }
+                } else {
+                    clear
+                };
                 let attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: &mirror.color,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
+                        load: wgpu::LoadOp::Clear(mirror_clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })];
@@ -6786,7 +6794,7 @@ impl Renderer {
                     ..Default::default()
                 });
                 pass.set_bind_group(0, &self.mirror_group, &[]);
-                if sky_visible && frame.skybox {
+                if sky_visible && frame.skybox && !mirror_sky_by_pack {
                     pass.set_pipeline(&self.sky);
                     pass.draw(0..3, 0..1);
                 }
