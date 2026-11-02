@@ -1226,7 +1226,6 @@ impl PreparedTextures {
     }
 }
 
-
 fn mip_chain(
     pixels: &[u8],
     size: u32,
@@ -6849,11 +6848,12 @@ impl Renderer {
             .filter(|_| !frame.title)
             .and_then(|n| Some((n.material.as_ref()?, &n.frame.group)));
         // The pack's solid terrain goes through a depth pre-pass, then its material shades the
-        // nearest point of each pixel alone; not with occlusion culling, whose second phase
-        // draws only after its test.
+        // nearest point of each pixel alone. With occlusion culling the pre-pass holds phase 1's
+        // depth for the test, phase 2's goes in after it, and all of it is shaded only then: a
+        // material tracing rays paid for every hidden fragment of the sections behind.
         let prepass = material
             .map(|(m, _)| &m.prepass)
-            .filter(|_| cull.is_none() && !pack_draws_terrain);
+            .filter(|_| !pack_draws_terrain);
         let solid_pipeline = match prepass {
             Some(p) => &p.solid,
             None => material.map_or(&self.solid, |(m, _)| &m.solid),
@@ -6970,17 +6970,23 @@ impl Renderer {
                     pass.draw(0..3, 0..1);
                 }
             }
-            let terrain_pass =
-                |encoder: &mut wgpu::CommandEncoder,
-                 surface: &(wgpu::TextureView, wgpu::TextureView),
-                 clear: bool| {
-                    // Its lifetime forgotten: a closure cannot tie it to `encoder`'s.
-                    let mut pass = surface_pass(encoder, world_view, &surface.0, &surface.1, world_depth, clear)
-                        .forget_lifetime();
-                    pass.set_bind_group(0, &self.group, &[]);
-                    pack_frame(&mut pass);
-                    pass
-                };
+            let terrain_pass = |encoder: &mut wgpu::CommandEncoder,
+                                surface: &(wgpu::TextureView, wgpu::TextureView),
+                                clear: bool| {
+                // Its lifetime forgotten: a closure cannot tie it to `encoder`'s.
+                let mut pass = surface_pass(
+                    encoder,
+                    world_view,
+                    &surface.0,
+                    &surface.1,
+                    world_depth,
+                    clear,
+                )
+                .forget_lifetime();
+                pass.set_bind_group(0, &self.group, &[]);
+                pack_frame(&mut pass);
+                pass
+            };
             // The occlusion test's pipeline draws into the world's colour alone.
             let plain_pass = |encoder: &mut wgpu::CommandEncoder| {
                 let mut pass =
@@ -7004,9 +7010,12 @@ impl Renderer {
                     Some(flat) => {
                         if let Some(depth) = &p.depth_flat {
                             pass.set_pipeline(depth);
-                            flat.draw(&mut pass, &flat.calls[..flat.solid_calls], |p| {
-                                self.arena.buffer(p)
-                            });
+                            let end = if cull.is_some() {
+                                flat.phase1_calls
+                            } else {
+                                flat.solid_calls
+                            };
+                            flat.draw(&mut pass, &flat.calls[..end], |p| self.arena.buffer(p));
                             pass.set_bind_group(0, &self.group, &[]);
                         }
                     }
@@ -7014,7 +7023,12 @@ impl Renderer {
                         pass.set_pipeline(&p.depth);
                         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.set_vertex_buffer(1, self.instances.slice(..));
-                        self.draw_sections(&mut pass, &self.indirect, 0, 0, solid_draws);
+                        let end = if cull.is_some() {
+                            phase1_draws
+                        } else {
+                            solid_draws
+                        };
+                        self.draw_sections(&mut pass, &self.indirect, 0, 0, end);
                     }
                 }
             }
@@ -7031,8 +7045,9 @@ impl Renderer {
                     let vertices = |p| self.arena.buffer(p);
                     // Without a pack, on Metal, each list draws twice: the opaque
                     // pass, then the cutout one (terrain.wgsl's `opaque_quad`).
+                    // After a pre-pass, its own pipeline: shading what the pre-pass found nearest.
                     let passes: &[&wgpu::RenderPipeline] = match pack_flat {
-                        Some(p) => &[&p.0],
+                        Some(p) => &[flat_solid.unwrap_or(&p.0)],
                         None if split_solid => &[&flat.solid_opaque, &flat.solid_cutout],
                         None => &[&flat.solid],
                     };
@@ -7046,7 +7061,11 @@ impl Renderer {
                         // As below: phase 1, the test, then phase 2's draws
                         // that the test saw, copied after it.
                         Some(cull) => {
-                            draw(&mut pass, &flat.calls[..flat.phase1_calls]);
+                            // With a pre-pass, phase 1 is shaded after the test, with phase 2.
+                            let depth_first = prepass.and_then(|p| p.depth_flat.as_ref());
+                            if depth_first.is_none() {
+                                draw(&mut pass, &flat.calls[..flat.phase1_calls]);
+                            }
                             if surface.is_some() {
                                 drop(pass);
                                 pass = plain_pass(&mut encoder);
@@ -7068,6 +7087,13 @@ impl Renderer {
                             };
                             pass.set_bind_group(0, &self.group, &[]);
                             pack_frame(&mut pass);
+                            if let Some(depth) = depth_first {
+                                pass.set_pipeline(depth);
+                                flat.draw_phase2(&mut pass, vertices);
+                                pass.set_bind_group(0, &self.group, &[]);
+                                draw(&mut pass, &flat.calls[..flat.phase1_calls]);
+                                pass.set_bind_group(0, &self.group, &[]);
+                            }
                             for &pipeline in passes {
                                 pass.set_pipeline(pipeline);
                                 flat.draw_phase2(&mut pass, vertices);
@@ -7092,10 +7118,19 @@ impl Renderer {
                             // Phase 1 and the boxes against its depth (in
                             // its pass, or one of their own on Metal), then
                             // what they found in sight, in a pass that loads
-                            // both targets (it reads the test's results).
-                            for &pipeline in passes {
-                                pass.set_pipeline(pipeline);
-                                self.draw_sections(&mut pass, &self.indirect, 0, 0, phase1_draws);
+                            // both targets (it reads the test's results). With a pre-pass,
+                            // phase 1 is shaded there too, after phase 2's depth.
+                            if prepass.is_none() {
+                                for &pipeline in passes {
+                                    pass.set_pipeline(pipeline);
+                                    self.draw_sections(
+                                        &mut pass,
+                                        &self.indirect,
+                                        0,
+                                        0,
+                                        phase1_draws,
+                                    );
+                                }
                             }
                             if surface.is_some() {
                                 drop(pass);
@@ -7122,6 +7157,26 @@ impl Renderer {
                                 wgpu::IndexFormat::Uint32,
                             );
                             pass.set_vertex_buffer(1, self.instances.slice(..));
+                            if let Some(p) = prepass {
+                                pass.set_pipeline(&p.depth);
+                                self.draw_sections(
+                                    &mut pass,
+                                    &cull.phase2,
+                                    phase1_draws,
+                                    phase1_draws,
+                                    solid_draws - phase1_draws,
+                                );
+                                for &pipeline in passes {
+                                    pass.set_pipeline(pipeline);
+                                    self.draw_sections(
+                                        &mut pass,
+                                        &self.indirect,
+                                        0,
+                                        0,
+                                        phase1_draws,
+                                    );
+                                }
+                            }
                             for &pipeline in passes {
                                 pass.set_pipeline(pipeline);
                                 self.draw_sections(
