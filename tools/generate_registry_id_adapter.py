@@ -72,10 +72,12 @@ def states(blocks):
     return found
 
 
-def table(source, target):
-    """For each id of `source` (in order), the id `target` gives the same key, or NONE."""
+def table(source, target, renames=None):
+    """For each id of `source` (in order), the id `target` gives the same key (or the key it was renamed
+    to), or NONE."""
+    renames = renames or {}
     by_id = sorted(source.items(), key=lambda kv: kv[1])
-    return [target.get(key, NONE) for key, _ in by_id]
+    return [target.get(renames.get(key, key), NONE) for key, _ in by_id]
 
 
 def runs(values):
@@ -111,7 +113,16 @@ def main():
     parser.add_argument("--old", type=Path, required=True, help="the older version's prepared directory")
     parser.add_argument("--new", type=Path, help="the pinned version's prepared directory (default: .local)")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--rename", action="append", default=[], metavar="REGISTRY:OLD=NEW",
+                        help="an entry the pinned version knows by another name, e.g. "
+                             "minecraft:command_argument_type:minecraft:color=minecraft:team_color")
     args = parser.parse_args()
+    renames = {}
+    for spec in args.rename:
+        head, new = spec.split("=", 1)
+        registry, old_path = head.rsplit(":", 1)
+        registry, old_ns = registry.rsplit(":", 1)
+        renames.setdefault(registry, {})[f"{old_ns}:{old_path}"] = new
     old_reports = args.old / "datagen/reports"
     new_reports = args.new / "datagen/reports" if args.new else ROOT / ".local/datagen/out/reports"
     old_info = lab.version_info(args.old / "jars/client.jar")
@@ -141,8 +152,10 @@ def main():
             continue
         name = const_name(registry)
         lines.append(f"/// `{registry}`: {len(o)} in {old_info['id']}, {len(n)} pinned.")
-        lines.extend(rust_table(f"{name}_UP", table(o, n)))
-        lines.extend(rust_table(f"{name}_DOWN", table(n, o)))
+        forward = renames.get(registry, {})
+        backward = {new: old for old, new in forward.items()}
+        lines.extend(rust_table(f"{name}_UP", table(o, n, forward)))
+        lines.extend(rust_table(f"{name}_DOWN", table(n, o, backward)))
     lines.append(f"/// Every table above, as the adapter reads them.")
     lines.append("pub const IDS: super::ids::Ids = super::ids::Ids {")
     lines.append("    quirks: super::ids::Quirks::NONE,")

@@ -1,9 +1,14 @@
 //! Speaking to servers of an older release: the first layer of the native protocol adapter (roadmap
 //! `older-servers`). Horizon's packets are 26.3's; a server on another protocol numbers them differently.
-//! This maps packet ids per connection state, both ways. It does not translate packet contents.
+//! This maps packet ids per connection state, both ways; `session` and `translate` carry the packets
+//! through, renumbering registry ids and rewriting the packets whose layout changed. An older version
+//! is translated a release at a time (26.1 to 26.2, then 26.2 to 26.3), with its ids mapped straight
+//! to the pinned ones.
 pub mod ids;
 pub mod session;
 mod translate;
+pub mod v26_1_2;
+mod v26_1_2_ids;
 pub mod v26_2;
 mod v26_2_ids;
 
@@ -21,16 +26,19 @@ pub enum ServerVersion {
     #[default]
     Current,
     V26_2,
+    /// 26.1, 26.1.1 and 26.1.2: one protocol.
+    V26_1,
 }
 
 impl ServerVersion {
-    pub const ALL: [Self; 2] = [Self::Current, Self::V26_2];
+    pub const ALL: [Self; 3] = [Self::Current, Self::V26_2, Self::V26_1];
 
     /// The protocol number its handshake states.
     pub fn protocol(self) -> i32 {
         match self {
             Self::Current => crate::PROTOCOL_VERSION,
             Self::V26_2 => v26_2::PROTOCOL,
+            Self::V26_1 => v26_1_2::PROTOCOL,
         }
     }
 
@@ -39,6 +47,7 @@ impl ServerVersion {
         match self {
             Self::Current => crate::GAME_VERSION,
             Self::V26_2 => v26_2::NAME,
+            Self::V26_1 => "26.1",
         }
     }
 
@@ -64,6 +73,8 @@ impl ServerVersion {
             (Self::Current, _) => return Some(id),
             (Self::V26_2, Direction::Clientbound) => v26_2::clientbound(state),
             (Self::V26_2, Direction::Serverbound) => v26_2::serverbound(state),
+            (Self::V26_1, Direction::Clientbound) => v26_1_2::clientbound(state),
+            (Self::V26_1, Direction::Serverbound) => v26_1_2::serverbound(state),
         };
         let mapped = *table.get(usize::try_from(id).ok()?)?;
         mapped.map(i32::from)
@@ -106,7 +117,11 @@ mod tests {
             ServerVersion::from_protocol(crate::PROTOCOL_VERSION),
             Some(ServerVersion::Current)
         );
-        assert_eq!(ServerVersion::from_protocol(775), None);
+        assert_eq!(
+            ServerVersion::from_protocol(775),
+            Some(ServerVersion::V26_1)
+        );
+        assert_eq!(ServerVersion::from_protocol(774), None);
     }
 
     #[test]
