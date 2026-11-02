@@ -591,10 +591,10 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
     }
     let hit = rayQueryGetCommittedIntersection(&query);
     if hit.kind == RAY_QUERY_INTERSECTION_NONE {
-        return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+        return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
     }
     if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
-        return RayHit(true, hit.t, vec3<f32>(0.4), -direction, 0.5, 0.0);
+        return RayHit(true, hit.t, vec3<f32>(0.4), -direction, 0.5, 0.0, true);
     }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
     let second = 1u + (hit.primitive_index & 1u);
@@ -605,7 +605,9 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
         horizon_ray_position(c) - horizon_ray_position(a));
     let size = length(normal);
     normal = select(-direction, normal / size, size > 1e-6);
-    if dot(normal, direction) > 0.0 {
+    // The quads wind outward, so a normal along the ray means the inner side.
+    let front = dot(normal, direction) <= 0.0;
+    if !front {
         normal = -normal;
     }
     let word = horizon_ray_vertices[a + 4u];
@@ -618,7 +620,7 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
     // A low mip: the bounce wants the block's colour, without its grain.
     let albedo = horizon_block_sample(uv, word & 0x7fffu, 3.0).rgb * tint;
     return RayHit(true, hit.t, albedo, normal,
-        f32((word >> 16u) & 255u) / 240.0, f32((word >> 24u) & 255u) / 240.0);
+        f32((word >> 16u) & 255u) / 240.0, f32((word >> 24u) & 255u) / 240.0, front);
 }
 fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> bool {
     return all(horizon_ray_trace(origin, direction, distance) == vec3<f32>(0.0));
@@ -838,7 +840,7 @@ fn horizon_ray_blue(salt: f32) -> vec2<f32> {
     return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
-    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
 }
 ";
 

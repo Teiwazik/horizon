@@ -240,6 +240,8 @@ struct RayHit {
     normal: vec3<f32>,
     sky: f32,
     block: f32,
+    // Whether the ray met the face's outer side: false from inside a block, behind its faces.
+    front: bool,
 }
 // The nearest solid thing along the ray (a prototype, `HORIZON_RT=1`).
 fn ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
@@ -337,7 +339,7 @@ fn horizon_ray_blue(salt: f32) -> vec2<f32> {
     return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
-    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
 }
 ";
 const POST_ENTRIES: &str = concat!(
@@ -379,7 +381,7 @@ fn horizon_ray_blue(salt: f32) -> vec2<f32> {
     return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
-    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
 }
 ",
     post_entry_points!()
@@ -497,6 +499,8 @@ struct RayHit {
     normal: vec3<f32>,
     sky: f32,
     block: f32,
+    // Whether the ray met the face's outer side: false from inside a block, behind its faces.
+    front: bool,
 }
 // The nearest solid thing along the ray (a prototype, `HORIZON_RT=1`).
 fn ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
@@ -613,7 +617,7 @@ fn horizon_ray_blue(salt: f32) -> vec2<f32> {
     return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
-    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
 }
 "
     };
