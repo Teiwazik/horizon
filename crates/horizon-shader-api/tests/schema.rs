@@ -480,12 +480,20 @@ fn reads_post_outputs_and_their_scales() {
 #[test]
 fn reads_particle_lights_and_refuses_bad_ones() {
     let entry = |extra: &str| {
-        format!("{}[[particle_lights]]\nparticles = [\"firefly\"]\n{extra}\n", sample_text())
+        format!(
+            "{}[[particle_lights]]\nparticles = [\"firefly\"]\n{extra}\n",
+            sample_text()
+        )
     };
     let m = Manifest::parse(&entry("color = [0.3, 0.35, 0.2]\nreach = 4.0\nsize = 0.08")).unwrap();
     assert_eq!(m.particle_lights[0].particles, ["firefly"]);
-    assert_eq!((m.particle_lights[0].reach, m.particle_lights[0].size), (4.0, 0.08));
+    assert_eq!(
+        (m.particle_lights[0].reach, m.particle_lights[0].size),
+        (4.0, 0.08)
+    );
     assert!(refused(&entry("color = [9.0, 0.0, 0.0]\nreach = 4.0\nsize = 0.08")).contains("0..=4"));
-    assert!(refused(&entry("color = [1.0, 1.0, 1.0]\nreach = 40.0\nsize = 0.08")).contains("reach"));
+    assert!(
+        refused(&entry("color = [1.0, 1.0, 1.0]\nreach = 40.0\nsize = 0.08")).contains("reach")
+    );
     assert!(refused(&entry("color = [1.0, 1.0, 1.0]\nreach = 4.0\nsize = 2.0")).contains("size"));
 }

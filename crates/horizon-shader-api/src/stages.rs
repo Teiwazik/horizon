@@ -215,6 +215,12 @@ fn ray_light_position(id: u32) -> vec3<f32> {
 fn ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     return horizon_ray_light_seen(id, position, normal, salt);
 }
+// Two random numbers in 0..1 for this pixel and frame, from blue noise: neighbouring pixels get
+// numbers far apart, so a few of them averaged cover the range. Another `salt` (a whole number)
+// gives another pair. 0.5 without ray tracing.
+fn ray_noise(salt: f32) -> vec2<f32> {
+    return horizon_ray_blue(salt);
+}
 var<private> horizon_ray_pixel: vec2<f32>;
 // The direct light of the block and dynamic lights at `position`, on a surface facing `normal`,
 // with two shadow rays at most: for what a ray met.
@@ -327,6 +333,9 @@ fn horizon_ray_light_position(id: u32) -> vec3<f32> {
 fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
+fn horizon_ray_blue(salt: f32) -> vec2<f32> {
+    return vec2<f32>(0.5);
+}
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
 }
@@ -365,6 +374,9 @@ fn horizon_ray_light_position(id: u32) -> vec3<f32> {
 }
 fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_blue(salt: f32) -> vec2<f32> {
+    return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
@@ -596,6 +608,9 @@ fn horizon_ray_light_position(id: u32) -> vec3<f32> {
 }
 fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_blue(salt: f32) -> vec2<f32> {
+    return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);

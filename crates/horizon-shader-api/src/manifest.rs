@@ -802,10 +802,16 @@ impl Manifest {
                 )));
             }
             if !(l.reach > 0.0 && l.reach <= 16.0) {
-                return Err(err(format!("particle light reach {} is not in (0, 16]", l.reach)));
+                return Err(err(format!(
+                    "particle light reach {} is not in (0, 16]",
+                    l.reach
+                )));
             }
             if !(l.size > 0.0 && l.size <= 1.0) {
-                return Err(err(format!("particle light size {} is not in (0, 1]", l.size)));
+                return Err(err(format!(
+                    "particle light size {} is not in (0, 1]",
+                    l.size
+                )));
             }
         }
         let particle_lights = raw

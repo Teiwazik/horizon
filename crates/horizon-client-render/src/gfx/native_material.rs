@@ -353,6 +353,7 @@ struct HorizonRayLight {
 }
 @group(3) @binding(60) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
 @group(3) @binding(61) var<storage, read> horizon_ray_light_cells: array<u32>;
+@group(3) @binding(62) var<storage, read> horizon_ray_blue_tile: array<u32>;
 fn horizon_ray_available() -> bool {
     return true;
 }
@@ -632,6 +633,16 @@ fn horizon_ray_noise(salt: f32) -> f32 {
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
     return f32((word >> 22u) ^ word) / 4294967296.0;
 }
+// Two numbers in 0..1 from the blue noise tile at this pixel: `salt` moves to another place of
+// the tile for each ray of a pixel, and each frame turns both by the R2 sequence, so over frames
+// every pixel sees the whole range while neighbours stay apart.
+fn horizon_ray_blue(salt: f32) -> vec2<f32> {
+    let s = u32(salt);
+    let at = (vec2<u32>(horizon_ray_pixel) + vec2<u32>(s * 23u, s * 41u)) % 64u;
+    let word = horizon_ray_blue_tile[at.y * 64u + at.x];
+    let base = vec2<f32>(f32(word & 0xffffu), f32(word >> 16u)) / 65536.0;
+    return fract(base + (f32(frame.frame_index % 4096u) + salt * 0.61803399 * 7.0) * vec2<f32>(0.7548776662, 0.5698402910));
+}
 // A direction within `radius` (the tangent of its half angle) of `direction`.
 fn horizon_ray_jitter(direction: vec3<f32>, radius: f32, salt: f32) -> vec3<f32> {
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(direction.y) > 0.9);
@@ -642,6 +653,8 @@ fn horizon_ray_jitter(direction: vec3<f32>, radius: f32, salt: f32) -> vec3<f32>
     let moved = horizon_ray_pixel + 5.588238 * f32(frame.frame_index % 64u);
     let even = fract(52.9829189 * fract(dot(moved, vec2<f32>(0.06711056, 0.00583715))) + salt * 0.61803399);
     let angle = even * 6.2831853;
+    // White, not the blue tile: with blue noise here a room of lamps flickered a tenth more,
+    // their soft shadows' rays turning together from frame to frame.
     let r = sqrt(horizon_ray_noise(salt + 17.0)) * radius;
     return normalize(direction + (x * cos(angle) + y * sin(angle)) * r);
 }
@@ -820,6 +833,9 @@ fn horizon_ray_light_position(id: u32) -> vec3<f32> {
 }
 fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+fn horizon_ray_blue(salt: f32) -> vec2<f32> {
+    return vec2<f32>(0.5);
 }
 fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> RayHit {
     return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);

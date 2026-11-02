@@ -89,6 +89,8 @@ pub struct RayScene {
     pub lights: wgpu::Buffer,
     /// Each grid cell's list of `lights`.
     pub light_cells: wgpu::Buffer,
+    /// A 64x64 tile of blue noise, two channels of 16 bits in each word (`blue_noise`).
+    pub blue_noise: wgpu::Buffer,
     light_grid: Vec<u32>,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Free ranges of `data`, in vertices, in order.
@@ -127,6 +129,95 @@ fn blas(
     )
 }
 
+/// Blue noise by void and cluster (Ulichney): a 64x64 tile wrapping at its edges, each texel's
+/// rank in 0..65536, spread so that texels of close ranks lie far apart. Random numbers drawn from
+/// it vary only between distant pixels: a filter over a few neighbours averages them out, where
+/// the same count of white noise leaves clumps. `seed` gives another, independent tile.
+pub fn blue_noise(seed: u64) -> Vec<u16> {
+    const SIZE: usize = 64;
+    const N: usize = SIZE * SIZE;
+    // How much each point weighs on the others, by wrapped distance.
+    let mut kernel = vec![0f32; N];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x.min(SIZE - x) as f32;
+            let dy = y.min(SIZE - y) as f32;
+            kernel[y * SIZE + x] = (-(dx * dx + dy * dy) / (2.0 * 1.9 * 1.9)).exp();
+        }
+    }
+    let spread = |energy: &mut [f32], at: usize, sign: f32| {
+        let (ax, ay) = (at % SIZE, at / SIZE);
+        for y in 0..SIZE {
+            let ky = (y + SIZE - ay) % SIZE;
+            for x in 0..SIZE {
+                energy[y * SIZE + x] += sign * kernel[ky * SIZE + (x + SIZE - ax) % SIZE];
+            }
+        }
+    };
+    let extreme = |energy: &[f32], on: &[bool], want: bool, most: bool| {
+        let mut best = usize::MAX;
+        for i in 0..N {
+            if on[i] == want
+                && (best == usize::MAX
+                    || (energy[i] > energy[best]) == most && energy[i] != energy[best])
+            {
+                best = i;
+            }
+        }
+        best
+    };
+    // A first scatter, then points moved from the tightest cluster to the largest void until
+    // none would move.
+    let mut state = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let mut on = vec![false; N];
+    let mut energy = vec![0f32; N];
+    let mut placed = 0;
+    while placed < N / 10 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let i = (state >> 33) as usize % N;
+        if !on[i] {
+            on[i] = true;
+            spread(&mut energy, i, 1.0);
+            placed += 1;
+        }
+    }
+    // Settled long before this many; the cap only guards against two points trading places.
+    for _ in 0..N {
+        let cluster = extreme(&energy, &on, true, true);
+        on[cluster] = false;
+        spread(&mut energy, cluster, -1.0);
+        let void = extreme(&energy, &on, false, false);
+        on[void] = true;
+        spread(&mut energy, void, 1.0);
+        if void == cluster {
+            break;
+        }
+    }
+    let mut rank = vec![0usize; N];
+    // The first points' ranks, taking the tightest cluster away each time.
+    let (mut first, mut first_energy) = (on.clone(), energy.clone());
+    for r in (0..placed).rev() {
+        let cluster = extreme(&first_energy, &first, true, true);
+        first[cluster] = false;
+        spread(&mut first_energy, cluster, -1.0);
+        rank[cluster] = r;
+    }
+    // The rest, filling the largest void each time.
+    for r in placed..N {
+        let void = extreme(&energy, &on, false, false);
+        on[void] = true;
+        spread(&mut energy, void, 1.0);
+        rank[void] = r;
+    }
+    rank.iter()
+        .map(|&r| ((r * 65536 + 32768) / N) as u16)
+        .collect()
+}
+
 impl RayScene {
     /// The scene, where the device has ray queries.
     pub fn new(device: &wgpu::Device) -> Option<Self> {
@@ -155,6 +246,21 @@ impl RayScene {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            blue_noise: {
+                let words: Vec<u32> = blue_noise(1)
+                    .iter()
+                    .zip(blue_noise(2))
+                    .map(|(&a, b)| u32::from(a) | u32::from(b) << 16)
+                    .collect();
+                wgpu::util::DeviceExt::create_buffer_init(
+                    device,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Ray noise"),
+                        contents: bytemuck::cast_slice(&words),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    },
+                )
+            },
             light_grid: vec![0; (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize * LIGHT_CELL_WORDS],
             lights: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Ray traced lights"),
@@ -539,5 +645,29 @@ impl RayScene {
             self.logged = std::time::Instant::now();
             self.builds = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod blue_noise_tests {
+    use super::blue_noise;
+
+    #[test]
+    fn every_rank_once_and_neighbours_apart() {
+        let tile = blue_noise(1);
+        let mut seen = tile.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 64 * 64);
+        // White noise puts a right-hand neighbour within 1/16 of the range about 1 time in 8;
+        // blue noise far less often.
+        let close = (0..64 * 64)
+            .filter(|&i| {
+                let right = (i / 64) * 64 + (i % 64 + 1) % 64;
+                (i32::from(tile[i]) - i32::from(tile[right])).abs() < 65536 / 16
+            })
+            .count();
+        assert!(close < 64 * 64 / 32, "{close} close neighbours");
+        assert_ne!(blue_noise(1), blue_noise(2));
     }
 }
