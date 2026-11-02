@@ -10279,6 +10279,7 @@ impl Game<'_> {
     ) -> Vec<Vertex> {
         self.entity_spans.borrow_mut().clear();
         self.entity_motion.borrow_mut().clear();
+        self.maps.slots.next_frame();
         // LevelExtractor.extract: the transient blocks queued since the last frame.
         self.drain_transient_block_queue();
         self.prepare_entity_culling(camera);
@@ -14793,19 +14794,22 @@ impl Game<'_> {
             && let Some(entries) = self.renderer.as_ref().and_then(|r| r.particle_lights())
         {
             let partial = self.clock.camera_fraction() as f32;
-            particle_lights.extend(self.particles.lights(entries, partial).into_iter().filter_map(
-                |(at, entry, alpha)| {
-                    (alpha > 0.02).then(|| {
-                        let p = (glam::DVec3::from(at) - camera).as_vec3();
-                        horizon_client::dynamic_light::ParticleSource {
-                            at: p.to_array(),
-                            reach: entry.reach * alpha,
-                            color: entry.color,
-                            size: entry.size,
-                        }
-                    })
-                },
-            ));
+            particle_lights.extend(
+                self.particles
+                    .lights(entries, partial)
+                    .into_iter()
+                    .filter_map(|(at, entry, alpha)| {
+                        (alpha > 0.02).then(|| {
+                            let p = (glam::DVec3::from(at) - camera).as_vec3();
+                            horizon_client::dynamic_light::ParticleSource {
+                                at: p.to_array(),
+                                reach: entry.reach * alpha,
+                                color: entry.color,
+                                size: entry.size,
+                            }
+                        })
+                    }),
+            );
             let d = |l: &horizon_client::dynamic_light::ParticleSource| {
                 l.at[0] * l.at[0] + l.at[1] * l.at[1] + l.at[2] * l.at[2]
             };
