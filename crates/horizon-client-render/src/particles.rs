@@ -4100,7 +4100,11 @@ impl ParticleEngine {
         &self,
         entries: &'a [horizon_shader_api::manifest::ParticleLight],
         partial: f32,
-    ) -> Vec<([f64; 3], &'a horizon_shader_api::manifest::ParticleLight, f32)> {
+    ) -> Vec<(
+        [f64; 3],
+        &'a horizon_shader_api::manifest::ParticleLight,
+        f32,
+    )> {
         let shining: Vec<_> = entries
             .iter()
             .flat_map(|e| {
@@ -4122,7 +4126,8 @@ impl ParticleEngine {
             .iter()
             .filter_map(|p| {
                 let (_, entry) = shining.iter().find(|(ty, _)| *ty == p.ty)?;
-                let at = std::array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * f);
+                let at =
+                    std::array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * f);
                 Some((at, *entry, p.rgba[3]))
             })
             .collect()
@@ -4252,8 +4257,13 @@ impl ParticleEngine {
             let light = sky_light | block_light << 8;
             // The rain's splashes under a pack that paints its rain pale: the texture's saturated
             // blue, multiplied away, would otherwise stand out as bright blue dots.
-            let rain_drop = all_translucent && matches!(p.ty, ParticleType::Rain | ParticleType::Splash);
-            let rgb = if rain_drop { [rgb[0], rgb[1], rgb[2] * 0.45] } else { rgb };
+            let rain_drop =
+                all_translucent && matches!(p.ty, ParticleType::Rain | ParticleType::Splash);
+            let rgb = if rain_drop {
+                [rgb[0], rgb[1], rgb[2] * 0.45]
+            } else {
+                rgb
+            };
             let alpha = if rain_drop { alpha * 0.6 } else { alpha };
             let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
             let color = c(alpha) << 24 | c(rgb[2]) << 16 | c(rgb[1]) << 8 | c(rgb[0]);

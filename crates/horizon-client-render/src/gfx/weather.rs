@@ -170,7 +170,6 @@ impl Weather {
     }
 }
 
-
 /// RenderPipelines.WEATHER: depth-tested, but no depth write, so the water
 /// and glass drawn behind the rain still show through it.
 fn depth_stencil() -> wgpu::DepthStencilState {

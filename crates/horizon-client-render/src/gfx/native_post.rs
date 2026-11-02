@@ -1171,7 +1171,11 @@ impl NativePost {
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
         size: [u32; 2],
         history_reset: bool,
-        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene, &wgpu::TextureView)>,
+        rays: Option<(
+            &wgpu::BindGroup,
+            &super::native_rt::RayScene,
+            &wgpu::TextureView,
+        )>,
     ) {
         let chain = self
             .plan
@@ -1383,7 +1387,11 @@ impl NativePost {
         size: [u32; 2],
         history_reset: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
-        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene, &wgpu::TextureView)>,
+        rays: Option<(
+            &wgpu::BindGroup,
+            &super::native_rt::RayScene,
+            &wgpu::TextureView,
+        )>,
     ) {
         self.prepare(device, world, size, history_reset, rays);
         // Copies made last frame: write them before this frame's copies ask for more.

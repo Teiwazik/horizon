@@ -216,22 +216,28 @@ impl RayScene {
     ) {
         // Sources by how much they matter to the camera, with a stable order among equals.
         let mut lights: Vec<(f32, [i32; 3], Light)> = Vec::new();
-        let mut add = |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3], size: f32, bright: f32| {
-            let d2 = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
-            if reach > 0.0 && d2 < (reach + 80.0) * (reach + 80.0) {
-                // The brightness is the level's: `[[lights]]` colours go up to 4.
-                let top = color[0].max(color[1]).max(color[2]).max(0.001);
-                lights.push((
-                    d2 - reach * reach,
-                    key,
-                    Light {
-                        position: [at[0], at[1], at[2], reach],
-                        // w: half the source's size, which softens its shadows.
-                        color: [color[0] / top * bright, color[1] / top * bright, color[2] / top * bright, size],
-                    },
-                ));
-            }
-        };
+        let mut add =
+            |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3], size: f32, bright: f32| {
+                let d2 = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
+                if reach > 0.0 && d2 < (reach + 80.0) * (reach + 80.0) {
+                    // The brightness is the level's: `[[lights]]` colours go up to 4.
+                    let top = color[0].max(color[1]).max(color[2]).max(0.001);
+                    lights.push((
+                        d2 - reach * reach,
+                        key,
+                        Light {
+                            position: [at[0], at[1], at[2], reach],
+                            // w: half the source's size, which softens its shadows.
+                            color: [
+                                color[0] / top * bright,
+                                color[1] / top * bright,
+                                color[2] / top * bright,
+                                size,
+                            ],
+                        },
+                    ));
+                }
+            };
         for (at, state) in sections.values().flatten() {
             if let Some((color, level)) = table.get(state) {
                 let p = (DVec3::new(f64::from(at[0]), f64::from(at[1]), f64::from(at[2])) + 0.5
@@ -252,7 +258,14 @@ impl RayScene {
             add([l[0], l[1], l[2]], [i32::MAX; 3], l[3], color, 0.5, 1.0);
         }
         for [p, c] in colored {
-            add([p[0], p[1], p[2]], [i32::MAX; 3], p[3], [c[0], c[1], c[2]], 0.5, 1.0);
+            add(
+                [p[0], p[1], p[2]],
+                [i32::MAX; 3],
+                p[3],
+                [c[0], c[1], c[2]],
+                0.5,
+                1.0,
+            );
         }
         for p in particles {
             let bright = p.color[0].max(p.color[1]).max(p.color[2]);
@@ -266,7 +279,8 @@ impl RayScene {
         let half = (LIGHT_GRID / 2) as f32 * LIGHT_CELL;
         let origin = (snap - camera).as_vec3() - half;
         self.light_grid.fill(0);
-        let mut cells = vec![Vec::<(f32, u16)>::new(); (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize];
+        let mut cells =
+            vec![Vec::<(f32, u16)>::new(); (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize];
         for (i, (_, _, light)) in lights.iter().enumerate() {
             let [x, y, z, reach] = light.position;
             let cell = |v: f32, o: f32| ((v - o) / LIGHT_CELL).floor() as i32;
@@ -280,8 +294,14 @@ impl RayScene {
                         // ranked at the middle, a source by the cell's edge lost its place to
                         // farther ones and its light ended on the edge in a straight line.
                         let middle = |c: i32, o: f32| o + (c as f32 + 0.5) * LIGHT_CELL;
-                        let off = |v: f32, c: i32, o: f32| ((v - middle(c, o)).abs() - LIGHT_CELL * 0.5).max(0.0);
-                        let (dx, dy, dz) = (off(x, cx, origin.x), off(y, cy, origin.y), off(z, cz, origin.z));
+                        let off = |v: f32, c: i32, o: f32| {
+                            ((v - middle(c, o)).abs() - LIGHT_CELL * 0.5).max(0.0)
+                        };
+                        let (dx, dy, dz) = (
+                            off(x, cx, origin.x),
+                            off(y, cy, origin.y),
+                            off(z, cz, origin.z),
+                        );
                         let d2 = dx * dx + dy * dy + dz * dz;
                         let n = LIGHT_GRID as i32;
                         cells[((cz * n + cy) * n + cx) as usize]

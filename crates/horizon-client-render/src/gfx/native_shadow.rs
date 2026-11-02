@@ -496,8 +496,7 @@ fn entity_pipeline(
         bind_group_layouts: &groups,
         ..Default::default()
     });
-    let attributes =
-        wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Unorm8x4,4=>Uint8x4,5=>Snorm8x4,6=>Float32x2];
+    let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Unorm8x4,4=>Uint8x4,5=>Snorm8x4,6=>Float32x2];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Native shader pack entity shadow"),
         layout: Some(&layout),
