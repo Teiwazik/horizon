@@ -5252,10 +5252,14 @@ impl Renderer {
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
         let view_proj = views.primary().view_proj(pose);
-        // TAA runs where the world post pass does, not under a shader pack's own.
+        // TAA runs where the world post pass does, not under a shader pack's own; after a
+        // native pack's post stage when an upscaling mode asks for it (its TAA then passes
+        // its input through, `engine_taa`).
+        let native_post_on = self.native.as_ref().is_some_and(|n| n.post.is_some());
         let taa = !frame.title
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.as_ref().is_none_or(|n| n.post.is_none());
+            && (!native_post_on || self.world_post.upscale > 1.0);
+        self.world_post.pack_taa = native_post_on && taa;
         let jittered = self.world_post.jitter(
             [self.config.width, self.config.height],
             taa,
@@ -6534,6 +6538,10 @@ impl Renderer {
                 .size()
                 .filter(|_| scaled.is_some())
                 .unwrap_or([self.config.width, self.config.height]);
+            native.frame.engine_taa = self
+                .world_post
+                .jitter_clip()
+                .filter(|_| self.world_post.pack_taa);
             native.frame.write(&self.queue, frame, size);
             native.frame.block_light.update(
                 &self.queue,
@@ -7815,11 +7823,13 @@ impl Renderer {
         {
             let size = self.world_post.size().unwrap_or([1, 1]);
             let history_reset = native.frame.take_history_reset();
+            // Under an upscaling mode the pack draws at the world's size and TAA rebuilds it.
+            let packed = self.world_post.pack_output().cloned();
             post.run(
                 &self.device,
                 &mut encoder,
                 (color, depth, &native.frame.surface_view),
-                &view_target,
+                packed.as_ref().unwrap_or(&view_target),
                 size,
                 history_reset,
                 native.timing.as_mut(),
@@ -7829,6 +7839,14 @@ impl Renderer {
                     .as_ref()
                     .map(|rays| (&self.group, rays, &native.frame.albedo_view)),
             );
+            if packed.is_some() {
+                self.world_post.finish(
+                    &self.queue,
+                    &mut encoder,
+                    &view_target,
+                    native.timing.as_mut(),
+                );
+            }
         } else if scaled.is_some() {
             self.world_post.finish(
                 &self.queue,

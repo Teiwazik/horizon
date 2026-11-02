@@ -284,6 +284,7 @@ The frame, as `frame` in every stage. Positions and directions are in world axes
 | `eye_light_smooth` | `vec2<f32>` | 592 | `eye_light` eased with a half-life of 2 seconds (Iris's `eyeBrightnessSmooth`): it follows the light levels' steps without stepping itself. |
 | `in_water` | `f32` | 600 | 1 while the camera is in water (`eye_in` 1), eased with a half-life of a quarter second in and out. |
 | `in_lava` | `f32` | 604 | The same for lava (`eye_in` 2). |
+| `engine_taa` | `vec4<f32>` | 608 | The renderer's own TAA after the post stage (an upscaling mode is on): z 1 while it runs, and then a pack's own TAA should pass its input through; xy this frame's sub-pixel jitter in clip space, already in `projection`; w output pixels per rendered pixel. All 0 without it. |
 
 ## Options
 
@@ -312,7 +313,7 @@ Every page must be reached from the first, and every option be on one of them.
 
 ## Limits
 
-- 28 post passes, 64 options, `budget.gpu_ms` up to 16.
+- 40 post passes, 64 options, `budget.gpu_ms` up to 16.
 - 32 settings pages of 64 items at most.
 - 256 KiB per WGSL file, 8 MiB per pack.
 - Per stage: 20000 naga expressions over all its functions, 64 texture reads (samples,

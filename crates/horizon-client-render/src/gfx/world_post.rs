@@ -19,6 +19,9 @@ struct WorldTarget {
     depth: wgpu::TextureView,
     group: wgpu::BindGroup,
     taa: Option<History>,
+    /// What a native shader pack's post stage draws into at the world's size, for TAA to
+    /// rebuild (`pack_taa`); TAA reads it in place of `color`.
+    packed: Option<wgpu::TextureView>,
 }
 
 /// TAA's two history textures at the output size (the world's, times the upscale), written
@@ -65,6 +68,8 @@ pub struct Post {
     pub upscale: f32,
     /// TAA runs this frame (`jitter`): not on the title screen or under a shader pack.
     taa_on: bool,
+    /// A native pack's post stage runs before TAA this frame: TAA reads what it drew.
+    pub pack_taa: bool,
     target: Option<WorldTarget>,
     taa_resources: Option<TaaResources>,
     /// Frames jittered so far (the Halton index), and which history the next resolve writes.
@@ -242,6 +247,7 @@ impl Post {
             antialias: false,
             taa: false,
             upscale: 1.0,
+            pack_taa: false,
             taa_on: false,
             target: None,
             taa_resources,
@@ -314,11 +320,11 @@ impl Post {
         }
         let (size, output) = self.sizes(window);
         let history_size = self.taa_on.then_some(output);
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|t| t.size != size || t.taa.as_ref().map(|h| h.size) != history_size)
-        {
+        if self.target.as_ref().is_none_or(|t| {
+            t.size != size
+                || t.taa.as_ref().map(|h| h.size) != history_size
+                || t.packed.is_some() != (self.pack_taa && history_size.is_some())
+        }) {
             let make_tex = |label, size: [u32; 2], format, usage| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -351,6 +357,10 @@ impl Post {
             )
             .create_view(&Default::default());
             let group = self.bind(device, &color);
+            let packed = (self.pack_taa && history_size.is_some()).then(|| {
+                make_tex("Pack output", size, self.format, sampled).create_view(&Default::default())
+            });
+            let taa_input = packed.as_ref().unwrap_or(&color);
             let taa = history_size.and_then(|output| {
                 let res = self.taa_resources.as_ref()?;
                 let history = [0, 1].map(|_| {
@@ -364,7 +374,7 @@ impl Post {
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&color),
+                                resource: wgpu::BindingResource::TextureView(taa_input),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -401,11 +411,25 @@ impl Post {
                 depth,
                 group,
                 taa,
+                packed,
             });
         }
         self.target
             .as_ref()
             .map(|t| (t.color.clone(), t.depth.clone()))
+    }
+
+    /// Where a native pack's post stage draws for TAA to rebuild, while `pack_taa` has it.
+    pub fn pack_output(&self) -> Option<&wgpu::TextureView> {
+        self.target.as_ref().and_then(|t| t.packed.as_ref())
+    }
+
+    /// This frame's jitter in clip space and the upscale while TAA runs, for a native pack.
+    pub fn jitter_clip(&self) -> Option<[f32; 3]> {
+        self.taa_on.then(|| {
+            let j = self.taa_this_frame.jitter;
+            [j[0], j[1], self.upscale]
+        })
     }
 
     /// The size of the world's own target, when it has one.

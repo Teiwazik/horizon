@@ -190,6 +190,11 @@ uniform! {
         in_water: f32,
         /// The same for lava (`eye_in` 2).
         in_lava: f32,
+        /// The renderer's own TAA after the post stage (an upscaling mode is on): z 1 while it
+        /// runs, and then a pack's own TAA should pass its input through; xy this frame's
+        /// sub-pixel jitter in clip space, already in `projection`; w output pixels per
+        /// rendered pixel. All 0 without it.
+        engine_taa: [f32; 4],
     }
 }
 
@@ -303,9 +308,9 @@ mod tests {
     #[test]
     fn frame_fields_carry_their_docs() {
         let wgsl = Frame::WGSL;
-        assert_eq!(wgsl.fields.len(), 45);
+        assert_eq!(wgsl.fields.len(), 46);
         assert!(wgsl.fields.iter().all(|f| !f.doc.trim().is_empty()));
-        assert_eq!(std::mem::size_of::<Frame>(), 6 * 64 + 14 * 16);
+        assert_eq!(std::mem::size_of::<Frame>(), 6 * 64 + 15 * 16);
         assert!(
             wgsl.wgsl()
                 .contains("    camera_position: vec3<f32>,\n    time: f32,\n")

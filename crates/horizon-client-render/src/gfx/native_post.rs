@@ -141,6 +141,9 @@ fn scaled(size: [u32; 2], scale: f32) -> [u32; 2] {
 /// The `frame` every stage of a pack reads (group 3, binding 0), written once a frame, and
 /// what the material stage reads besides.
 pub struct NativeFrame {
+    /// This frame's TAA jitter in clip space and the upscale while the renderer's TAA
+    /// rebuilds the picture after the post stage, `None` without it.
+    pub engine_taa: Option<[f32; 3]>,
     /// The ray tracing prototype's scene (binding 14), with `HORIZON_RT`.
     pub rays: Option<super::native_rt::RayScene>,
     pub(super) buffer: wgpu::Buffer,
@@ -427,6 +430,7 @@ impl NativeFrame {
             ),
         );
         Self {
+            engine_taa: None,
             rays,
             buffer,
             layout,
@@ -683,6 +687,15 @@ impl NativeFrame {
         }
         if !self.reflects {
             inputs.has_reflection = 0;
+        }
+        // Drawn with the jitter: the post stage's positions from depth and its reprojection
+        // then match what was drawn.
+        if let Some([x, y, upscale]) = self.engine_taa {
+            let projection = Mat4::from_translation(Vec3::new(x, y, 0.0))
+                * Mat4::from_cols_array_2d(&inputs.projection);
+            inputs.projection = projection.to_cols_array_2d();
+            inputs.projection_inverse = projection.inverse().to_cols_array_2d();
+            inputs.engine_taa = [x, y, 1.0, upscale];
         }
         let view_proj = (Mat4::from_cols_array_2d(&inputs.projection)
             * Mat4::from_cols_array_2d(&inputs.view))
@@ -1821,6 +1834,7 @@ pub fn frame_inputs(
         eye_light_smooth: [level(pack.eye_light[0]), level(pack.eye_light[1])],
         in_water: f32::from(u8::from(pack.eye_in as u32 == 1)),
         in_lava: f32::from(u8::from(pack.eye_in as u32 == 2)),
+        engine_taa: [0.0; 4],
     }
 }
 
