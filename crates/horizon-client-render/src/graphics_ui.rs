@@ -45,6 +45,7 @@ pub enum H {
     ResolutionScale,
     Antialiasing,
     Upscaling,
+    UpscalingSharpness,
     ScreenshotQuality,
     Hdr,
     /// Opens `Level::Hdr`.
@@ -297,6 +298,11 @@ pub fn rows(level: Level) -> Vec<Row> {
                 "Renders the world smaller and rebuilds it with TAA. Faster, softer.",
             ),
             h(
+                H::UpscalingSharpness,
+                Low,
+                "Sharpens the upscaled picture. Higher: crisper edges, more shimmer.",
+            ),
+            h(
                 H::ScreenshotQuality,
                 None,
                 "F2 screenshots at this many times the game's resolution. Higher takes longer.",
@@ -405,6 +411,11 @@ fn extra_rows(level: Level, settings: &Settings) -> Vec<Row> {
     if !settings.horizon.taa {
         rows.retain(|row| !matches!(row, Row::Setting(s) if s.item == Item::Horizon(H::Upscaling)));
     }
+    if settings.horizon.upscaling == Upscaling::Native {
+        rows.retain(
+            |row| !matches!(row, Row::Setting(s) if s.item == Item::Horizon(H::UpscalingSharpness)),
+        );
+    }
     // Drop headings whose settings were all on the parent screens.
     let mut has_setting = false;
     rows.reverse();
@@ -500,6 +511,7 @@ impl H {
             }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
             H::ResolutionScale => Some((g.resolution_scale as f32 - 50.0) / 150.0),
+            H::UpscalingSharpness => Some(g.upscaling_sharpness as f32 / 100.0),
             // Auto, then 10..480 by 10.
             H::HdrPaperWhite => Some(g.hdr_paper_white as f32 / 480.0),
             // Auto, then 200..2000 by 50.
@@ -518,6 +530,7 @@ impl H {
             H::UploadBudget => Some((UPLOAD_STEPS.len() - 1) as u32),
             H::Workers => Some(max_workers()),
             H::ResolutionScale => Some(30),
+            H::UpscalingSharpness => Some(20),
             H::HdrPaperWhite => Some(41),
             H::HdrPeak => Some(37),
             H::HdrBlackLevel => Some(100),
@@ -578,6 +591,9 @@ impl H {
                 },
             ),
             H::Upscaling => labelled("Upscaling", g.upscaling.label()),
+            H::UpscalingSharpness => {
+                labelled("Upscaling Sharpness", format!("{}%", g.upscaling_sharpness))
+            }
             H::ScreenshotQuality => {
                 labelled("Screenshot Quality", format!("{}x", g.screenshot_quality))
             }
@@ -639,6 +655,7 @@ impl H {
             }
             H::Workers => g.workers = (v * max_workers() as f32).round() as u32,
             H::ResolutionScale => g.resolution_scale = (50.0 + (v * 30.0).round() * 5.0) as u32,
+            H::UpscalingSharpness => g.upscaling_sharpness = (v * 20.0).round() as u32 * 5,
             H::HdrPaperWhite => g.hdr_paper_white = (v * 48.0).round() as u32 * 10,
             H::HdrPeak => {
                 g.hdr_peak = match (v * 37.0).round() as u32 {
@@ -2082,6 +2099,7 @@ mod tests {
             H::UploadBudget,
             H::Workers,
             H::ResolutionScale,
+            H::UpscalingSharpness,
             H::HdrPaperWhite,
             H::HdrPeak,
             H::HdrBlackLevel,

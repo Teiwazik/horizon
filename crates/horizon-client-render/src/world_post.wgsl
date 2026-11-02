@@ -59,6 +59,9 @@ fn luma(c: vec3<f32>) -> f32 {
 // Contrast-adaptive sharpening (after AMD's CAS) of TAA's upscaled picture: each
 // pixel pushed away from its four neighbours, less where they already differ a lot,
 // so edges get their crispness back without halos or lifted grain.
+// The Upscaling Sharpness setting, 0..1.
+override sharpness: f32 = 0.85;
+
 @fragment fn fs_sharpen(in: PostOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(world));
     let p = clamp(vec2<i32>(in.uv * vec2<f32>(size)), vec2(0), size - 1);
@@ -72,8 +75,8 @@ fn luma(c: vec3<f32>) -> f32 {
     let hi = max(c, max(max(n, s), max(w, e)));
     // How much room there is before clipping, per channel: little at strong edges.
     let room = clamp(min(lo, 2.0 - hi) / max(hi, vec3(0.0001)), vec3(0.0), vec3(1.0));
-    // -1/8 is gentle, -1/5 the most CAS allows; 0.17 is most of the way.
-    let lobe = -sqrt(room) * 0.17;
+    // Up to -1/5, the most CAS allows (the Upscaling Sharpness setting's 100%).
+    let lobe = -sqrt(room) * 0.2 * sharpness;
     let sharp = (c + lobe * (n + s + w + e)) / (1.0 + 4.0 * lobe);
     // The alpha carries the emissive mark through to HDR output (hdr.wgsl).
     return vec4(clamp(sharp, lo, hi), centre.a);

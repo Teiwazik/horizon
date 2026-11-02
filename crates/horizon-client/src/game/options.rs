@@ -470,6 +470,7 @@ impl Game<'_> {
                 s.horizon.fxaa,
                 s.horizon.taa,
                 s.horizon.upscaling.ratio(),
+                s.horizon.upscaling_sharpness as f32 / 100.0,
             );
             r.set_hdr(
                 s.horizon.hdr,
