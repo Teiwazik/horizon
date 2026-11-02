@@ -658,14 +658,14 @@ fn horizon_ray_light_cell(position: vec3<f32>) -> u32 {
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
         return 0xffffffffu;
     }
-    return u32((cell.z * 20 + cell.y) * 20 + cell.x) * 8u;
+    return u32((cell.z * 20 + cell.y) * 20 + cell.x) * 16u;
 }
 fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
     let first = horizon_ray_light_cell(position);
     if first == 0xffffffffu {
         return 0u;
     }
-    return min(horizon_ray_light_cells[first] & 0xffffu, 15u);
+    return min(horizon_ray_light_cells[first] & 0xffffu, 31u);
 }
 fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
     let n = index + 1u;
@@ -709,8 +709,8 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
         return vec3<f32>(0.0);
     }
-    let first = u32((cell.z * 20 + cell.y) * 20 + cell.x) * 8u;
-    let count = min(horizon_ray_light_cells[first] & 0xffffu, 15u);
+    let first = u32((cell.z * 20 + cell.y) * 20 + cell.x) * 16u;
+    let count = min(horizon_ray_light_cells[first] & 0xffffu, 31u);
     // How strong each is here, not at the cell's middle: the budget goes to the strongest at
     // this very point, so what gets a shadow doesn't jump along a surface.
     var strengths: array<f32, 16>;
@@ -739,6 +739,10 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
         let strength = intensity * facing;
         if strength < 0.002 {
             continue;
+        }
+        // The list is strongest first: past 16 the rest add little.
+        if found >= 16u {
+            break;
         }
         strengths[found] = strength;
         ids[found] = id;

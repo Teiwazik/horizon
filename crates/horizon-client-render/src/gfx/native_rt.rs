@@ -24,7 +24,7 @@ pub const MAX_LIGHTS: usize = 2048;
 /// words: 16 bits of count, then up to 15 sources by 16 bits each, strongest first.
 const LIGHT_GRID: u32 = 20;
 const LIGHT_CELL: f32 = 8.0;
-const LIGHT_CELL_WORDS: usize = 8;
+const LIGHT_CELL_WORDS: usize = 16;
 /// `instance_custom_data` of translucent terrain.
 const TRANSLUCENT: u32 = 1 << 23;
 /// `instance_custom_data` of the entities, whose vertices aren't in the scene's buffer: the
@@ -276,10 +276,12 @@ impl RayScene {
             for cz in span(z, origin.z) {
                 for cy in span(y, origin.y) {
                     for cx in span(x, origin.x) {
-                        // How strong it is at the cell's middle, by the shader's falloff.
+                        // How strong it is at the cell's nearest point, by the shader's falloff:
+                        // ranked at the middle, a source by the cell's edge lost its place to
+                        // farther ones and its light ended on the edge in a straight line.
                         let middle = |c: i32, o: f32| o + (c as f32 + 0.5) * LIGHT_CELL;
-                        let (dx, dy, dz) =
-                            (x - middle(cx, origin.x), y - middle(cy, origin.y), z - middle(cz, origin.z));
+                        let off = |v: f32, c: i32, o: f32| ((v - middle(c, o)).abs() - LIGHT_CELL * 0.5).max(0.0);
+                        let (dx, dy, dz) = (off(x, cx, origin.x), off(y, cy, origin.y), off(z, cz, origin.z));
                         let d2 = dx * dx + dy * dy + dz * dz;
                         let n = LIGHT_GRID as i32;
                         cells[((cz * n + cy) * n + cx) as usize]
