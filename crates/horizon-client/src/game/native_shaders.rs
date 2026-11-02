@@ -103,7 +103,10 @@ impl Game<'_> {
                         continue;
                     }
                     // A source the pack gives no colour still lights: warm, as block light is.
-                    let color = report.manifest.light_of(&state.name).unwrap_or([1.0, 0.75, 0.5]);
+                    let color = report
+                        .manifest
+                        .light_of(&state.name)
+                        .unwrap_or([1.0, 0.75, 0.5]);
                     lights.insert(id as u32, (color, state.emission));
                 }
             }

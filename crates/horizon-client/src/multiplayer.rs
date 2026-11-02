@@ -244,7 +244,9 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                             || (crate::net::older_servers_enabled()
                                 && i32::try_from(protocol)
                                     .ok()
-                                    .and_then(horizon_protocol::adapter::ServerVersion::from_protocol)
+                                    .and_then(
+                                        horizon_protocol::adapter::ServerVersion::from_protocol,
+                                    )
                                     .is_some());
                         if joinable {
                             Ping::Ok {
