@@ -25,7 +25,9 @@ impl HolderSet {
             return Err(crate::Error::new("holder set larger than the packet"));
         }
         Ok(Self::Items(
-            (0..n).map(|_| r.varint()).collect::<Result<_>>()?,
+            (0..n)
+                .map(|_| r.varint().map(crate::adapter::ids::item))
+                .collect::<Result<_>>()?,
         ))
     }
     pub fn write(&self, w: &mut Writer) {
@@ -99,10 +101,13 @@ impl SlotDisplay {
             2 => Self::WithAnyPotion(inner(r)?),
             3 => {
                 let source = inner(r)?;
-                Self::OnlyWithComponent(source, r.varint()?)
+                Self::OnlyWithComponent(source, crate::adapter::ids::component(r.varint()?))
             }
-            4 => Self::Item(r.varint()?),
+            4 => Self::Item(crate::adapter::ids::item(r.varint()?)),
             5 => Self::ItemStack(Template::read(r)?),
+            6 if crate::adapter::ids::quirks().tag_slot_display_is_id => {
+                Self::Tag(HolderSet::Tag(r.string(32767)?))
+            }
             6 => Self::Tag(HolderSet::read(r)?),
             7 => Self::Dyed {
                 dye: inner(r)?,

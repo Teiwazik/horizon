@@ -127,6 +127,7 @@ pub const RECIPE_SERIALIZER_DOWN: &[(u16, u16, u16)] = &[
 ];
 /// Every table above, as the adapter reads them.
 pub const IDS: super::ids::Ids = super::ids::Ids {
+    quirks: super::ids::Quirks::NONE,
     states: (OLD_STATES, PINNED_STATES),
     block_state: super::ids::Remap::Runs {
         up: BLOCK_STATE_UP,

@@ -145,6 +145,7 @@ def main():
         lines.extend(rust_table(f"{name}_DOWN", table(n, o)))
     lines.append(f"/// Every table above, as the adapter reads them.")
     lines.append("pub const IDS: super::ids::Ids = super::ids::Ids {")
+    lines.append("    quirks: super::ids::Quirks::NONE,")
     lines.append("    states: (OLD_STATES, PINNED_STATES),")
     lines.append("    block_state: super::ids::Remap::Runs { up: BLOCK_STATE_UP, down: BLOCK_STATE_DOWN },")
     for registry in REGISTRIES:

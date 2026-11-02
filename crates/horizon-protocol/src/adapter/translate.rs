@@ -20,7 +20,12 @@ use crate::{
 
 /// The registry ids an older version numbers its own way; `None` for the pinned one.
 pub fn ids_of(version: ServerVersion) -> Option<&'static Ids> {
-    static V26_2: Ids = super::v26_2_ids::IDS;
+    static V26_2: Ids = Ids {
+        quirks: ids::Quirks {
+            tag_slot_display_is_id: true,
+        },
+        ..super::v26_2_ids::IDS
+    };
     match version {
         ServerVersion::Current => None,
         ServerVersion::V26_2 => Some(&V26_2),
@@ -52,49 +57,54 @@ impl Ids {
 }
 
 /// A clientbound packet, renumbered to the pinned `id`, as the pinned version lays it out: the pinned id
-/// it now has (an older packet can become a different one) and its payload. `None` drops it.
+/// it now has (an older packet can become a different one) and its new payload, `None` when the payload
+/// stays as it is. `None` altogether drops the packet.
 pub fn clientbound(
     session: &Session,
     state: State,
     id: i32,
-    payload: Vec<u8>,
-) -> Result<Option<(i32, Vec<u8>)>> {
+    payload: &[u8],
+) -> Result<Option<(i32, Option<Vec<u8>>)>> {
     let Some(ids) = ids_of(session.version) else {
-        return Ok(Some((id, payload)));
+        return Ok(Some((id, None)));
     };
     use packet_ids::play::clientbound as cb;
     let out = match (state, id) {
         (State::Configuration, packet_ids::configuration::clientbound::UPDATE_TAGS) => {
-            let mut p = decode_config(id, &payload)?;
+            let mut p = decode_config(id, payload)?;
             if let configuration::Clientbound::UpdateTags(t) = &mut p {
                 tags(ids, &mut t.registries);
             }
             strip_id(p.encode())
         }
         (State::Play, cb::UPDATE_TAGS) => {
-            let mut p = decode_play(ids, id, &payload)?;
+            let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::UpdateTags(t) = &mut p {
                 tags(ids, &mut t.registries);
             }
             strip_id(p.encode())
         }
-        (State::Play, cb::LOGIN) => login(&payload)?,
-        (State::Play, cb::RESPAWN) => respawn(&payload)?,
-        (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => chunk(ids, id, &payload)?,
-        (State::Play, cb::LEVEL_PARTICLES) => particles(ids, &payload)?,
+        (State::Play, cb::LOGIN) => login(payload)?,
+        (State::Play, cb::RESPAWN) => respawn(payload)?,
+        (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => chunk(ids, payload)?,
+        (State::Play, cb::LIGHT_UPDATE) => light_update(payload)?,
+        (State::Play, cb::UPDATE_ADVANCEMENTS) => advancements(ids, payload)?,
+        (State::Play, cb::LEVEL_PARTICLES) => particles(ids, payload)?,
         (State::Play, cb::EXPLODE) => {
             // 26.3 adds whether the blast's sound plays, last; 26.2 always played it.
-            let mut body = payload;
+            let mut body = payload.to_vec();
             body.push(1);
             redecode(ids, id, &body)?
         }
-        (State::Play, cb::MOVE_ENTITY_POS) => move_entity(&payload, true, false)?,
-        (State::Play, cb::MOVE_ENTITY_POS_ROT) => move_entity(&payload, true, true)?,
-        (State::Play, cb::MOVE_ENTITY_ROT) => move_entity(&payload, false, true)?,
-        (State::Play, cb::ENTITY_POSITION_SYNC) => position_sync(&payload)?,
-        (State::Play, cb::ANIMATE) => return animate(&payload).map(Some),
+        (State::Play, cb::MOVE_ENTITY_POS) => move_entity(payload, true, false)?,
+        (State::Play, cb::MOVE_ENTITY_POS_ROT) => move_entity(payload, true, true)?,
+        (State::Play, cb::MOVE_ENTITY_ROT) => move_entity(payload, false, true)?,
+        (State::Play, cb::ENTITY_POSITION_SYNC) => position_sync(payload)?,
+        (State::Play, cb::ANIMATE) => {
+            return animate(payload).map(|(id, body)| Some((id, Some(body))));
+        }
         (State::Play, cb::ADD_ENTITY) => {
-            let mut p = decode_play(ids, id, &payload)?;
+            let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::AddEntity(e) = &mut p {
                 let falling_block = ids.entity_type.down(packet_ids_entity::FALLING_BLOCK);
                 if Some(e.kind) == falling_block {
@@ -105,14 +115,14 @@ pub fn clientbound(
             strip_id(p.encode())
         }
         (State::Play, cb::BLOCK_UPDATE) => {
-            let mut p = decode_play(ids, id, &payload)?;
+            let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::BlockUpdate(b) = &mut p {
                 b.state = ids.block_state.up(b.state).unwrap_or(0);
             }
             strip_id(p.encode())
         }
         (State::Play, cb::SECTION_BLOCKS_UPDATE) => {
-            let mut p = decode_play(ids, id, &payload)?;
+            let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::SectionBlocksUpdate(s) = &mut p {
                 for change in &mut s.changes {
                     let state = ids.block_state.up((*change >> 12) as i32).unwrap_or(0);
@@ -122,7 +132,7 @@ pub fn clientbound(
             strip_id(p.encode())
         }
         (State::Play, cb::LEVEL_EVENT) => {
-            let mut p = decode_play(ids, id, &payload)?;
+            let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::LevelEvent(e) = &mut p {
                 // LevelEvent.PARTICLES_DESTROY_BLOCK and the brush's BLOCK_FINISHED_BRUSHING carry a state.
                 if matches!(e.kind, 2001 | 3008) {
@@ -141,11 +151,13 @@ pub fn clientbound(
             | cb::SET_EQUIPMENT
             | cb::MERCHANT_OFFERS
             | cb::SOUND
-            | cb::SOUND_ENTITY,
-        ) => redecode(ids, id, &payload)?,
-        _ => payload,
+            | cb::SOUND_ENTITY
+            | cb::RECIPE_BOOK_ADD
+            | cb::PLACE_GHOST_RECIPE,
+        ) => redecode(ids, id, payload)?,
+        _ => return Ok(Some((id, None))),
     };
-    Ok(Some((id, out)))
+    Ok(Some((id, Some(out))))
 }
 
 /// Pinned entity type ids the translation looks for.
@@ -303,22 +315,124 @@ fn respawn(payload: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// The column's sections with their block states renumbered and packed for the pinned palette width (a
-/// section on the older global palette uses fewer bits per entry). Biomes are the server's own registry and
-/// stay as they are.
-fn chunk(ids: &'static Ids, id: i32, payload: &[u8]) -> Result<Vec<u8>> {
-    let mut p = decode_play(ids, id, payload)?;
-    if let play::Clientbound::LevelChunkWithLight(c) = &mut p {
-        let (old_bits, new_bits) = ids.state_bits();
-        let mut r = Reader::new(&c.chunk.buffer);
-        let mut sections = Vec::new();
-        while r.remaining() > 0 {
-            let mut s = Section::read(&mut r, old_bits, 0)?;
-            s.states = renumber_states(ids, &s.states, new_bits);
-            sections.push(s);
-        }
-        c.chunk.buffer = crate::chunk::ChunkData::from_sections(&sections);
+/// section on the older global palette uses fewer bits per entry), and its light masks as 26.3 sends them.
+/// Biomes are the server's own registry and stay as they are.
+fn chunk(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let x = r.i32()?;
+    let z = r.i32()?;
+    let heightmaps = crate::chunk::Heightmaps::read(&mut r)?;
+    let buffer = r.byte_array(r.remaining())?;
+    let block_entities = <crate::buf::List<crate::chunk::BlockEntityInfo>>::read(&mut r)?;
+    let light = light(&mut r)?;
+    let (old_bits, new_bits) = ids.state_bits();
+    let mut sections = Reader::new(&buffer);
+    let mut out = Vec::new();
+    while sections.remaining() > 0 {
+        let mut s = Section::read(&mut sections, old_bits, 0)?;
+        s.states = renumber_states(ids, &s.states, new_bits);
+        out.push(s);
     }
-    Ok(strip_id(p.encode()))
+    let mut w = Writer::new();
+    play::LevelChunkWithLight::write(
+        &play::LevelChunkWithLight {
+            x,
+            z,
+            chunk: crate::chunk::ChunkData {
+                heightmaps,
+                buffer: crate::chunk::ChunkData::from_sections(&out),
+                block_entities,
+            },
+            light,
+        },
+        &mut w,
+    );
+    Ok(w.data)
+}
+
+/// 26.2's ClientboundLightUpdatePacketData: its four masks are `BitSet.toLongArray` (a VarInt count of
+/// longs); 26.3 sends `toByteArray`, the same bits as little-endian bytes without trailing zeros.
+fn light(r: &mut Reader) -> Result<crate::chunk::LightData> {
+    let mut mask = || -> Result<Vec<u8>> {
+        let longs = r.long_array()?;
+        let mut bytes: Vec<u8> = longs.iter().flat_map(|l| l.to_le_bytes()).collect();
+        let len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        bytes.truncate(len);
+        Ok(bytes)
+    };
+    let sky_mask = mask()?;
+    let block_mask = mask()?;
+    let empty_sky_mask = mask()?;
+    let empty_block_mask = mask()?;
+    Ok(crate::chunk::LightData {
+        sky_mask,
+        block_mask,
+        empty_sky_mask,
+        empty_block_mask,
+        sky: crate::chunk::Layers::read(r)?,
+        block: crate::chunk::Layers::read(r)?,
+    })
+}
+
+/// 26.2 keeps an advancement's tab position in its display (two floats after the background); 26.3 sends
+/// it after the whole advancement, displayed or not. What follows the added advancements is unchanged.
+fn advancements(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let mut w = Writer::new();
+    w.bool(r.bool()?);
+    let n = r.count(r.remaining())?;
+    w.varint(n as i32);
+    for _ in 0..n {
+        w.string(&r.string(32767)?);
+        let parent = r.bool()?;
+        w.bool(parent);
+        if parent {
+            w.string(&r.string(32767)?);
+        }
+        let mut position = (0.0, 0.0);
+        let display = r.bool()?;
+        w.bool(display);
+        if display {
+            w.nbt(&r.nbt()?);
+            w.nbt(&r.nbt()?);
+            let icon = {
+                let _up = ids::renumbering(ids, Way::Up);
+                crate::item::Template::read(&mut r)?
+            };
+            crate::item::Template::write(&icon, &mut w);
+            w.varint(r.varint()?);
+            let flags = r.i32()?;
+            w.i32(flags);
+            if flags & 1 != 0 {
+                w.string(&r.string(32767)?);
+            }
+            position = (r.f32()?, r.f32()?);
+        }
+        let groups = r.count(r.remaining())?;
+        w.varint(groups as i32);
+        for _ in 0..groups {
+            let k = r.count(r.remaining())?;
+            w.varint(k as i32);
+            for _ in 0..k {
+                w.string(&r.string(32767)?);
+            }
+        }
+        w.bool(r.bool()?);
+        w.f32(position.0);
+        w.f32(position.1);
+    }
+    w.bytes(r.rest());
+    Ok(w.data)
+}
+
+fn light_update(payload: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let x = r.varint()?;
+    let z = r.varint()?;
+    let light = light(&mut r)?;
+    let mut w = Writer::new();
+    play::LightUpdate::write(&play::LightUpdate { x, z, light }, &mut w);
+    Ok(w.data)
 }
 
 fn renumber_states(ids: &Ids, states: &Paletted, new_bits: u8) -> Paletted {

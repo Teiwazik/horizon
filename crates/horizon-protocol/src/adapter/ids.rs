@@ -46,6 +46,8 @@ impl Remap {
 /// Block states and every registry the protocol sends by id, for one older version.
 #[derive(Clone, Copy, Debug)]
 pub struct Ids {
+    /// How the older version lays out what the shared readers decode.
+    pub quirks: Quirks,
     /// How many block states the older version and the pinned one have.
     pub states: (u32, u32),
     pub block_state: Remap,
@@ -74,6 +76,26 @@ pub struct Ids {
     pub position_source_type: Remap,
     pub consume_effect_type: Remap,
     pub enchantment_effect_component_type: Remap,
+}
+
+/// Layout differences inside structures the pinned readers decode while ids are renumbered up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Quirks {
+    /// `SlotDisplay` type 6 holds a bare tag id (TagSlotDisplay) instead of a HolderSet (26.2).
+    pub tag_slot_display_is_id: bool,
+}
+impl Quirks {
+    pub const NONE: Self = Self {
+        tag_slot_display_is_id: false,
+    };
+}
+
+/// The older version's quirks while its packets are decoded on this thread; none otherwise.
+pub fn quirks() -> Quirks {
+    match ACTIVE.get() {
+        Some((ids, Way::Up)) => ids.quirks,
+        _ => Quirks::NONE,
+    }
 }
 
 impl Ids {

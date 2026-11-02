@@ -81,7 +81,20 @@ impl Session {
             }
             _ => {}
         }
-        translate::clientbound(self, state, pinned, payload)
+        // A packet the translation can't read goes on as it came, as an unknown packet would: Horizon's
+        // own reader then skips it or reports it, rather than the connection dropping here.
+        match translate::clientbound(self, state, pinned, &payload) {
+            Ok(Some((id, Some(translated)))) => Ok(Some((id, translated))),
+            Ok(Some((id, None))) => Ok(Some((id, payload))),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                log::warn!(
+                    "Horizon: could not translate {} packet {pinned} ({state:?}): {e}",
+                    self.version.name()
+                );
+                Ok(Some((pinned, payload)))
+            }
+        }
     }
 
     /// A packet body (VarInt id + payload) Horizon sends, as this server numbers and lays it out. `None`:
