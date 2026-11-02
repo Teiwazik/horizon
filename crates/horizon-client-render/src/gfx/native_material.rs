@@ -351,8 +351,8 @@ struct HorizonRayLight {
     position: vec4<f32>,
     color: vec4<f32>,
 }
-@group(3) @binding(50) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
-@group(3) @binding(51) var<storage, read> horizon_ray_light_cells: array<u32>;
+@group(3) @binding(60) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
+@group(3) @binding(61) var<storage, read> horizon_ray_light_cells: array<u32>;
 fn horizon_ray_available() -> bool {
     return true;
 }

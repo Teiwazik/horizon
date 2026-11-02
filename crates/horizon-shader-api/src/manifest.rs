@@ -9,7 +9,7 @@ pub const SCHEMA: u32 = 1;
 /// the inputs a pack's WGSL may read.
 pub const API: &str = "0.5";
 /// Full-screen passes a pack may chain.
-pub const MAX_POST_PASSES: usize = 28;
+pub const MAX_POST_PASSES: usize = 40;
 /// Options a pack may declare.
 pub const MAX_OPTIONS: usize = 64;
 /// Settings pages a pack may declare, and the items one page may hold.
@@ -295,7 +295,7 @@ pub struct Stage {
 /// A post pass's sizes against the world's (`[[post]] scale`).
 pub const POST_SCALES: [f32; 3] = [1.0, 0.5, 0.25];
 /// Pack targets (`[[post]] output`) a pack may write.
-pub const MAX_POST_TARGETS: usize = 16;
+pub const MAX_POST_TARGETS: usize = 24;
 
 /// An option the player can change: a WGSL `override` constant of the
 /// same name, set when the pipelines are built.
