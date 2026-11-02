@@ -95,7 +95,7 @@ impl SlotDisplay {
             return Err(crate::Error::new("slot displays nest too deep"));
         }
         let inner = |r: &mut Reader| Self::read_at(r, depth + 1).map(Box::new);
-        Ok(match r.varint()? {
+        Ok(match crate::adapter::ids::slot_display(r.varint()?) {
             0 => Self::Empty,
             1 => Self::AnyFuel,
             2 => Self::WithAnyPotion(inner(r)?),

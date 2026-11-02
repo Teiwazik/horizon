@@ -434,7 +434,7 @@ impl Codec<Vec<(u8, i32, Value)>> for EntityData {
             if index == 0xFF {
                 return Ok(out);
             }
-            let kind = r.varint()?;
+            let kind = ids::entity_data_serializer(r.varint()?);
             match read_value(kind, r)? {
                 Some(v) => out.push((index, kind, v)),
                 None => {

@@ -168,6 +168,8 @@ def main():
         else:
             name = const_name(registry)
             lines.append(f"    {field}: super::ids::Remap::Runs {{ up: {name}_UP, down: {name}_DOWN }},")
+    lines.append("    // Not a registry: set by hand where a version numbers EntityDataSerializers differently.")
+    lines.append("    entity_data_serializer: super::ids::Remap::Same,")
     lines.append("};")
     out.write_text("\n".join(lines) + "\n")
     print(out, "same:", ", ".join(same))

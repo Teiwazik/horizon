@@ -188,4 +188,6 @@ pub const IDS: super::ids::Ids = super::ids::Ids {
     position_source_type: super::ids::Remap::Same,
     consume_effect_type: super::ids::Remap::Same,
     enchantment_effect_component_type: super::ids::Remap::Same,
+    // Not a registry: set by hand where a version numbers EntityDataSerializers differently.
+    entity_data_serializer: super::ids::Remap::Same,
 };

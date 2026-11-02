@@ -76,6 +76,8 @@ pub struct Ids {
     pub position_source_type: Remap,
     pub consume_effect_type: Remap,
     pub enchantment_effect_component_type: Remap,
+    /// EntityDataSerializers' registration order (not a registry).
+    pub entity_data_serializer: Remap,
 }
 
 /// Layout differences inside structures the pinned readers decode while ids are renumbered up.
@@ -166,6 +168,14 @@ pub fn entity_type(id: i32) -> i32 {
 /// A sound event id as read or about to be written on this thread.
 pub fn sound_event(id: i32) -> i32 {
     apply(id, |ids| ids.sound_event)
+}
+/// An entity data serializer id as read on this thread.
+pub fn entity_data_serializer(id: i32) -> i32 {
+    apply(id, |ids| ids.entity_data_serializer)
+}
+/// A slot display type id as read on this thread.
+pub fn slot_display(id: i32) -> i32 {
+    apply(id, |ids| ids.slot_display)
 }
 /// The ids on this thread now, if any.
 pub fn active() -> Option<(&'static Ids, Way)> {

@@ -7,6 +7,8 @@
 pub mod ids;
 pub mod session;
 mod translate;
+pub mod v1_21_11;
+mod v1_21_11_ids;
 pub mod v26_1_2;
 mod v26_1_2_ids;
 pub mod v26_2;
@@ -28,10 +30,11 @@ pub enum ServerVersion {
     V26_2,
     /// 26.1, 26.1.1 and 26.1.2: one protocol.
     V26_1,
+    V1_21_11,
 }
 
 impl ServerVersion {
-    pub const ALL: [Self; 3] = [Self::Current, Self::V26_2, Self::V26_1];
+    pub const ALL: [Self; 4] = [Self::Current, Self::V26_2, Self::V26_1, Self::V1_21_11];
 
     /// The protocol number its handshake states.
     pub fn protocol(self) -> i32 {
@@ -39,6 +42,7 @@ impl ServerVersion {
             Self::Current => crate::PROTOCOL_VERSION,
             Self::V26_2 => v26_2::PROTOCOL,
             Self::V26_1 => v26_1_2::PROTOCOL,
+            Self::V1_21_11 => v1_21_11::PROTOCOL,
         }
     }
 
@@ -48,6 +52,7 @@ impl ServerVersion {
             Self::Current => crate::GAME_VERSION,
             Self::V26_2 => v26_2::NAME,
             Self::V26_1 => "26.1",
+            Self::V1_21_11 => v1_21_11::NAME,
         }
     }
 
@@ -75,6 +80,8 @@ impl ServerVersion {
             (Self::V26_2, Direction::Serverbound) => v26_2::serverbound(state),
             (Self::V26_1, Direction::Clientbound) => v26_1_2::clientbound(state),
             (Self::V26_1, Direction::Serverbound) => v26_1_2::serverbound(state),
+            (Self::V1_21_11, Direction::Clientbound) => v1_21_11::clientbound(state),
+            (Self::V1_21_11, Direction::Serverbound) => v1_21_11::serverbound(state),
         };
         let mapped = *table.get(usize::try_from(id).ok()?)?;
         mapped.map(i32::from)
@@ -121,7 +128,11 @@ mod tests {
             ServerVersion::from_protocol(775),
             Some(ServerVersion::V26_1)
         );
-        assert_eq!(ServerVersion::from_protocol(774), None);
+        assert_eq!(
+            ServerVersion::from_protocol(774),
+            Some(ServerVersion::V1_21_11)
+        );
+        assert_eq!(ServerVersion::from_protocol(773), None);
     }
 
     #[test]

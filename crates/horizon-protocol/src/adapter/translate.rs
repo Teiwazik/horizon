@@ -32,10 +32,32 @@ pub fn ids_of(version: ServerVersion) -> Option<&'static Ids> {
         quirks: BEFORE_26_3,
         ..super::v26_1_2_ids::IDS
     };
+    static V1_21_11: Ids = Ids {
+        quirks: BEFORE_26_3,
+        // 26.1 registered the cat, cow, pig and chicken sound variants among the others.
+        entity_data_serializer: ids::Remap::Runs {
+            up: &[
+                (0, 0, 22),
+                (22, 23, 1),
+                (23, 25, 4),
+                (27, 30, 1),
+                (28, 32, 11),
+            ],
+            down: &[
+                (0, 0, 22),
+                (23, 22, 1),
+                (25, 23, 4),
+                (30, 27, 1),
+                (32, 28, 11),
+            ],
+        },
+        ..super::v1_21_11_ids::IDS
+    };
     match version {
         ServerVersion::Current => None,
         ServerVersion::V26_2 => Some(&V26_2),
         ServerVersion::V26_1 => Some(&V26_1),
+        ServerVersion::V1_21_11 => Some(&V1_21_11),
     }
 }
 
@@ -77,8 +99,32 @@ pub fn clientbound(
     };
     use packet_ids::play::clientbound as cb;
     // A release at a time: 26.1's packets are brought to 26.2's layout first.
+    // 1.21.11's configuration ends with the world clocks 26.1 syncs as a registry.
+    if session.version == ServerVersion::V1_21_11
+        && (state, id)
+            == (
+                State::Configuration,
+                packet_ids::configuration::clientbound::FINISH_CONFIGURATION,
+            )
+    {
+        session
+            .incoming
+            .lock()
+            .unwrap()
+            .push_back((id, payload.to_vec()));
+        return Ok(Some((
+            packet_ids::configuration::clientbound::REGISTRY_DATA,
+            Some(v1_21_11::world_clocks()),
+        )));
+    }
     let before = match session.version {
         ServerVersion::V26_1 => v26_1::clientbound(session, state, id, payload)?,
+        ServerVersion::V1_21_11 => {
+            let first = v1_21_11::clientbound(session, state, id, payload)?;
+            let second =
+                v26_1::clientbound(session, state, id, first.as_deref().unwrap_or(payload))?;
+            second.or(first)
+        }
         _ => None,
     };
     let payload = before.as_deref().unwrap_or(payload);
@@ -171,6 +217,13 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
+        (State::Play, cb::SET_ENTITY_DATA) if session.version == ServerVersion::V1_21_11 => {
+            let mut p = decode_play(ids, id, payload)?;
+            if let play::Clientbound::SetEntityData(d) = &mut p {
+                v1_21_11::entity_data(session, d);
+            }
+            strip_id(p.encode())
+        }
         (
             State::Play,
             cb::SET_ENTITY_DATA
@@ -236,6 +289,12 @@ pub fn serverbound(
             w.bytes(r.rest());
             renumbered(id, w.data)
         }
+        (State::Play, sb::INTERACT) if session.version == ServerVersion::V1_21_11 => {
+            v1_21_11::interact(session, payload)
+        }
+        (State::Play, sb::ATTACK) if session.version == ServerVersion::V1_21_11 => {
+            v1_21_11::attack(payload)
+        }
         // 26.1 is told the entity a spectator picked by its UUID (spectate_entity, at the same id).
         (State::Play, sb::SPECTATOR_ACTION) if session.version == ServerVersion::V26_1 => {
             v26_1::spectate(session, payload)
@@ -244,7 +303,11 @@ pub fn serverbound(
         (State::Play, sb::PUNCH) => {
             let mut w = Writer::new();
             w.varint(0);
-            Ok(Some((V26_2_SWING, w.data)))
+            let swing = match session.version {
+                ServerVersion::V1_21_11 => v1_21_11::SWING,
+                _ => V26_2_SWING,
+            };
+            Ok(Some((swing, w.data)))
         }
         (State::Play, sb::SET_CREATIVE_MODE_SLOT | sb::CONTAINER_CLICK) => {
             let p = play::Serverbound::decode(id, payload)?;
@@ -602,6 +665,171 @@ fn animate(payload: &[u8]) -> Result<(i32, Vec<u8>)> {
     w.varint(id);
     w.u8(action);
     Ok((packet_ids::play::clientbound::ANIMATE, w.data))
+}
+
+/// 1.21.11 to 26.1.
+mod v1_21_11 {
+    use super::*;
+
+    /// 1.21.11's serverbound `swing` and `interact` (play).
+    pub const SWING: i32 = 60;
+    const INTERACT: i32 = 25;
+
+    /// Entity types (26.3 ids) whose class extends AgeableMob: 26.1 added a second boolean to it, after the
+    /// baby flag (16), so their later entity data entries moved up one. Read off 26.1.2's EntityType
+    /// registrations and class hierarchy.
+    const AGEABLE: [i32; 39] = [
+        4, 7, 11, 19, 20, 21, 26, 30, 36, 37, 55, 56, 59, 62, 63, 65, 67, 79, 87, 88, 89, 92, 97,
+        99, 101, 105, 111, 114, 119, 122, 130, 132, 138, 141, 143, 145, 152, 155, 156,
+    ];
+
+    /// 1.21.11's packet in 26.1's layout; `None` when it is laid out alike. Ids stay the server's.
+    pub fn clientbound(
+        session: &Session,
+        state: State,
+        id: i32,
+        payload: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        use packet_ids::play::clientbound as cb;
+        Ok(match (state, id) {
+            (State::Play, cb::ADD_ENTITY) => {
+                let mut r = Reader::new(payload);
+                let entity = r.varint()?;
+                r.uuid()?;
+                let kind = r.varint()?;
+                if let Some(ids) = ids_of(session.version)
+                    && let Some(kind) = ids.entity_type.up(kind)
+                {
+                    session.kinds.lock().unwrap().insert(entity, kind);
+                }
+                None
+            }
+            (State::Play, cb::REMOVE_ENTITIES) => {
+                let mut r = Reader::new(payload);
+                let n = r.count(r.remaining())?;
+                let mut kinds = session.kinds.lock().unwrap();
+                for _ in 0..n {
+                    kinds.remove(&r.varint()?);
+                }
+                None
+            }
+            (State::Play, cb::SET_TIME) => Some(set_time(payload)?),
+            (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => Some(chunk(payload)?),
+            _ => None,
+        })
+    }
+
+    /// 1.21.11's chunk sections hold the non-empty block count, then the states and biomes; 26.1 adds the
+    /// fluid count after the block count (Horizon reads it but goes by the states). The rest of the packet
+    /// is laid out alike.
+    fn chunk(payload: &[u8]) -> Result<Vec<u8>> {
+        let mut r = Reader::new(payload);
+        let x = r.i32()?;
+        let z = r.i32()?;
+        let heightmaps = crate::chunk::Heightmaps::read(&mut r)?;
+        let buffer = r.byte_array(r.remaining())?;
+        let mut sections = Reader::new(&buffer);
+        let mut out = Writer::new();
+        while sections.remaining() > 0 {
+            out.i16(sections.i16()?);
+            out.i16(0);
+            Paletted::read(&mut sections, Strategy::Blocks, 0)?.write(&mut out);
+            Paletted::read(&mut sections, Strategy::Biomes, 0)?.write(&mut out);
+        }
+        let mut w = Writer::new();
+        w.i32(x);
+        w.i32(z);
+        crate::chunk::Heightmaps::write(&heightmaps, &mut w);
+        w.byte_array(&out.data);
+        w.bytes(r.rest());
+        Ok(w.data)
+    }
+
+    /// 1.21.11 sends the game time, the day time and whether the day time runs; 26.1 the game time and a
+    /// state per world clock. The day time becomes the overworld clock's (id 0 in [`world_clocks`]),
+    /// standing still when it doesn't run.
+    fn set_time(payload: &[u8]) -> Result<Vec<u8>> {
+        let mut r = Reader::new(payload);
+        let game_time = r.i64()?;
+        let day_time = r.i64()?;
+        let ticking = r.bool()?;
+        let mut w = Writer::new();
+        play::SetTime::write(
+            &play::SetTime {
+                game_time,
+                clocks: vec![play::ClockState {
+                    clock: 0,
+                    total_ticks: day_time,
+                    partial_tick: 0.0,
+                    rate: if ticking { 1.0 } else { 0.0 },
+                }],
+            },
+            &mut w,
+        );
+        Ok(w.data)
+    }
+
+    /// The `minecraft:world_clock` registry 1.21.11 has none of: the overworld's clock alone.
+    pub fn world_clocks() -> Vec<u8> {
+        let mut w = Writer::new();
+        configuration::RegistryData::write(
+            &configuration::RegistryData {
+                registry: "minecraft:world_clock".into(),
+                entries: vec![configuration::RegistryEntry {
+                    id: "minecraft:overworld".into(),
+                    data: None,
+                }],
+            },
+            &mut w,
+        );
+        w.data
+    }
+
+    /// Entity data of an AgeableMob moves past the entry 26.1 inserted after the baby flag.
+    pub fn entity_data(session: &Session, data: &mut play::SetEntityData) {
+        let kind = session.kinds.lock().unwrap().get(&data.id).copied();
+        if kind.is_some_and(|k| AGEABLE.contains(&k)) {
+            for (index, _, _) in &mut data.values {
+                if *index >= 17 {
+                    *index += 1;
+                }
+            }
+        }
+    }
+
+    /// Horizon's interact (entity, hand, where on it, sneaking) is 1.21.11's INTERACT_AT (action 2: the
+    /// point as floats, then the hand), followed as vanilla 1.21.11 did by INTERACT (action 0: the hand).
+    pub fn interact(session: &Session, payload: &[u8]) -> Result<Option<(i32, Vec<u8>)>> {
+        let mut r = Reader::new(payload);
+        let entity = r.varint()?;
+        let hand = r.varint()?;
+        let at = crate::buf::LpVec3::read(&mut r)?;
+        let sneaking = r.bool()?;
+        let mut first = Writer::new();
+        first.varint(entity);
+        first.varint(2);
+        at.iter().for_each(|v| first.f32(*v as f32));
+        first.varint(hand);
+        first.bool(sneaking);
+        let mut then = Writer::new();
+        then.varint(INTERACT);
+        then.varint(entity);
+        then.varint(0);
+        then.varint(hand);
+        then.bool(sneaking);
+        session.outgoing.lock().unwrap().push(then.data);
+        Ok(Some((INTERACT, first.data)))
+    }
+
+    /// 26.1's attack is 1.21.11's interact with action 1 (ATTACK).
+    pub fn attack(payload: &[u8]) -> Result<Option<(i32, Vec<u8>)>> {
+        let mut r = Reader::new(payload);
+        let mut w = Writer::new();
+        w.varint(r.varint()?);
+        w.varint(1);
+        w.bool(false);
+        Ok(Some((INTERACT, w.data)))
+    }
 }
 
 /// 26.1 to 26.2: what changed in the packets of the release before.
