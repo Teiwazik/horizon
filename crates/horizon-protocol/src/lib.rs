@@ -2,6 +2,7 @@
 //! primitive codecs, framing, compression, encryption, and typed packets for
 //! every connection state, shared by the Horizon client and (later) server.
 #![forbid(unsafe_code)]
+pub mod adapter;
 pub mod buf;
 pub mod chunk;
 pub mod connection;
