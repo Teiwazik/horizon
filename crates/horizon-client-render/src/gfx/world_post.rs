@@ -58,6 +58,9 @@ pub struct Post {
     sampler: wgpu::Sampler,
     copy: wgpu::RenderPipeline,
     fxaa: wgpu::RenderPipeline,
+    /// Contrast-adaptive sharpening of TAA's upscaled picture: the jittered frames are
+    /// spread over more output pixels, and the blend softens edges.
+    sharpen: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
     /// World resolution relative to the window (0.5..=2.0).
     pub scale: f32,
@@ -240,6 +243,7 @@ impl Post {
         Self {
             copy: pipeline("fs_copy", &pipeline_layout, format),
             fxaa: pipeline("fs_fxaa", &pipeline_layout, format),
+            sharpen: pipeline("fs_sharpen", &pipeline_layout, format),
             layout,
             sampler,
             format,
@@ -493,7 +497,12 @@ impl Post {
         pass.set_bind_group(0, &taa.resolve[i], &[]);
         pass.draw(0..3, 0..1);
         drop(pass);
-        self.finish_with(encoder, screen, &taa.show[i], timing);
+        let pipeline = if self.upscale > 1.0 {
+            &self.sharpen
+        } else {
+            &self.copy
+        };
+        self.draw_onto(encoder, screen, &taa.show[i], pipeline, timing);
     }
 
     /// Draw what `group` binds (`bind`) onto `screen`.
@@ -502,6 +511,23 @@ impl Post {
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
         group: &wgpu::BindGroup,
+        timing: Option<&mut super::pack_timing::PassTiming>,
+    ) {
+        let pipeline = if self.antialias {
+            &self.fxaa
+        } else {
+            &self.copy
+        };
+        self.draw_onto(encoder, screen, group, pipeline, timing);
+    }
+
+    /// Draw what `group` binds onto `screen` through `pipeline`.
+    fn draw_onto(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &wgpu::TextureView,
+        group: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
         timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
         let attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -519,11 +545,7 @@ impl Post {
             color_attachments: &attachments,
             ..Default::default()
         });
-        pass.set_pipeline(if self.antialias {
-            &self.fxaa
-        } else {
-            &self.copy
-        });
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
     }
