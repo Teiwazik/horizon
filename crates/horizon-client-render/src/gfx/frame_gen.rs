@@ -296,9 +296,19 @@ impl FrameGen {
         screen: &wgpu::TextureView,
         generated: &wgpu::TextureView,
         camera: &Camera,
+        mut timing: Option<(&mut super::pack_timing::PassTiming, wgpu::TextureFormat)>,
     ) -> bool {
+        // In a timed frame, each stage's GPU time as a span of its own (marked on `generated`).
+        let span = |timing: &mut Option<(&mut super::pack_timing::PassTiming, wgpu::TextureFormat)>,
+                    encoder: &mut wgpu::CommandEncoder,
+                    name: &str| {
+            if let Some((t, format)) = timing.as_mut() {
+                t.span(device, encoder, (generated, *format), name);
+            }
+        };
         let gpu = self.gpu.as_mut().expect("world() ran this frame");
         post.finish_with(encoder, screen, &gpu.world_group, None);
+        span(&mut timing, encoder, "Frame generation (real frame)");
         let reset = gpu.reset || camera.reproject.is_none();
         let reproject = camera.reproject.unwrap_or(Mat4::IDENTITY);
         let object_motion = self
@@ -315,7 +325,16 @@ impl FrameGen {
                 camera.view_proj,
                 reproject * camera.view_proj,
             );
-        gpu.flow.dispatch(device, queue, encoder, &gpu.world, reset);
+        span(&mut timing, encoder, "Frame generation (object motion)");
+        gpu.flow.dispatch(
+            device,
+            queue,
+            encoder,
+            &gpu.world,
+            reset,
+            timing.as_mut().map(|(t, _)| &mut **t),
+        );
+        span(&mut timing, encoder, "Frame generation (optical flow)");
         gpu.interpolation.dispatch(
             device,
             queue,
@@ -334,7 +353,9 @@ impl FrameGen {
                 flow_vectors: gpu.flow.vectors(),
                 scene_change: gpu.flow.scene_change(),
             },
+            timing.as_mut().map(|(t, _)| &mut **t),
         );
+        span(&mut timing, encoder, "Frame generation (interpolation)");
         gpu.reset = false;
         if debug() == Some("motion") {
             post.finish_with(encoder, generated, &post.bind(device, &object_motion), None);
@@ -345,6 +366,7 @@ impl FrameGen {
         } else {
             post.finish_with(encoder, generated, &gpu.output_group, None);
         }
+        span(&mut timing, encoder, "Frame generation (made frame)");
         !reset
     }
 

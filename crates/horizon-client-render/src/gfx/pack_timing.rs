@@ -13,7 +13,7 @@ use std::sync::{
 
 const REPORT: usize = 30;
 /// Passes timed per frame at most (two timestamps each).
-const CAPACITY: u32 = 64;
+const CAPACITY: u32 = 128;
 /// Timed frames each pass's median is taken over.
 const WINDOW: usize = 15;
 

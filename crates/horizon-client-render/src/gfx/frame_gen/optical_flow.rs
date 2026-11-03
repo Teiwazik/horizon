@@ -335,6 +335,7 @@ impl OpticalFlow {
         encoder: &mut wgpu::CommandEncoder,
         color: &wgpu::TextureView,
         reset: bool,
+        mut timing: Option<&mut super::super::pack_timing::PassTiming>,
     ) {
         let reset = reset || self.first;
         self.first = false;
@@ -372,16 +373,38 @@ impl OpticalFlow {
         );
         let p = &self.pipelines;
         let [w, h] = self.display;
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Optical flow"),
-            timestamp_writes: None,
+        // One pass for every dispatch; in a timed frame a pass per dispatch, timed by name.
+        let mut shared = timing.is_none().then(|| {
+            encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Optical flow"),
+                    timestamp_writes: None,
+                })
+                .forget_lifetime()
         });
-        let mut run = |pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, x, y, z| {
+        let mut run = |name: &str,
+                       pipeline: &wgpu::ComputePipeline,
+                       group: &wgpu::BindGroup,
+                       x,
+                       y,
+                       z| {
+            if let Some(pass) = shared.as_mut() {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(x, y, z);
+                return;
+            }
+            let writes = timing.as_deref_mut().and_then(|t| t.compute_writes(name));
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: writes,
+            });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(x, y, z);
         };
         run(
+            "Optical flow: luma",
             &p.prepare_luma,
             &prepare,
             (w.div_ceil(2)).div_ceil(16),
@@ -391,6 +414,7 @@ impl OpticalFlow {
         for (k, group) in frame.luma_pyramid.iter().enumerate() {
             let size = self.display.map(|v| (v >> (k + 1)).max(1));
             run(
+                "Optical flow: luma pyramid",
                 &p.luma_pyramid,
                 group,
                 size[0].div_ceil(8),
@@ -399,16 +423,25 @@ impl OpticalFlow {
             );
         }
         run(
+            "Optical flow: scene change",
             &p.scd_histogram,
             &frame.scd_histogram,
             ((w / 4) / 3).div_ceil(32),
             16,
             9,
         );
-        run(&p.scd_divergence, &self.scd_divergence, 9, 3, 1);
+        run(
+            "Optical flow: scene change",
+            &p.scd_divergence,
+            &self.scd_divergence,
+            9,
+            3,
+            1,
+        );
         for level in (0..LEVELS).rev() {
             let luma = self.display.map(|v| (v >> level).max(1));
             run(
+                &format!("Optical flow: search {level}"),
                 &p.search,
                 &frame.search[level],
                 (luma[0].div_ceil(4) * 16).div_ceil(64),
@@ -417,6 +450,7 @@ impl OpticalFlow {
             );
             let size = self.flow_sizes[level];
             run(
+                &format!("Optical flow: filter {level}"),
                 &p.filter,
                 &self.filter[level],
                 size[0].div_ceil(16),
@@ -426,6 +460,7 @@ impl OpticalFlow {
             if level > 0 {
                 let next = self.flow_sizes[level - 1];
                 run(
+                    &format!("Optical flow: scale {level}"),
                     &p.scale,
                     &frame.scale[level - 1],
                     next[0].div_ceil(4),
@@ -434,7 +469,7 @@ impl OpticalFlow {
                 );
             }
         }
-        drop(pass);
+        drop(shared);
         self.resource_frame = (self.resource_frame + 1) % 16;
     }
 
@@ -581,7 +616,7 @@ pub(super) mod tests {
         reset: bool,
     ) {
         let mut encoder = device.create_command_encoder(&Default::default());
-        flow.dispatch(device, queue, &mut encoder, color, reset);
+        flow.dispatch(device, queue, &mut encoder, color, reset, None);
         queue.submit([encoder.finish()]);
     }
 

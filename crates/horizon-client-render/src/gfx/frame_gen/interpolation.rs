@@ -353,6 +353,7 @@ impl Interpolation {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         inputs: &Inputs,
+        mut timing: Option<&mut super::super::pack_timing::PassTiming>,
     ) {
         let color = inputs.color.texture();
         let mut reset = inputs.reset;
@@ -561,36 +562,56 @@ impl Interpolation {
         let groups_for = |size: [u32; 2]| (size[0].div_ceil(8), size[1].div_ceil(8));
         let (rx, ry) = groups_for(inputs.render_size);
         let (dx, dy) = groups_for(self.display);
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Frame interpolation"),
-            timestamp_writes: None,
+        // One pass for every dispatch; in a timed frame a pass per dispatch, timed by name.
+        let mut shared = timing.is_none().then(|| {
+            encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Frame interpolation"),
+                    timestamp_writes: None,
+                })
+                .forget_lifetime()
         });
-        let mut run = |pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, (x, y)| {
+        let mut run = |name: &str,
+                       pipeline: &wgpu::ComputePipeline,
+                       group: &wgpu::BindGroup,
+                       (x, y)| {
+            if let Some(pass) = shared.as_mut() {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+                return;
+            }
+            let writes = timing.as_deref_mut().and_then(|t| t.compute_writes(name));
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: writes,
+            });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(x, y, 1);
         };
-        run(&p.prepare, &prepare, (rx, ry));
-        run(&p.setup, &setup, (1, 1));
+        run("Interpolation: prepare", &p.prepare, &prepare, (rx, ry));
+        run("Interpolation: setup", &p.setup, &setup, (1, 1));
         if !reset {
-            run(&p.reconstruct_previous_depth, &reconstruct, (rx, ry));
-            run(&p.game_motion_vector_field, &game_field, (rx, ry));
+            run("Interpolation: previous depth", &p.reconstruct_previous_depth, &reconstruct, (rx, ry));
+            run("Interpolation: game motion field", &p.game_motion_vector_field, &game_field, (rx, ry));
             for (i, (group, size)) in game_pyramid.iter().zip(&r.game_pyramid.sizes).enumerate() {
                 let pipeline = if i == 0 {
                     &p.game_field_pyramid_first
                 } else {
                     &p.game_field_pyramid
                 };
-                run(pipeline, group, groups_for(*size));
+                run("Interpolation: game motion pyramid", pipeline, group, groups_for(*size));
             }
             run(
+                "Interpolation: optical flow field",
                 &p.optical_flow_vector_field,
                 &flow_field,
                 groups_for(flow_size.map(|v| v as u32)),
             );
-            run(&p.disocclusion_mask, &disocclusion, (rx, ry));
+            run("Interpolation: disocclusion", &p.disocclusion_mask, &disocclusion, (rx, ry));
         }
-        run(&p.interpolate, &interpolate, (dx, dy));
+        run("Interpolation: interpolate", &p.interpolate, &interpolate, (dx, dy));
         for (i, (group, size)) in inpainting_pyramid
             .iter()
             .zip(&self.inpainting_pyramid.sizes)
@@ -601,10 +622,10 @@ impl Interpolation {
             } else {
                 &p.inpainting_pyramid
             };
-            run(pipeline, group, groups_for(*size));
+            run("Interpolation: inpainting pyramid", pipeline, group, groups_for(*size));
         }
-        run(&p.inpainting, &inpainting, (dx, dy));
-        drop(pass);
+        run("Interpolation: inpainting", &p.inpainting, &inpainting, (dx, dy));
+        drop(shared);
         encoder.copy_texture_to_texture(
             color.as_image_copy(),
             previous_texture.as_image_copy(),
@@ -755,7 +776,7 @@ mod tests {
             .collect();
         for (i, (color, _)) in frames.iter().enumerate() {
             let mut encoder = device.create_command_encoder(&Default::default());
-            flow.dispatch(&device, &queue, &mut encoder, color, i == 0);
+            flow.dispatch(&device, &queue, &mut encoder, color, i == 0, None);
             interpolation.dispatch(
                 &device,
                 &queue,
@@ -774,6 +795,7 @@ mod tests {
                     flow_vectors: flow.vectors(),
                     scene_change: flow.scene_change(),
                 },
+                None,
             );
             queue.submit([encoder.finish()]);
         }

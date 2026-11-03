@@ -9655,6 +9655,9 @@ impl Renderer {
                 &view_target,
                 &generated_view,
                 &camera,
+                self.own_timing
+                    .as_mut()
+                    .map(|t| (t, self.config.format.remove_srgb_suffix())),
             );
             if fg_made {
                 let overlay = Overlay {
@@ -9668,6 +9671,14 @@ impl Renderer {
                     hand_view_proj,
                 };
                 self.draw_overlay(&mut encoder, frame, &generated_view, generated, &overlay);
+                if let Some(t) = &mut self.own_timing {
+                    t.span(
+                        &self.device,
+                        &mut encoder,
+                        (&generated_view, self.config.format.remove_srgb_suffix()),
+                        "Frame generation (HUD on the made frame)",
+                    );
+                }
             }
         }
         if !frame.title {
