@@ -1077,8 +1077,10 @@ impl NativePost {
             ..Default::default()
         });
         let count = stages.len();
-        let mut passes = Vec::with_capacity(count);
-        for (i, stage) in stages.into_iter().enumerate() {
+        // Each pass parses, validates and compiles alone: build them on a few threads at once,
+        // which takes the wait for options to apply from the sum of the passes to about a
+        // fraction of it (wgpu's device takes calls from any thread).
+        let build = |i: usize, stage: CheckedStage| -> Result<(String, wgpu::RenderPipeline), String> {
             let traced = rays
                 .map(|_| {
                     let text = format!(
@@ -1137,7 +1139,42 @@ impl NativePost {
             if let Some(e) = pollster::block_on(scope.pop()) {
                 return Err(format!("{}: {e}", stage.file));
             }
-            passes.push((stage.label, pipeline));
+            Ok((stage.label, pipeline))
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 8);
+        let mut indexed: Vec<(usize, CheckedStage)> = stages.into_iter().enumerate().collect();
+        let mut slots: Vec<Vec<(usize, CheckedStage)>> = (0..threads).map(|_| Vec::new()).collect();
+        // Round robin, so the heavier ray-traced passes, which come together, spread out.
+        for (n, item) in indexed.drain(..).enumerate() {
+            slots[n % threads].push(item);
+        }
+        let mut built: Vec<(usize, Result<(String, wgpu::RenderPipeline), String>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = slots
+                    .into_iter()
+                    .map(|slot| {
+                        let build = &build;
+                        scope.spawn(move || {
+                            slot.into_iter()
+                                .map(|(i, stage)| (i, build(i, stage)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().unwrap_or_default())
+                    .collect()
+            });
+        built.sort_by_key(|(i, _)| *i);
+        if built.len() != count {
+            return Err("a post pass's build stopped".to_owned());
+        }
+        let mut passes = Vec::with_capacity(count);
+        for (_, pass) in built {
+            passes.push(pass?);
         }
         let sampler = |label, filter| {
             device.create_sampler(&wgpu::SamplerDescriptor {

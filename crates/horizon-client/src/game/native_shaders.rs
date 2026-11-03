@@ -56,8 +56,10 @@ impl Game<'_> {
             return;
         };
         let result = Pack::read(path).map_err(|e| vec![e]).and_then(|pack| {
+            let read_ms = now.elapsed().as_millis();
             let report = check(&pack)
                 .map_err(|p| p.iter().map(ToString::to_string).collect::<Vec<String>>())?;
+            log::info!("shader pack read in {read_ms} ms, checked by {} ms", now.elapsed().as_millis());
             // The player's values (Shader Pack Settings), else the defaults.
             let options = &pack.manifest.options;
             let values = horizon_client::shader_pack_list::load_values(path, options);

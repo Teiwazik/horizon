@@ -82,6 +82,9 @@ impl NativePack {
         lights: super::block_light::LightTable,
     ) -> Result<(Self, Vec<String>), String> {
         let (globals, format) = (terrain.globals, terrain.format);
+        let clock = std::time::Instant::now();
+        let mut marks: Vec<(&'static str, u128)> = Vec::new();
+        let mark = |name: &'static str, marks: &mut Vec<(&'static str, u128)>| marks.push((name, clock.elapsed().as_millis()));
         let textures = super::native_post::pack_textures(device, queue, &report);
         let mut frame = NativeFrame::new(
             device,
@@ -115,6 +118,7 @@ impl NativePack {
                     report.shadow.is_some(),
                 )
             });
+        mark("frame", &mut marks);
         let vertex = report.stages.iter().find(|s| s.kind == StageKind::Vertex);
         let shadow = report
             .shadow
@@ -134,6 +138,7 @@ impl NativePack {
                 NativeShadow::new(device, terrain, &frame, s, vertex, constants, grid)
             })
             .transpose()?;
+        mark("shadow", &mut marks);
         let has_vertex = vertex.is_some();
         let reflection = report
             .stages
@@ -183,6 +188,7 @@ impl NativePack {
                 )
             })
             .transpose()?;
+        mark("weather", &mut marks);
         let (post, others): (Vec<_>, Vec<_>) = report
             .stages
             .into_iter()
@@ -192,6 +198,7 @@ impl NativePack {
             .find(|s| s.kind == StageKind::Sky)
             .map(|stage| NativeSky::new(device, globals, &frame, stage, constants, format))
             .transpose()?;
+        mark("sky", &mut marks);
         let material = others
             .iter()
             .find(|s| s.kind == StageKind::Material)
@@ -214,6 +221,7 @@ impl NativePack {
                 )
             })
             .transpose()?;
+        mark("material", &mut marks);
         let post = (!post.is_empty())
             .then(|| {
                 NativePost::new(
@@ -227,6 +235,8 @@ impl NativePack {
                 )
             })
             .transpose()?;
+        mark("post", &mut marks);
+        log::info!("shader pack pipelines, ms since start: {marks:?}");
         let mut labels: Vec<String> = sky.iter().map(|s| s.label.clone()).collect();
         labels.extend(
             others

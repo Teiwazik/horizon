@@ -22,7 +22,15 @@ impl FrameGraph {
         }
         self.frames.push_back((frame_ms, cpu_ms, gpu));
     }
-    pub fn draw(&self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
+    /// `generated`: with frame generation running, the share of made frames per real one
+    /// (`Renderer::frame_generation_share`), for the frames reaching the screen.
+    pub fn draw(
+        &self,
+        mode: Overlay,
+        generated: Option<f32>,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+    ) {
         if mode == Overlay::Off || self.frames.is_empty() {
             return;
         }
@@ -31,7 +39,14 @@ impl FrameGraph {
         let (frame, cpu, gpu) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2));
         let worst = self.frames.iter().map(|f| f.0).fold(0.0f32, f32::max);
         let lines = [
-            format!("{:.0} fps", 1000.0 / frame.max(0.001)),
+            {
+                let fps = 1000.0 / frame.max(0.001);
+                match generated {
+                    // As F3 shows it: the real frames, then all that reach the screen.
+                    Some(share) => format!("{fps:.0} fps ({:.0} FSR 3.1)", fps * (1.0 + share)),
+                    None => format!("{fps:.0} fps"),
+                }
+            },
             format!("frame {frame:.1} ms  max {worst:.1}"),
             format!("cpu {cpu:.1}  gpu {gpu:.1} ms"),
         ];

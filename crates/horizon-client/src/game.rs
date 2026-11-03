@@ -8292,8 +8292,16 @@ impl Game<'_> {
         // Gui.extractRenderState: the debug overlay comes after the screen
         // and the toasts, so it is over everything, menus included.
         self.draw_debug_overlay(&mut batch, size);
-        self.frame_graph
-            .draw(self.settings.horizon.overlay, &mut batch, &self.gui.atlas);
+        let generated = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.frame_generation_share());
+        self.frame_graph.draw(
+            self.settings.horizon.overlay,
+            generated,
+            &mut batch,
+            &self.gui.atlas,
+        );
         self.draw_pad_cursor(&mut batch);
         self.resolve_inline_profiles(&batch.inline_profiles);
         batch
