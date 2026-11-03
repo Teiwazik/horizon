@@ -72,6 +72,9 @@ struct Out {
     // HDR tier of a light-giving particle (mesher::hdr_tier), from the overlay's
     // high bits (particles.rs): fs_hdr_mark marks the frame with it.
     @location(13) @interpolate(flat) tier: u32,
+    // For the ray-traced surface pass (fs_entity_surface): xyz the vertex normal, w the light
+    // levels (block * 16 + sky, each 0..15, before the lightmap).
+    @location(15) surface_normal: vec4<f32>,
     // HDR lighting (`hdr_scene`), 0 for what isn't lit.
     @location(14) scene: f32,
 }
@@ -160,6 +163,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.spherical = select(length(position), 0.0, overlay >= 2u && overlay <= 4u);
     out.cylindrical = select(max(length(position.xz), abs(position.y)), 0.0, overlay >= 2u && overlay <= 4u);
     out.overlay = overlay;
+    // +256 where entity_light shaded the colour, +512 where the back takes the reversed normal's.
+    out.surface_normal = vec4(normal.xyz, select(floor(min(l.x, 240.0) / 16.0 + 0.5) * 16.0 + floor(min(l.y, 240.0) / 16.0 + 0.5)
+        + select(0.0, 256.0, abs(normal.w) >= 0.5) + select(0.0, 512.0, normal.w <= -0.5), -1.0, unlit));
     out.glint_uv = vec2(0.0);
     if overlay == 4u { out.spherical = length(position); }
     return out;
@@ -315,6 +321,59 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
     let f = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
                 linear_fog(in.cylindrical, globals.fog.z, globals.fog.w));
     return vec4(mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a), color.a);
+}
+
+// Under ray tracing with a native shader pack: what an entity leaves in the pack's surface and
+// albedo targets (the post stage's `scene_surface` and `albedo_at`), drawn again over its own
+// depth, so that the pack lights it as it lights terrain. The surface's data is 300 + the block
+// light level + the sky light (0..0.999); unlit parts (beams, portals, clouds) leave nothing.
+struct EntitySurface {
+    @location(0) surface: vec4<f32>,
+    @location(1) albedo: vec4<f32>,
+}
+@fragment fn fs_entity_surface(in: Out, @builtin(front_facing) front: bool) -> EntitySurface {
+    if in.surface_normal.w < 0.0 || in.overlay == 4u || in.overlay == 6u { discard; }
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    var tint = select(in.back_color, in.color, front);
+    if in.overlay == 38u {
+        if tint.a < textureSampleLevel(atlas, atlas_sampler, in.glint_uv, 0.0).a { discard; }
+        tint.a = 1.0;
+    }
+    var color = texel * tint;
+    // Translucent parts (a slime's outer cube) keep what lies behind them.
+    if color.a < 0.9 || (in.cull != 0u && !front) { discard; }
+    color = vec4(mix(in.overlay_color.rgb, color.rgb, in.overlay_color.a), color.a);
+    // A vertex with no normal (none of the models' do without) keeps the engine's light.
+    var n = in.surface_normal.xyz;
+    if dot(n, n) < 0.25 { discard; }
+    n = normalize(n);
+    if !front {
+        n = -n;
+    }
+    var code = in.surface_normal.w;
+    let reversed = code >= 512.0;
+    code -= select(0.0, 512.0, reversed);
+    let shaded = code >= 256.0;
+    code -= select(0.0, 256.0, shaded);
+    let block = floor(code / 16.0);
+    let sky = code - block * 16.0;
+    // The vertex colour carries the cardinal shading entity_light gave it: taken out, as the
+    // pack shades by the normal itself.
+    var shade = 1.0;
+    if shaded {
+        let v = normalize(in.surface_normal.xyz);
+        shade = entity_light(select(v, -v, !front && reversed), globals.time.y != 0.0);
+    }
+    // set_surface's octahedral encoding, y up.
+    let o = n / (abs(n.x) + abs(n.y) + abs(n.z));
+    var e = o.xz;
+    if o.y < 0.0 {
+        e = (1.0 - abs(o.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), o.xz >= vec2<f32>(0.0));
+    }
+    var out: EntitySurface;
+    out.surface = vec4(bitcast<f32>(pack2x16snorm(e)), 0.0, 300.0 + block + min(sky / 15.0, 0.999), in.clip.z);
+    out.albedo = vec4(min(color.rgb / max(shade, 0.4), vec3(1.0)), 1.0);
+    return out;
 }
 
 // rendertype_outline.fsh: the vertex colour (the team colour; outline vertices carry no

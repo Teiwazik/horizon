@@ -878,6 +878,9 @@ pub struct Renderer {
     /// that fogs its terrain itself, the pack's post stage finds the entities by it and fogs
     /// them its way (terrain writes 1).
     entity_marked_pipeline: wgpu::RenderPipeline,
+    /// Entities and static block entities into a native pack's surface and albedo targets
+    /// under ray tracing (entity.wgsl `fs_entity_surface`).
+    entity_surface_pipelines: [wgpu::RenderPipeline; 2],
     static_entity_pipeline: wgpu::RenderPipeline,
     static_entity_group: wgpu::BindGroup,
     static_entity_transform: wgpu::Buffer,
@@ -3350,6 +3353,61 @@ impl Renderer {
                 multiview_mask: None,
                 cache: None,
             });
+        // Ray tracing under a native pack: entities again over their own depth, into the pack's
+        // surface and albedo targets (entity.wgsl fs_entity_surface), so its light passes treat
+        // them as terrain.
+        let entity_surface_pipeline = |label: &str,
+                                       layout: &wgpu::PipelineLayout,
+                                       module: &wgpu::ShaderModule,
+                                       vertex: &str,
+                                       buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Equal),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_entity_surface"),
+                    compilation_options: Default::default(),
+                    targets: &[
+                        Some(native_material::SURFACE_FORMAT.into()),
+                        Some(native_material::ALBEDO_FORMAT.into()),
+                    ],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let entity_surface_pipelines = [
+            entity_surface_pipeline(
+                "Entity surfaces",
+                &entity_layout,
+                &entity_shader,
+                "vs_entity",
+                &entity_vertex,
+            ),
+            entity_surface_pipeline(
+                "Static block entity surfaces",
+                &static_entity_layout,
+                &static_entity_shader,
+                "vs_static_entity",
+                &static_entity_vertex,
+            ),
+        ];
         // RenderPipelines.ENERGY_SWIRL: BlendFunction.ADDITIVE (one, one), no culling; no depth
         // writes either: vanilla sorts the quads far to near, so every face passes the test.
         let one_one = wgpu::BlendComponent {
@@ -4012,6 +4070,7 @@ impl Renderer {
             mirror: None,
             entity_pipeline,
             entity_marked_pipeline,
+            entity_surface_pipelines,
             static_entity_pipeline,
             hdr_mark_pipeline,
             hdr_hand_unmark_pipeline,
@@ -8505,6 +8564,72 @@ impl Renderer {
                     pass.draw_indexed(0..entity_quads * 6, 0, 0..1);
                 }
                 pass.set_bind_group(0, &self.group, &[]);
+            }
+            // Under ray tracing the entities also go into the pack's surface and albedo targets,
+            // over the depth they just wrote, so that its passes light them as they light terrain.
+            if let Some((surface_view, albedo_view)) = &surface
+                && (entity_quads > 0 || static_entity_quads > 0)
+                && self.native.as_ref().is_some_and(|n| n.frame.rays.is_some())
+            {
+                drop(pass);
+                let keep = wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                };
+                let attachment = |view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: keep,
+                    })
+                };
+                let mut surfaces = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Entity surfaces"),
+                    timestamp_writes: None,
+                    color_attachments: &[attachment(surface_view), attachment(albedo_view)],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: world_depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if static_entity_quads > 0 {
+                    surfaces.set_pipeline(&self.entity_surface_pipelines[1]);
+                    surfaces.set_bind_group(0, &self.entity_group, &[]);
+                    surfaces.set_bind_group(1, &self.static_entity_group, &[]);
+                    surfaces.set_index_buffer(
+                        self.static_entity_indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    for section in frame.visible_static_block_entity_sections {
+                        let Some(gpu) = self.static_entity_sections.get(section) else {
+                            continue;
+                        };
+                        let quads = gpu.vertices / 4;
+                        if quads == 0 {
+                            continue;
+                        }
+                        surfaces.set_vertex_buffer(0, gpu.buffer.slice(..));
+                        surfaces.set_vertex_buffer(1, gpu.origin_buffer.slice(..));
+                        surfaces.draw_indexed(0..quads * 6, 0, 0..1);
+                    }
+                }
+                if entity_quads > 0 {
+                    surfaces.set_pipeline(&self.entity_surface_pipelines[0]);
+                    surfaces.set_bind_group(0, &self.entity_group, &[]);
+                    surfaces.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    surfaces.set_vertex_buffer(0, self.entity_buffer.slice(..));
+                    surfaces.draw_indexed(0..entity_quads * 6, 0, 0..1);
+                }
+                drop(surfaces);
+                pass = plain_pass(&mut encoder);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             }
             if text_quads > 0 && !oit_on {
                 pass.set_pipeline(&self.text_polygon_offset_pipeline);
