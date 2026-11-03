@@ -67,13 +67,16 @@ struct Out {
     // `ARMOR_ENTITY_GLINT_TEXTURING` scrolls for overlay 36 (armour), or the
     // dissolve mask's atlas UV for overlay 38.
     @location(11) glint_uv: vec2<f32>,
-    // 1 drops the quad's back-facing pixels (Vertex::normal w = 1), like a culling render type.
+    // Bit 0 drops the quad's back-facing pixels (Vertex::normal w = 1), like a culling render
+    // type. For fs_entity_surface: bit 1 entity_light shaded the colour, bit 2 the back takes the
+    // reversed normal's shade, bit 3 unlit, bit 4 no normal.
     @location(12) @interpolate(flat) cull: u32,
     // HDR tier of a light-giving particle (mesher::hdr_tier), from the overlay's
     // high bits (particles.rs): fs_hdr_mark marks the frame with it.
     @location(13) @interpolate(flat) tier: u32,
-    // For the ray-traced surface pass (fs_entity_surface): xyz the vertex normal, w the light
-    // levels (block * 16 + sky, each 0..15, before the lightmap).
+    // For the ray-traced surface pass (fs_entity_surface): xy the vertex normal (octahedral, y
+    // up), z the block light and w the sky light, 0..1, smooth across the face. `cull` holds
+    // its flags.
     @location(15) surface_normal: vec4<f32>,
     // HDR lighting (`hdr_scene`), 0 for what isn't lit.
     @location(14) scene: f32,
@@ -151,7 +154,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     // Normal w: 0 keeps the baked colour, +-127 shades by the normal, and a small positive 1
     // keeps the baked colour but culls back faces (entitySolid models such as the decorated pot).
     // -126/127 shades like -127 and also culls (entityCutoutCull models such as the bat).
-    out.cull = select(0u, 1u, (normal.w > 0.0 && normal.w < 0.5) || (normal.w < 0.0 && normal.w > -0.996));
+    out.cull = select(0u, 1u, (normal.w > 0.0 && normal.w < 0.5) || (normal.w < 0.0 && normal.w > -0.996))
+        | select(0u, 2u, abs(normal.w) >= 0.5) | select(0u, 4u, normal.w <= -0.5)
+        | select(0u, 8u, unlit) | select(0u, 16u, dot(normal.xyz, normal.xyz) < 0.25);
     if abs(normal.w) >= 0.5 {
         c = vec4(c.rgb * entity_light(normal.xyz, globals.time.y != 0.0), c.a);
         back = select(c, vec4(back.rgb * entity_light(-normal.xyz, globals.time.y != 0.0), back.a), normal.w < 0.0);
@@ -163,9 +168,13 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.spherical = select(length(position), 0.0, overlay >= 2u && overlay <= 4u);
     out.cylindrical = select(max(length(position.xz), abs(position.y)), 0.0, overlay >= 2u && overlay <= 4u);
     out.overlay = overlay;
-    // +256 where entity_light shaded the colour, +512 where the back takes the reversed normal's.
-    out.surface_normal = vec4(normal.xyz, select(floor(min(l.x, 240.0) / 16.0 + 0.5) * 16.0 + floor(min(l.y, 240.0) / 16.0 + 0.5)
-        + select(0.0, 256.0, abs(normal.w) >= 0.5) + select(0.0, 512.0, normal.w <= -0.5), -1.0, unlit));
+    // The normal as set_surface packs it, and the light levels before the lightmap.
+    let o = normal.xyz / max(abs(normal.x) + abs(normal.y) + abs(normal.z), 0.0001);
+    var e = o.xz;
+    if o.y < 0.0 {
+        e = (1.0 - abs(o.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), o.xz >= vec2<f32>(0.0));
+    }
+    out.surface_normal = vec4(e, clamp(l.x / 240.0, 0.0, 1.0), clamp(l.y / 240.0, 0.0, 1.0));
     out.glint_uv = vec2(0.0);
     if overlay == 4u { out.spherical = length(position); }
     return out;
@@ -301,7 +310,7 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
         // clouds.fsh: alpha fades out towards the cloud fog end.
         return vec4(color.rgb, color.a * (1.0 - linear_fog(in.spherical, 0.0, globals.fog_ends.y)));
     }
-    if color.a < 0.1 || (in.cull != 0u && !front) { discard; }
+    if color.a < 0.1 || ((in.cull & 1u) != 0u && !front) { discard; }
     // entity.fsh calculateFinalColor: the overlay (hurt red, TNT white) over the
     // lit texture, then the lightmap, then the glint and fog.
     color = vec4(mix(in.overlay_color.rgb, color.rgb, in.overlay_color.a), color.a);
@@ -326,13 +335,26 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
 // Under ray tracing with a native shader pack: what an entity leaves in the pack's surface and
 // albedo targets (the post stage's `scene_surface` and `albedo_at`), drawn again over its own
 // depth, so that the pack lights it as it lights terrain. The surface's data is 300 + the block
-// light level + the sky light (0..0.999); unlit parts (beams, portals, clouds) leave nothing.
+// light in 150ths + the sky light (0..0.999); unlit parts (beams, portals, clouds) leave nothing.
 struct EntitySurface {
     @location(0) surface: vec4<f32>,
     @location(1) albedo: vec4<f32>,
 }
 @fragment fn fs_entity_surface(in: Out, @builtin(front_facing) front: bool) -> EntitySurface {
-    if in.surface_normal.w < 0.0 || in.overlay == 4u || in.overlay == 6u { discard; }
+    // The face's normal from the slopes of its clip position, for the models that bake their
+    // shading on the CPU and send no normal (block entities, paintings). The clip position is
+    // linear in the world one, c = B p + t (rows x, y, w of view_proj); for a linear map,
+    // cross(B⁻¹a, B⁻¹b) is Bᵀ cross(a, b) over det B, and the camera at the origin sees the
+    // face if cross(a, b) points against c - t.
+    let c = vec3(2.0 * in.proj.x - in.proj.w, 2.0 * in.proj.y - in.proj.w, in.proj.w);
+    let u = cross(dpdx(c), dpdy(c));
+    let vp = globals.view_proj;
+    var slope_normal = u.x * vec3(vp[0].x, vp[1].x, vp[2].x) + u.y * vec3(vp[0].y, vp[1].y, vp[2].y)
+        + u.z * vec3(vp[0].w, vp[1].w, vp[2].w);
+    if dot(u, c - vec3(vp[3].x, vp[3].y, vp[3].w)) > 0.0 {
+        slope_normal = -slope_normal;
+    }
+    if (in.cull & 8u) != 0u || in.overlay == 4u || in.overlay == 6u { discard; }
     let texel = textureSample(atlas, atlas_sampler, in.uv);
     var tint = select(in.back_color, in.color, front);
     if in.overlay == 38u {
@@ -341,28 +363,28 @@ struct EntitySurface {
     }
     var color = texel * tint;
     // Translucent parts (a slime's outer cube) keep what lies behind them.
-    if color.a < 0.9 || (in.cull != 0u && !front) { discard; }
+    if color.a < 0.9 || ((in.cull & 1u) != 0u && !front) { discard; }
     color = vec4(mix(in.overlay_color.rgb, color.rgb, in.overlay_color.a), color.a);
-    // A vertex with no normal (none of the models' do without) keeps the engine's light.
-    var n = in.surface_normal.xyz;
-    if dot(n, n) < 0.25 { discard; }
+    let ex = in.surface_normal.xy;
+    var n = vec3(ex.x, 1.0 - abs(ex.x) - abs(ex.y), ex.y);
+    if n.y < 0.0 {
+        n = vec3((1.0 - abs(n.z)) * sign(n.x), n.y, (1.0 - abs(n.x)) * sign(n.z));
+    }
     n = normalize(n);
+    let vertex_normal = n;
     if !front {
         n = -n;
     }
-    var code = in.surface_normal.w;
-    let reversed = code >= 512.0;
-    code -= select(0.0, 512.0, reversed);
-    let shaded = code >= 256.0;
-    code -= select(0.0, 256.0, shaded);
-    let block = floor(code / 16.0);
-    let sky = code - block * 16.0;
     // The vertex colour carries the cardinal shading entity_light gave it: taken out, as the
     // pack shades by the normal itself.
     var shade = 1.0;
-    if shaded {
-        let v = normalize(in.surface_normal.xyz);
-        shade = entity_light(select(v, -v, !front && reversed), globals.time.y != 0.0);
+    if (in.cull & 16u) != 0u {
+        // No normal: the slopes', and the CPU's `diffuse` of it baked in the colour.
+        n = normalize(slope_normal);
+        shade = entity_light(n, globals.time.y != 0.0);
+    } else if (in.cull & 2u) != 0u {
+        shade = entity_light(select(vertex_normal, -vertex_normal, !front && (in.cull & 4u) != 0u),
+            globals.time.y != 0.0);
     }
     // set_surface's octahedral encoding, y up.
     let o = n / (abs(n.x) + abs(n.y) + abs(n.z));
@@ -371,7 +393,9 @@ struct EntitySurface {
         e = (1.0 - abs(o.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), o.xz >= vec2<f32>(0.0));
     }
     var out: EntitySurface;
-    out.surface = vec4(bitcast<f32>(pack2x16snorm(e)), 0.0, 300.0 + block + min(sky / 15.0, 0.999), in.clip.z);
+    // Data: 300 + the block light in 150ths, + the sky light as the fraction.
+    out.surface = vec4(bitcast<f32>(pack2x16snorm(e)), 0.0,
+        300.0 + round(in.surface_normal.z * 150.0) + min(in.surface_normal.w, 0.999), in.clip.z);
     out.albedo = vec4(min(color.rgb / max(shade, 0.4), vec3(1.0)), 1.0);
     return out;
 }
