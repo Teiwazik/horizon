@@ -268,6 +268,14 @@ const DISPLACED_ENTRIES: &str = "
     }
     return horizon_material_solid(in);
 }
+// The grid's depth alone (`NativeMaterial::grid`), cut where `fs_displaced` cuts it: then the
+// material shades only its nearest point a pixel, not each step's wall and cell behind it.
+@fragment fn horizon_material_fs_grid_depth(in: HorizonMaterialOut) -> HorizonMaterialSolid {
+    if length(in.base) >= horizon_displace_distance + 0.05 {
+        discard;
+    }
+    return HorizonMaterialSolid(vec4(0.0), vec4(0.0), vec4(0.0));
+}
 ";
 
 /// The format of the solid terrain's second target, what the post stage reads as
@@ -303,6 +311,8 @@ pub struct NativeMaterial {
     pub flat: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// `[displacement]`'s grid of the solid terrain near the camera (gfx/displace.rs).
     pub displaced: Option<wgpu::RenderPipeline>,
+    /// The grid's depth, then its shading over it (as `prepass` for the flat terrain).
+    pub grid: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// The solid terrain as a depth pre-pass and a material pass after it.
     pub prepass: Prepass,
 }
@@ -1056,6 +1066,11 @@ impl NativeMaterial {
                 pipeline_in(layout, "horizon_material_vs_flat", &flat_vertices, fragment, blend, pass)
             })
         };
+        let grid_in = |fragment: &str, pass| {
+            displaced_layout.as_ref().map(|layout| {
+                pipeline_in(layout, "horizon_material_vs_displaced", &[], fragment, None, pass)
+            })
+        };
         type Built = Result<wgpu::RenderPipeline, String>;
         type Maybe = Result<Option<wgpu::RenderPipeline>, String>;
         let one = |f: &(dyn Fn() -> wgpu::RenderPipeline + Sync)| -> Built { checked(f) };
@@ -1067,7 +1082,7 @@ impl NativeMaterial {
                 None => Ok(pipeline),
             }
         };
-        let (solid, translucent, flat_solid, flat_translucent, displaced, depth, depth_flat, after, after_flat) =
+        let (solid, translucent, flat_solid, flat_translucent, displaced, grid_depth, grid_after, depth, depth_flat, after, after_flat) =
             std::thread::scope(|s| {
                 let solid = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::Shaded)));
                 let translucent = s.spawn(|| {
@@ -1077,20 +1092,9 @@ impl NativeMaterial {
                 let flat_translucent = s.spawn(|| {
                     maybe(&|| flat_in("horizon_material_fs_translucent", blend, Pass::Shaded))
                 });
-                let displaced = s.spawn(|| {
-                    maybe(&|| {
-                        displaced_layout.as_ref().map(|layout| {
-                            pipeline_in(
-                                layout,
-                                "horizon_material_vs_displaced",
-                                &[],
-                                "horizon_material_fs_displaced",
-                                None,
-                                Pass::Shaded,
-                            )
-                        })
-                    })
-                });
+                let displaced = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::Shaded)));
+                let grid_depth = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_grid_depth", Pass::Depth)));
+                let grid_after = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::After)));
                 let depth = s.spawn(|| one(&|| instanced_in("horizon_material_fs_depth", None, Pass::Depth)));
                 let depth_flat = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_depth", None, Pass::Depth)));
                 let after = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::After)));
@@ -1104,6 +1108,8 @@ impl NativeMaterial {
                     flat_solid.join().unwrap_or_else(|_| stopped()),
                     flat_translucent.join().unwrap_or_else(|_| stopped()),
                     displaced.join().unwrap_or_else(|_| stopped()),
+                    grid_depth.join().unwrap_or_else(|_| stopped()),
+                    grid_after.join().unwrap_or_else(|_| stopped()),
                     depth.join().unwrap_or_else(|_| stopped()),
                     depth_flat.join().unwrap_or_else(|_| stopped()),
                     after.join().unwrap_or_else(|_| stopped()),
@@ -1115,6 +1121,10 @@ impl NativeMaterial {
             _ => None,
         };
         let (solid, translucent, displaced) = (solid?, translucent?, displaced?);
+        let grid = match (grid_depth?, grid_after?) {
+            (Some(depth), Some(after)) => Some((depth, after)),
+            _ => None,
+        };
         let prepass = Prepass {
             depth: depth?,
             depth_flat: depth_flat?,
@@ -1126,6 +1136,7 @@ impl NativeMaterial {
             translucent,
             flat,
             displaced,
+            grid,
             prepass,
         })
     }

@@ -8834,13 +8834,20 @@ impl Renderer {
                 }
             }
             // `[displacement]`'s grid over the flat quads it took over, writing its depth: the
-            // pre-pass leaves it out (the flat quads there are cut out of it too).
-            if let Some((d, m)) = grid
-                && let Some(pipeline) = m.displaced.as_ref()
-            {
+            // pre-pass leaves it out (the flat quads there are cut out of it too). Its own depth
+            // first, then the material over it: shaded with every step's walls and the cells
+            // behind them, it traced rays for each.
+            if let Some((d, m)) = grid {
                 pass.set_bind_group(0, &self.group, &[]);
                 pack_frame(&mut pass);
-                d.draw(&mut pass, &d.view, pipeline);
+                match (&m.grid, &m.displaced) {
+                    (Some((depth, after)), _) => {
+                        d.draw(&mut pass, &d.view, depth);
+                        d.draw(&mut pass, &d.view, after);
+                    }
+                    (None, Some(pipeline)) => d.draw(&mut pass, &d.view, pipeline),
+                    (None, None) => {}
+                }
             }
             if surface.is_some() {
                 drop(pass);
