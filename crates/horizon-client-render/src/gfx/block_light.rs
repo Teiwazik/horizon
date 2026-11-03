@@ -32,8 +32,13 @@ pub struct BlockLight {
     /// `block_light_grid`: the grid's corner, camera-relative, and the side of a cell.
     pub grid: wgpu::Buffer,
     table: LightTable,
-    /// The world corner and the sources' revision the texture was last built for.
+    /// The world corner and the sources' revision the texture was last asked for.
     built: Option<([i32; 3], u64)>,
+    /// The grid being filled on a thread of its own (its corner): with sources all over new
+    /// ground it took 20 to 40 ms, a hitch every few frames in flight.
+    pending: Option<([i32; 3], std::thread::JoinHandle<Vec<u8>>)>,
+    /// The corner of the grid the texture holds.
+    shown: Option<[i32; 3]>,
 }
 
 impl BlockLight {
@@ -64,6 +69,8 @@ impl BlockLight {
             grid,
             table,
             built: None,
+            pending: None,
+            shown: None,
         }
     }
 
@@ -87,41 +94,64 @@ impl BlockLight {
             .as_ivec3()
             .to_array()
             .map(|v| v * STEP);
-        let corner = (glam::IVec3::from(origin).as_dvec3() - camera).as_vec3();
+        // A grid filled since: into the texture, which then stands at its corner.
+        if self.pending.as_ref().is_some_and(|(_, job)| job.is_finished())
+            && let Some((at, job)) = self.pending.take()
+        {
+            if let Ok(cells) = job.join() {
+                queue.write_texture(
+                    self.texture.as_image_copy(),
+                    &cells,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(SIZE * 4),
+                        rows_per_image: Some(SIZE),
+                    },
+                    self.texture.size(),
+                );
+                self.shown = Some(at);
+            }
+        }
+        // The next one, once the last is in: the sources are gathered here (a walk over the
+        // sections' lists), their light spread over the cells on a thread.
+        if self.built != Some((origin, revision)) && self.pending.is_none() {
+            self.built = Some((origin, revision));
+            let sources = sources(&self.table, origin, camera, sections);
+            self.pending = Some((origin, std::thread::spawn(move || spread(sources))));
+        }
+        let at = self.shown.unwrap_or(origin);
+        let corner = (glam::IVec3::from(at).as_dvec3() - camera).as_vec3();
         queue.write_buffer(
             &self.grid,
             0,
             bytemuck::cast_slice(&[corner.x, corner.y, corner.z, CELL]),
         );
-        if self.built == Some((origin, revision)) {
-            return;
-        }
-        self.built = Some((origin, revision));
-        let cells = build(&self.table, origin, camera, sections);
-        queue.write_texture(
-            self.texture.as_image_copy(),
-            &cells,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(SIZE * 4),
-                rows_per_image: Some(SIZE),
-            },
-            self.texture.size(),
-        );
     }
 }
 
 /// The cells of the grid with its corner at `origin`: RGBA8, x fastest, then y, then z.
+#[cfg(test)]
 fn build(
     table: &LightTable,
     origin: [i32; 3],
     camera: DVec3,
     sections: &FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
 ) -> Vec<u8> {
-    let n = SIZE as usize;
-    let mut cells = vec![0u8; n * n * n * 4];
+    spread(sources(table, origin, camera, sections))
+}
+
+/// A source in the grid: where (from its corner), its colour and its reach.
+type Source = (Vec3, [f32; 3], f32);
+
+/// The sources the grid with its corner at `origin` holds, the nearest `MAX_SOURCES`.
+fn sources(
+    table: &LightTable,
+    origin: [i32; 3],
+    camera: DVec3,
+    sections: &FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+) -> Vec<Source> {
     if table.is_empty() {
-        return cells;
+        return Vec::new();
     }
     let span = SIZE as i32 * CELL as i32;
     // Sections the grid or the light reaching into it (15 blocks) touches.
@@ -151,8 +181,15 @@ fn build(
         sources.select_nth_unstable_by(MAX_SOURCES, |a, b| a.3.total_cmp(&b.3));
         sources.truncate(MAX_SOURCES);
     }
+    sources.into_iter().map(|(at, color, reach, _)| (at, color, reach)).collect()
+}
+
+/// The cells `sources` light: RGBA8, x fastest, then y, then z.
+fn spread(sources: Vec<Source>) -> Vec<u8> {
+    let n = SIZE as usize;
+    let mut cells = vec![0u8; n * n * n * 4];
     let mut sum = vec![[0.0f32; 4]; n * n * n];
-    for (at, color, reach, _) in sources {
+    for (at, color, reach) in sources {
         let first = ((at - reach) / CELL).floor().max(Vec3::ZERO).as_ivec3();
         let last = ((at + reach) / CELL)
             .ceil()

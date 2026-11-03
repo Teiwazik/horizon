@@ -8105,6 +8105,7 @@ impl Renderer {
                 ),
             });
             rt.update(&self.device, &mut encoder, list, entities, &self.indices);
+            laps.lap("r_rt_scene");
         }
         if let Some(native) = self.native.as_mut().filter(|_| !frame.title)
             && let Some(rt) = &mut native.frame.rays
@@ -8119,6 +8120,7 @@ impl Renderer {
                 frame.colored_lights,
                 frame.particle_lights,
             );
+            laps.lap("r_rt_lights");
         }
         if !frame.title
             && let Some(native) = &mut self.native
@@ -8133,12 +8135,14 @@ impl Renderer {
                 .jitter_clip()
                 .filter(|_| self.world_post.pack_taa);
             native.frame.write(&self.queue, frame, size);
+            laps.lap("r_frame_write");
             native.frame.block_light.update(
                 &self.queue,
                 frame.camera,
                 &self.light_blocks,
                 self.light_revision,
             );
+            laps.lap("r_block_light");
             if let Some(t) = &mut native.timing {
                 t.begin(&self.device, &self.queue);
                 native_sky_pass =

@@ -14,6 +14,10 @@ use glam::DVec3;
 pub const RADIUS: f32 = 128.0;
 /// Sections' structures built per frame, nearest first.
 const BUILDS_PER_FRAME: usize = 64;
+/// The CPU time a frame spends creating sections' structures, nearest first: each is a call into
+/// the driver, and flying over new ground asked for dozens a frame (frames of 30 to 55 ms). What
+/// is left waits for the next frames; far sections are in the rays a few frames later.
+const BUILD_BUDGET: std::time::Duration = std::time::Duration::from_micros(2500);
 /// Top-level instances: two per section at most, and the entities.
 const MAX_INSTANCES: usize = 8192;
 /// Terrain vertices the shader can read (24 bytes each).
@@ -468,9 +472,13 @@ impl RayScene {
         }
         let mut new: Vec<New> = Vec::new();
         let flags = wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE;
+        let started = std::time::Instant::now();
         for (i, s) in sections.iter().enumerate() {
-            if self.built.contains_key(&s.key) || new.len() >= BUILDS_PER_FRAME * 2 {
+            if self.built.contains_key(&s.key) {
                 continue;
+            }
+            if new.len() >= BUILDS_PER_FRAME * 2 || (!new.is_empty() && started.elapsed() > BUILD_BUDGET) {
+                break;
             }
             let count = u64::from(s.solid + s.translucent) * 4;
             // Full: the farthest sections give way to a nearer one.
