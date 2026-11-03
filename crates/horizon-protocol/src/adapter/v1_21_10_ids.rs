@@ -249,32 +249,83 @@ pub const ENCHANTMENT_EFFECT_COMPONENT_TYPE_DOWN: &[(u16, u16, u16)] = &[
 pub const IDS: super::ids::Ids = super::ids::Ids {
     quirks: super::ids::Quirks::NONE,
     states: (OLD_STATES, PINNED_STATES),
-    block_state: super::ids::Remap::Runs { up: BLOCK_STATE_UP, down: BLOCK_STATE_DOWN },
-    item: super::ids::Remap::Runs { up: ITEM_UP, down: ITEM_DOWN },
-    entity_type: super::ids::Remap::Runs { up: ENTITY_TYPE_UP, down: ENTITY_TYPE_DOWN },
-    particle_type: super::ids::Remap::Runs { up: PARTICLE_TYPE_UP, down: PARTICLE_TYPE_DOWN },
-    sound_event: super::ids::Remap::Runs { up: SOUND_EVENT_UP, down: SOUND_EVENT_DOWN },
-    data_component_type: super::ids::Remap::Runs { up: DATA_COMPONENT_TYPE_UP, down: DATA_COMPONENT_TYPE_DOWN },
-    command_argument_type: super::ids::Remap::Runs { up: COMMAND_ARGUMENT_TYPE_UP, down: COMMAND_ARGUMENT_TYPE_DOWN },
-    custom_stat: super::ids::Remap::Runs { up: CUSTOM_STAT_UP, down: CUSTOM_STAT_DOWN },
-    map_decoration_type: super::ids::Remap::Runs { up: MAP_DECORATION_TYPE_UP, down: MAP_DECORATION_TYPE_DOWN },
-    block: super::ids::Remap::Runs { up: BLOCK_UP, down: BLOCK_DOWN },
-    block_entity_type: super::ids::Remap::Runs { up: BLOCK_ENTITY_TYPE_UP, down: BLOCK_ENTITY_TYPE_DOWN },
+    block_state: super::ids::Remap::Runs {
+        up: BLOCK_STATE_UP,
+        down: BLOCK_STATE_DOWN,
+    },
+    item: super::ids::Remap::Runs {
+        up: ITEM_UP,
+        down: ITEM_DOWN,
+    },
+    entity_type: super::ids::Remap::Runs {
+        up: ENTITY_TYPE_UP,
+        down: ENTITY_TYPE_DOWN,
+    },
+    particle_type: super::ids::Remap::Runs {
+        up: PARTICLE_TYPE_UP,
+        down: PARTICLE_TYPE_DOWN,
+    },
+    sound_event: super::ids::Remap::Runs {
+        up: SOUND_EVENT_UP,
+        down: SOUND_EVENT_DOWN,
+    },
+    data_component_type: super::ids::Remap::Runs {
+        up: DATA_COMPONENT_TYPE_UP,
+        down: DATA_COMPONENT_TYPE_DOWN,
+    },
+    command_argument_type: super::ids::Remap::Runs {
+        up: COMMAND_ARGUMENT_TYPE_UP,
+        down: COMMAND_ARGUMENT_TYPE_DOWN,
+    },
+    custom_stat: super::ids::Remap::Runs {
+        up: CUSTOM_STAT_UP,
+        down: CUSTOM_STAT_DOWN,
+    },
+    map_decoration_type: super::ids::Remap::Runs {
+        up: MAP_DECORATION_TYPE_UP,
+        down: MAP_DECORATION_TYPE_DOWN,
+    },
+    block: super::ids::Remap::Runs {
+        up: BLOCK_UP,
+        down: BLOCK_DOWN,
+    },
+    block_entity_type: super::ids::Remap::Runs {
+        up: BLOCK_ENTITY_TYPE_UP,
+        down: BLOCK_ENTITY_TYPE_DOWN,
+    },
     menu: super::ids::Remap::Same,
-    mob_effect: super::ids::Remap::Runs { up: MOB_EFFECT_UP, down: MOB_EFFECT_DOWN },
-    attribute: super::ids::Remap::Runs { up: ATTRIBUTE_UP, down: ATTRIBUTE_DOWN },
+    mob_effect: super::ids::Remap::Runs {
+        up: MOB_EFFECT_UP,
+        down: MOB_EFFECT_DOWN,
+    },
+    attribute: super::ids::Remap::Runs {
+        up: ATTRIBUTE_UP,
+        down: ATTRIBUTE_DOWN,
+    },
     stat_type: super::ids::Remap::Same,
     fluid: super::ids::Remap::Same,
-    game_event: super::ids::Remap::Runs { up: GAME_EVENT_UP, down: GAME_EVENT_DOWN },
-    recipe_serializer: super::ids::Remap::Runs { up: RECIPE_SERIALIZER_UP, down: RECIPE_SERIALIZER_DOWN },
-    slot_display: super::ids::Remap::Runs { up: SLOT_DISPLAY_UP, down: SLOT_DISPLAY_DOWN },
+    game_event: super::ids::Remap::Runs {
+        up: GAME_EVENT_UP,
+        down: GAME_EVENT_DOWN,
+    },
+    recipe_serializer: super::ids::Remap::Runs {
+        up: RECIPE_SERIALIZER_UP,
+        down: RECIPE_SERIALIZER_DOWN,
+    },
+    slot_display: super::ids::Remap::Runs {
+        up: SLOT_DISPLAY_UP,
+        down: SLOT_DISPLAY_DOWN,
+    },
     recipe_display: super::ids::Remap::Same,
     recipe_book_category: super::ids::Remap::Same,
     villager_type: super::ids::Remap::Same,
     villager_profession: super::ids::Remap::Same,
     position_source_type: super::ids::Remap::Same,
     consume_effect_type: super::ids::Remap::Same,
-    enchantment_effect_component_type: super::ids::Remap::Runs { up: ENCHANTMENT_EFFECT_COMPONENT_TYPE_UP, down: ENCHANTMENT_EFFECT_COMPONENT_TYPE_DOWN },
+    enchantment_effect_component_type: super::ids::Remap::Runs {
+        up: ENCHANTMENT_EFFECT_COMPONENT_TYPE_UP,
+        down: ENCHANTMENT_EFFECT_COMPONENT_TYPE_DOWN,
+    },
     // Not a registry: set by hand where a version numbers EntityDataSerializers differently.
     entity_data_serializer: super::ids::Remap::Same,
 };
