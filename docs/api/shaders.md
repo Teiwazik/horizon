@@ -139,6 +139,9 @@ stages.
 
 ## Changelog
 
+- 2026-11-03: merged with main: `MaterialInput.tags` (0 on this branch) and `colored_light`
+  (`[[particle_lights]]`, and held or dropped items in their `[[lights]]` colour) join the
+  material stage's input, in main's order, `displaced` last.
 - 2026-10-30: API 0.5 (additions): the water mirror the material stage reads as `reflection`
   is drawn only for a stage that reads it, and with `[reflection] option` only while that
   option is not 0 (`has_reflection` is 0 otherwise): a world drawn again saved when unused.

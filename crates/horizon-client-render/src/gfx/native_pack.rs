@@ -17,6 +17,10 @@ pub struct NativePack {
     pub post: Option<NativePost>,
     /// The shadow map's pass, when the pack asks for one (`[shadow]`).
     pub shadow: Option<NativeShadow>,
+    /// `[[particle_lights]]`.
+    pub particle_lights: Vec<horizon_shader_api::manifest::ParticleLight>,
+    /// `[[lights]]`, for the colour of held and dropped items' light.
+    pub light_colors: Vec<horizon_shader_api::manifest::LightColor>,
     /// GPU time of each pass, while the renderer asks for it (`pack_timing.rs`).
     pub timing: Option<PassTiming>,
     /// Whether Minecraft's clouds draw beside the pack's sky (`[sky] clouds`).
@@ -27,8 +31,6 @@ pub struct NativePack {
     pub vanilla_stars: bool,
     /// The pack's material stage fogs terrain itself (`[material] fog = false`).
     pub own_fog: bool,
-    /// `[[particle_lights]]`.
-    pub particle_lights: Vec<horizon_shader_api::manifest::ParticleLight>,
     /// The weather stage's pipeline (`[weather]`), drawing rain and snow in vanilla's place.
     pub weather: Option<wgpu::RenderPipeline>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
@@ -238,6 +240,8 @@ impl NativePack {
         let own_fog = material.is_some() && !fog;
         frame.reflects = reflection;
         let pack = Self {
+            particle_lights: report.manifest.particle_lights.clone(),
+            light_colors: report.manifest.lights.clone(),
             frame,
             sky,
             material,
@@ -248,7 +252,6 @@ impl NativePack {
             vanilla_sun,
             vanilla_stars,
             own_fog,
-            particle_lights: report.manifest.particle_lights.clone(),
             weather,
             displacement,
             reflection,

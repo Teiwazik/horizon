@@ -388,14 +388,18 @@ fn cast_fangs(m: &mut Mob, cx: &mut Cx) {
         }
     }
 }
-/// `createSpellEntity`: the first sturdy floor going down from `max_y`,
-/// standing on the top of any block in the way.
+/// `createSpellEntity`: the first block below `max_y` whose up face is
+/// sturdy, standing on the top of whatever collision shape is in the way.
+///
+/// The floor test is `BlockState.isFaceSturdy(.., UP)`, not a full cube: a
+/// soul sand or mud block is 14/16 high and still supports a fang, where
+/// requiring a full collision shape drops the fang into the block.
 fn fang_floor(w: &super::MobWorld, x: f64, z: f64, min_y: f64, max_y: f64) -> Option<f64> {
     let (bx, bz) = (x.floor() as i32, z.floor() as i32);
     let mut y = max_y.floor() as i32;
     while y >= min_y.floor() as i32 - 1 {
-        let below = w.facts.get(w.world.block(bx, y - 1, bz));
-        if below.full_collision {
+        let below = w.world.block(bx, y - 1, bz);
+        if w.data.state(below).flags & super::data::STURDY_TOP != 0 {
             let here = w.world.block(bx, y, bz);
             let top = if w.facts.is_air(here) {
                 0.0
@@ -560,14 +564,21 @@ impl Goal for CrossbowAttack {
                     m.extra.using_item = 0;
                     m.extra.flag = false;
                     self.state = Crossbow::Charged;
+                    let weapon = m
+                        .extra
+                        .main_hand_stack()
+                        .cloned()
+                        .unwrap_or_else(|| ItemStack::new("minecraft:crossbow", 1));
                     set_crossbow_charged(m, true);
+                    // The attack delay is drawn before the sound's pitch, as before.
                     self.attack_delay = 20 + m.random.next_int_bound(20).unwrap_or(0);
-                    cx.events.push(MobEvent::Sound(
-                        "item.crossbow.loading_end",
-                        m.center(),
-                        1.0,
-                        1.0 / (m.random.next_float() * 0.5 + 1.0) + 0.2,
-                    ));
+                    let pitch = 1.0 / (m.random.next_float() * 0.5 + 1.0) + 0.2;
+                    cx.events.push(MobEvent::CrossbowLoad {
+                        mob: m.id,
+                        at: m.center(),
+                        pitch,
+                        weapon,
+                    });
                 }
             }
             Crossbow::Charged => {
@@ -590,6 +601,15 @@ impl Goal for CrossbowAttack {
 /// third of the way up the target, lifted by a fifth of the distance.
 fn shoot_crossbow(m: &mut Mob, who: Who, cx: &mut Cx) {
     let Some(t) = cx.w.target_info(who) else {
+        return;
+    };
+    // CrossbowItem.shootAll: only the charged projectile flies.
+    let Some(ammo) = m
+        .extra
+        .main_hand_stack()
+        .and_then(|s| s.data())
+        .and_then(|d| d.charged.first().cloned())
+    else {
         return;
     };
     let start = Vec3::new(m.position.x, m.eye_y() - 0.1, m.position.z);
@@ -616,7 +636,7 @@ fn shoot_crossbow(m: &mut Mob, who: Who, cx: &mut Cx) {
         1.6,
         (14 - i32::from(cx.w.difficulty.id) * 4) as f32,
     );
-    cx.events.push(MobEvent::Projectile(p));
+    cx.events.push(MobEvent::CrossbowShot { ammo, arrow: p });
     let pitch = 1.0 / (m.random.next_float() * 0.5 + 1.8) + 0.53;
     cx.events.push(MobEvent::Sound(
         "item.crossbow.shoot",
@@ -931,5 +951,36 @@ mod tests {
                 .data()
                 .is_none_or(|d| d.charged.is_empty())
         );
+    }
+    /// `EvokerAttackSpellGoal.createSpellEntity` asks the block below for a
+    /// sturdy up face, not for a full cube. Soul sand is 14/16 high and still
+    /// supports a fang, which a full-collision test drops into the block.
+    #[test]
+    fn a_fang_stands_on_a_soul_sand_floor() {
+        let build = |world: &mut crate::world::World,
+                     registry: &horizon_world::registry::BlockRegistry| {
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let soul_sand = registry.default_state("minecraft:soul_sand").unwrap();
+            for cx in -1..1 {
+                for cz in -1..1 {
+                    world
+                        .chunks
+                        .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
+                }
+            }
+            for x in -4..4 {
+                for z in -4..4 {
+                    world.set(x, 63, z, stone).unwrap();
+                }
+            }
+            world.set(0, 64, 0, soul_sand).unwrap();
+        };
+        let ran = crate::mobs::world::with_built_test_world(&[], build, |w, _| {
+            // An evoker standing on the soul sand has its feet at 64.875, so
+            // the cast asks for a floor from 65 down: the soul sand at 64 is
+            // the first sturdy block and the fang sits at 65.
+            assert_eq!(fang_floor(w, 0.5, 0.5, 64.0, 65.875), Some(65.0));
+        });
+        let _ = ran;
     }
 }

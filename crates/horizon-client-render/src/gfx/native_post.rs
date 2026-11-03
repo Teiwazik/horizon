@@ -1851,7 +1851,7 @@ mod tests {
     use horizon_shader_api::{MANIFEST, Pack, check};
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = crate::gfx::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         pollster::block_on(adapter.request_device(&Default::default())).ok()
     }

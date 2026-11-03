@@ -186,8 +186,8 @@ fn refuses_what_this_build_does_not_read() {
     }
     let no_stage = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.5\"\n";
     assert!(refused(no_stage).contains("no stage"));
-    let many = (0..29).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
-    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("29 post passes"));
+    let many = (0..41).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
+    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("41 post passes"));
 }
 
 #[test]
@@ -497,3 +497,4 @@ fn reads_particle_lights_and_refuses_bad_ones() {
     );
     assert!(refused(&entry("color = [1.0, 1.0, 1.0]\nreach = 4.0\nsize = 2.0")).contains("size"));
 }
+

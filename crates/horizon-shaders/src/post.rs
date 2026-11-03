@@ -23,6 +23,10 @@ use crate::{GbuffersInputs, Macros, Pack, Preprocessed, Program, Properties, Tar
 /// Which group of 2.1 a program belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// Compute initialization at load and after target resize.
+    Setup,
+    /// Composite-style work before shadow rendering.
+    Begin,
     Prepare,
     Deferred,
     Composite,
@@ -191,7 +195,9 @@ pub const CELESTIAL_BLEND: Blend = [
     Factor::OneMinusSrcAlpha,
 ];
 
-const GROUPS: [(Group, &str); 4] = [
+const GROUPS: [(Group, &str); 6] = [
+    (Group::Setup, "setup"),
+    (Group::Begin, "begin"),
     (Group::Prepare, "prepare"),
     (Group::Deferred, "deferred"),
     (Group::Composite, "composite"),
@@ -210,6 +216,8 @@ pub struct PostProgram {
     pub flips: Vec<(u32, bool)>,
     /// How a gbuffers program's output blends into its buffers; `None` writes them.
     pub blend: Option<Blend>,
+    /// Per-buffer blend overrides, keyed by colortex index (not output location).
+    pub buffer_blends: Vec<(u32, Option<Blend>)>,
     /// Bit n: `colortex<n>MipmapEnabled` in its fragment stage, so buffer n's mip chain is
     /// regenerated right before it (6.1.7; not for gbuffers programs).
     pub mipmaps: u16,
@@ -218,6 +226,9 @@ pub struct PostProgram {
     /// A geometry stage folded into the vertex stage (`translate_geometry`): drawn non-indexed,
     /// six vertices per quad, with this many instances. 0 without one.
     pub geometry_triangles: u32,
+    /// `scale.<name>`: (scale, offset x, offset y), the part of its buffers a program draws, as
+    /// fractions of their size from GL's bottom-left corner; [1, 0, 0] (all of them) without.
+    pub scale: [f32; 3],
 }
 
 /// `size.buffer.<buffer>`: a size of its own, relative to the render size (floats) or in
@@ -385,6 +396,7 @@ pub struct Post {
     pub entities_translucent: Option<PostProgram>,
     /// What draws particles.
     pub particles: Option<PostProgram>,
+    pub damaged_block: Option<PostProgram>,
     /// What draws the game's clouds.
     pub clouds: Option<PostProgram>,
     /// What draws rain and snow, after deferred.
@@ -428,6 +440,57 @@ pub struct Post {
     pub config: Config,
     /// Programs skipped and why, as `program: message` or `file:line: message`.
     pub notes: Vec<String>,
+}
+
+impl Post {
+    /// Every program that loaded: the passes', what draws the game's geometry, the shadow
+    /// pass's and its composites.
+    fn every_program(&self) -> impl Iterator<Item = &PostProgram> {
+        let draws = [
+            &self.terrain,
+            &self.water,
+            &self.sky,
+            &self.sky_textured,
+            &self.entities,
+            &self.block,
+            &self.entities_translucent,
+            &self.particles,
+            &self.damaged_block,
+            &self.clouds,
+            &self.weather,
+            &self.hand,
+            &self.shadow,
+            &self.shadow_water,
+            &self.shadow_entities,
+            &self.shadow_block,
+        ];
+        self.programs
+            .iter()
+            .chain(draws.into_iter().flatten())
+            .chain(&self.shadow_comp)
+    }
+
+    /// The fewest bytes each storage buffer (`bufferObject.<n>`, set 4) needs for every stage
+    /// that binds it: its block's size as the stage lays it out (std430). OpenGL binds a smaller buffer and leaves what lies
+    /// past its end undefined; wgpu refuses to draw or dispatch with one.
+    pub fn buffer_minimums(&self) -> std::collections::BTreeMap<u32, u64> {
+        let mut sizes = std::collections::BTreeMap::new();
+        for p in self.every_program() {
+            let stages = p.program.iter().flat_map(|s| [&s.vertex, &s.fragment]);
+            for module in stages.chain(p.compute.iter().map(|(_, c)| &c.module)) {
+                for (_, var) in module.global_variables.iter() {
+                    if let (naga::AddressSpace::Storage { .. }, Some(b)) = (var.space, &var.binding)
+                        && b.group == 4
+                    {
+                        let size = u64::from(module.types[var.ty].inner.size(module.to_ctx()));
+                        let least = sizes.entry(b.binding).or_insert(0);
+                        *least = size.max(*least);
+                    }
+                }
+            }
+        }
+        sizes
+    }
 }
 
 /// The folder a dimension reads its programs from: `world<id>` when the pack has it, else the
@@ -482,6 +545,7 @@ pub fn load_post(
         block: None,
         entities_translucent: None,
         particles: None,
+        damaged_block: None,
         clouds: None,
         weather: None,
         hand: None,
@@ -609,6 +673,19 @@ pub fn load_post(
         ),
         None => (None, None),
     };
+    let damaged_block = inputs
+        .entities
+        .as_ref()
+        .and_then(|i| gbuffers(&["gbuffers_damagedblock"], Group::Gbuffers, i))
+        .map(|mut p| {
+            p.blend = blend(properties, &p.name).unwrap_or(Some([
+                Factor::DstColor,
+                Factor::SrcColor,
+                Factor::One,
+                Factor::Zero,
+            ]));
+            p
+        });
     // Translucent entities and particles blend (OQ-23). Particles keep vanilla's alpha cut at
     // 0.1; translucent entities lose only fully transparent texels (a shadow fades out).
     let translucent =
@@ -682,6 +759,7 @@ pub fn load_post(
     loader.post.block = block;
     loader.post.entities_translucent = entities_translucent;
     loader.post.particles = particles;
+    loader.post.damaged_block = damaged_block;
     loader.post.clouds = clouds;
     loader.post.weather = weather;
     loader.post.hand = hand;
@@ -723,6 +801,7 @@ fn load_shadow(
         &post.block,
         &post.entities_translucent,
         &post.particles,
+        &post.damaged_block,
         &post.clouds,
         &post.weather,
         &post.hand,
@@ -842,7 +921,7 @@ impl Loader<'_> {
             f => format!("{f}/{name}.{ext}"),
         };
         let (vsh, fsh) = (path("vsh"), path("fsh"));
-        if !self.pack.exists(&fsh) || !self.pack.exists(&vsh) {
+        if group == Group::Setup || !self.pack.exists(&fsh) || !self.pack.exists(&vsh) {
             let on = enabled(
                 self.properties,
                 self.folder,
@@ -853,13 +932,19 @@ impl Loader<'_> {
             // A program of compute stages only (`.csh` without `.vsh` and `.fsh`).
             let composite = matches!(
                 group,
-                Group::Prepare | Group::Deferred | Group::Composite | Group::ShadowComp
+                Group::Setup
+                    | Group::Begin
+                    | Group::Prepare
+                    | Group::Deferred
+                    | Group::Composite
+                    | Group::ShadowComp
             );
-            if !on || !composite || !self.pack.exists(&path("csh")) {
+            if !on || !composite {
                 return None;
             }
             let compute = self.compute(&name);
             return (!compute.is_empty()).then(|| PostProgram {
+                buffer_blends: buffer_blends(self.properties, &name),
                 flips: flips(self.properties, &name),
                 name,
                 group,
@@ -869,6 +954,7 @@ impl Loader<'_> {
                 mipmaps: 0,
                 compute,
                 geometry_triangles: 0,
+                scale: FULL,
             });
         }
         if !enabled(
@@ -937,7 +1023,9 @@ impl Loader<'_> {
             }
         };
         let compute = match group {
-            Group::Prepare
+            Group::Setup
+            | Group::Begin
+            | Group::Prepare
             | Group::Deferred
             | Group::Composite
             | Group::Final
@@ -945,7 +1033,9 @@ impl Loader<'_> {
             _ => Vec::new(),
         };
         Some(PostProgram {
+            buffer_blends: buffer_blends(self.properties, &name),
             flips: flips(self.properties, &name),
+            scale: scale(self.properties, &name, group),
             name,
             group,
             program: Some(program),
@@ -1043,7 +1133,9 @@ impl Loader<'_> {
             .unwrap_or(buffers.len());
         buffers.truncate(kept);
         Some(PostProgram {
+            buffer_blends: buffer_blends(self.properties, &name),
             flips: flips(self.properties, &name),
+            scale: scale(self.properties, &name, group),
             name,
             group,
             program: Some(program),
@@ -1104,7 +1196,7 @@ fn diagnostics(pp: &Preprocessed) -> Vec<String> {
     located(pp, &pp.diagnostics)
 }
 
-/// `pp`'s warnings (conditions read as false), located.
+/// `pp`'s warnings (conditions read as false, unbalanced conditionals), located.
 fn warnings(pp: &Preprocessed) -> Vec<String> {
     located(pp, &pp.warnings)
 }
@@ -1165,6 +1257,46 @@ fn blend(properties: &Properties, program: &str) -> Option<Option<Blend>> {
         .map(Factor::parse)
         .collect::<Option<_>>()?;
     Some(Some(factors.try_into().ok()?))
+}
+
+/// Blend overrides apply to buffer names even when DRAWBUFFERS remaps locations.
+fn buffer_blends(properties: &Properties, program: &str) -> Vec<(u32, Option<Blend>)> {
+    let prefix = format!("blend.{program}.");
+    properties
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let buffer = config::buffer_index(e.key.strip_prefix(&prefix)?)?;
+            let value = blend(
+                properties,
+                &format!("{program}.{}", e.key.strip_prefix(&prefix)?),
+            )?;
+            Some((buffer as u32, value))
+        })
+        .collect()
+}
+
+/// A program drawing all of its buffers.
+const FULL: [f32; 3] = [1.0, 0.0, 0.0];
+
+/// `scale.<program>=<scale> [<offsetX> <offsetY>]` of a deferred or composite program (OptiFine's
+/// "Composite render scale"); prepare programs are treated the same, unverified. Iris 1.11.7
+/// applies the offsets too (a probe pack of our own, composite). A value that is not a scale in (0, 1] with offsets in [0, 1) draws all of them.
+fn scale(properties: &Properties, program: &str, group: Group) -> [f32; 3] {
+    if !matches!(group, Group::Prepare | Group::Deferred | Group::Composite) {
+        return FULL;
+    }
+    let Some(value) = properties.get(&format!("scale.{program}")) else {
+        return FULL;
+    };
+    let numbers: Option<Vec<f32>> = value.split_whitespace().map(|n| n.parse().ok()).collect();
+    let fraction = |s: f32| s > 0.0 && s <= 1.0;
+    let offset = |o: f32| (0.0..1.0).contains(&o);
+    match numbers.as_deref() {
+        Some(&[s]) if fraction(s) => [s, 0.0, 0.0],
+        Some(&[s, x, y]) if fraction(s) && offset(x) && offset(y) => [s, x, y],
+        _ => FULL,
+    }
 }
 
 /// `flip.<program>.<buffer>=<bool>` keys of one program.
@@ -1289,6 +1421,41 @@ mod tests {
         );
     }
 
+    /// A storage buffer declared smaller than the block a stage binds it as: the block's size
+    /// as the stage lays it out is what the buffer needs (std430 rounds a block to its
+    /// largest member's alignment), the most of every stage and program that binds it.
+    #[test]
+    fn storage_buffers_need_their_blocks_size() {
+        let compute = "#version 430\nlayout(local_size_x = 1) in;\n\
+                       layout(std430, binding = 0) buffer Sums { vec4 a; vec4 b; float c; } sums;\n\
+                       layout(std430, binding = 1) buffer Cells { uint count; uvec4 cells[3]; } grid;\n\
+                       void main() {\n    sums.c = sums.a.x + float(grid.count + grid.cells[0].x);\n}\n";
+        let fsh = "#version 430\nlayout(std430, binding = 0) buffer Sums { vec4 a; } sums;\n\
+                   uniform sampler2D colortex0;\nvarying vec2 uv;\n\
+                   void main() {\n/* DRAWBUFFERS:3 */\n\
+                   gl_FragData[0] = texture2D(colortex0, uv) + sums.a;\n}\n";
+        let pack = Pack::from_zip_bytes(
+            "t",
+            zip(&[
+                ("shaders/composite.vsh", VSH),
+                ("shaders/composite.fsh", fsh),
+                ("shaders/composite.csh", compute),
+            ]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse("bufferObject.0 = 40\nbufferObject.1 = 4\n", &macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(post.programs[0].compute.len(), 1);
+        // `Sums`: 36 bytes rounded to vec4's 16; `Cells`: a uint padded to the array's 16,
+        // then three elements.
+        assert_eq!(
+            post.buffer_minimums(),
+            std::collections::BTreeMap::from([(0, 48), (1, 64)])
+        );
+    }
+
     #[test]
     fn buffer_sizes_are_bounded() {
         let relative = BufferSize::parse("0.5 0.25").unwrap();
@@ -1385,6 +1552,58 @@ mod tests {
         assert_eq!(names, ["final"]);
         let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
         assert!(post.programs.iter().any(|p| p.name == "composite3"));
+    }
+
+    #[test]
+    fn scale_keys_give_composite_style_programs_a_viewport() {
+        let names = [
+            "deferred",
+            "composite",
+            "composite1",
+            "composite2",
+            "composite3",
+            "final",
+        ];
+        let files: Vec<(String, &str)> = names
+            .iter()
+            .flat_map(|n| {
+                [
+                    (format!("shaders/{n}.vsh"), VSH),
+                    (format!("shaders/{n}.fsh"), FSH),
+                ]
+            })
+            .collect();
+        let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+        let pack = Pack::from_zip_bytes("t", zip(&files)).unwrap();
+        let properties = Properties::parse(
+            "scale.deferred = 0.5\nscale.composite = 0.25 0.5 0.25\nscale.composite1 = 2\n\
+             scale.composite2 = 0.5 0.5\nscale.final = 0.5\n",
+            &Macros::default(),
+        );
+        let post = load_post(
+            &pack,
+            "",
+            &properties,
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+        let scales: Vec<(&str, [f32; 3])> = post
+            .programs
+            .iter()
+            .map(|p| (p.name.as_str(), p.scale))
+            .collect();
+        assert_eq!(
+            scales,
+            [
+                ("deferred", [0.5, 0.0, 0.0]),
+                ("composite", [0.25, 0.5, 0.25]),
+                // Not a scale, an offset missing, a program that draws the screen: all of it.
+                ("composite1", FULL),
+                ("composite2", FULL),
+                ("composite3", FULL),
+                ("final", FULL),
+            ]
+        );
     }
 
     #[test]
@@ -1638,6 +1857,65 @@ mod tests {
         assert_eq!(
             post.config.buffers[2].format,
             crate::Format::parse("RGBA16F").unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn setup_and_begin_compute_load_before_prepare_even_with_only_a_suffix() {
+        let compute = "#version 430\nlayout(local_size_x=1) in; void main(){}";
+        let zip = crate::pack::tests::zip(&[
+            ("shaders/setup.csh", compute),
+            ("shaders/begin_a.csh", compute),
+            ("shaders/prepare.csh", compute),
+        ]);
+        let pack = Pack::from_zip_bytes("lifecycle.zip", zip).unwrap();
+        let post = load_post(
+            &pack,
+            "",
+            &Properties::default(),
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(
+            post.programs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["setup", "begin", "prepare"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod buffer_blend_tests {
+    use super::*;
+    #[test]
+    fn buffer_blends_use_colortex_numbers_and_preserve_explicit_off() {
+        let props = Properties::parse(
+            "blend.gbuffers_water=off\nblend.gbuffers_water.colortex13=ONE ONE_MINUS_SRC_ALPHA ONE ONE_MINUS_SRC_ALPHA\nblend.gbuffers_water.colortex2=off\n",
+            &Macros::standard(),
+        );
+        let overrides = buffer_blends(&props, "gbuffers_water");
+        assert_eq!(blend(&props, "gbuffers_water"), Some(None));
+        assert_eq!(
+            overrides,
+            vec![
+                (
+                    13,
+                    Some([
+                        Factor::One,
+                        Factor::OneMinusSrcAlpha,
+                        Factor::One,
+                        Factor::OneMinusSrcAlpha
+                    ])
+                ),
+                (2, None)
+            ]
         );
     }
 }

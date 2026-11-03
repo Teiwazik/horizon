@@ -158,13 +158,21 @@ impl Manifest {
     /// The `[[lights]]` colour of the block `name` (`namespace:path`, or a path in
     /// `minecraft`): the first entry with a matching pattern.
     pub fn light_of(&self, name: &str) -> Option<[f32; 3]> {
+        light_color(&self.lights, name)
+    }
+}
+
+/// The colour of the first of `lights` whose patterns match the block `name` (`namespace:path`,
+/// or a path in `minecraft`): `Manifest::light_of`, for a copy of the entries.
+pub fn light_color(lights: &[LightColor], name: &str) -> Option<[f32; 3]> {
+    {
         let full = if name.contains(':') {
             name.to_owned()
         } else {
             format!("minecraft:{name}")
         };
         let path = full.split_once(':').map_or(full.as_str(), |(_, p)| p);
-        self.lights
+        lights
             .iter()
             .find(|l| {
                 l.blocks.iter().any(|pattern| {
@@ -410,7 +418,13 @@ struct RawParticleLight {
     particles: Vec<String>,
     color: [f32; 3],
     reach: f32,
+    /// Optional: main's packs name only the colour and reach.
+    #[serde(default = "default_particle_size")]
     size: f32,
+}
+
+fn default_particle_size() -> f32 {
+    0.1
 }
 
 #[derive(Deserialize)]

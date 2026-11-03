@@ -654,7 +654,8 @@ struct HorizonMaterialIn {
     let normal = select(flat_n, -flat_n, dot(flat_n, in.world) > 0.0);
     let material_id = material_ids[min(in.layer & 0x7fffu, arrayLength(&material_ids) - 1u)];
     let tangent = horizon_material_tangent(in.world, in.uv, normal);
-    let input = MaterialInput(in.albedo, in.tint, in.light, in.lightmap, in.world, in.uv, in.translucent != 0u, in.face, fluid, screen, material_id, 0.0, normal, tangent, 0.0);
+    let input = MaterialInput(in.albedo, in.tint, in.light, in.lightmap, in.world, in.uv, in.translucent != 0u, 0u, material_id,
+        screen, in.face, fluid, 0.0, normal, tangent, vec3<f32>(0.0), 0.0);
     return material(input).color;
 }
 "

@@ -126,7 +126,6 @@ impl Opt {
                 | Opt::HideMatchedNames
                 | Opt::OnlySecureChat
                 | Opt::SaveChatDrafts
-                | Opt::RotateWithMinecarts
                 // Saved, but no Horizon system reads them yet: no Realms, no
                 // friends list, no directional audio, no now-playing toast.
                 | Opt::RealmsNotifications
@@ -937,6 +936,7 @@ impl Opt {
             | Opt::RealmsNotifications
             | Opt::InGameNotification
             | Opt::DirectionalAudio
+            | Opt::RotateWithMinecarts
             | Opt::NarratorHotkey => {
                 let key = self.file_key().unwrap();
                 s.file
@@ -1264,7 +1264,7 @@ pub enum Page {
     Online,
     /// Splitscreen: the profile another player joins as (`split_profiles`).
     SplitProfiles,
-    /// Splitscreen: enable joining on this computer.
+    /// Splitscreen: the monitor map and draft window arrangement.
     SplitSetup,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -1310,6 +1310,10 @@ enum Act {
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
+    /// AI Agent: start or stop the repro recording.
+    ToggleRecording,
+    /// AI Agent: write the repro bundle now.
+    ExportRepro,
 }
 enum WKind {
     Button {
@@ -1437,6 +1441,10 @@ pub enum Event {
     Credits,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
+    /// The AI Agent page's recording button: start or stop.
+    ToggleRecording,
+    /// The AI Agent page's export button.
+    ExportRepro,
     /// The narrator option changed (after its `Changed`): the option's
     /// `onValueUpdate`, `GameNarrator.updateNarratorStatus`.
     Narrator,
@@ -1509,6 +1517,8 @@ pub struct OptionsUi {
     /// (`update_pack_infos`) differs from the settings'.
     pack_reselected: bool,
     pub in_world: bool,
+    /// AccessibilityOptionsScreen: the loaded world's experimental feature.
+    pub minecart_improvements: bool,
     /// Scroll the selected language into the middle on the next layout.
     center_language: bool,
     pub graphics: crate::graphics_ui::GraphicsUi,
@@ -1517,10 +1527,17 @@ pub struct OptionsUi {
     pub calibration: Option<crate::hdr_calibration::Calibration>,
     /// Whether the window was fullscreen before calibration made it so (the game keeps it).
     pub calibration_fullscreen: Option<bool>,
+    pub split_setup: crate::split_ui::SplitUi,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
+    /// A repro recording is running: the AI Agent page's button says stop.
+    pub agent_recording: bool,
     /// Keyboard focus: the interactive target currently focused.
     focus: Option<FocusId>,
+    /// The focus came from keyboard or pad navigation, so the mouse wheel steps it
+    /// from anywhere (`wheel`). A click focuses its widget too, for the highlight,
+    /// but vanilla's wheel ignores that: only the hovered widget then reacts.
+    focus_from_keyboard: bool,
     /// Whether a focused slider is in value-editing mode (`AbstractSliderButton.canChangeValue`).
     pub(crate) can_change_value: bool,
     /// The current GUI size (w, h).
@@ -1533,8 +1550,6 @@ pub struct OptionsUi {
     /// The list's rows as last laid out: each row's top and bottom (GUI
     /// pixels), for the narration's row under the mouse.
     row_bands: Vec<[f32; 2]>,
-    /// Other local players are joined: leave before turning splitscreen off.
-    pub split_joined: bool,
 }
 impl Default for OptionsUi {
     fn default() -> Self {
@@ -1569,19 +1584,22 @@ impl Default for OptionsUi {
             pack_focus: Instant::now(),
             pack_reselected: false,
             in_world: false,
+            minecart_improvements: false,
             center_language: false,
             graphics: Default::default(),
             split_profiles: Default::default(),
             calibration: None,
             calibration_fullscreen: None,
+            split_setup: Default::default(),
             agent_status: Vec::new(),
+            agent_recording: false,
             focus: None,
+            focus_from_keyboard: false,
             can_change_value: false,
             size: (427.0, 240.0),
             framebuffer: [1280, 720],
             split_guest: false,
             row_bands: Vec::new(),
-            split_joined: false,
         }
     }
 }
@@ -1807,7 +1825,7 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
     };
     let mut tip = None;
     if let Act::Extra(item) = act {
-        tip = Some(Text::literal(item.description()));
+        tip = Some(Text::literal(item.description_text()));
     }
     if let Act::Push(page) = act
         && let Some(text) = horizon_page_tooltip(*page)
@@ -1982,7 +2000,7 @@ fn pairs(opts: &[Opt]) -> Vec<Row> {
 impl OptionsUi {
     /// A switch of `horizon-extras.txt` as the Extras page draws it: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
-        let label = format!("{}: {}", item.caption(), item.value(&s.extras));
+        let label = format!("{}: {}", item.caption_text(), item.value(&s.extras));
         button(0.0, 0.0, 150.0, Text::literal(label), Act::Extra(item))
     }
     fn settings_search_active(&self) -> bool {
@@ -2020,6 +2038,9 @@ impl OptionsUi {
                     .pack_screen
                     .as_ref()
                     .is_some_and(|p| p.search_focused()),
+                Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr => {
+                    self.graphics.typing()
+                }
                 _ => self.settings_search_active(),
             }
     }
@@ -2099,6 +2120,7 @@ impl OptionsUi {
         self.stack.clear();
         self.data_pack_dir = None;
         self.focus = None;
+        self.focus_from_keyboard = false;
         self.can_change_value = false;
         self.push(page);
         self.in_world = in_world;
@@ -2109,6 +2131,7 @@ impl OptionsUi {
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.focus = None;
+        self.focus_from_keyboard = false;
         self.can_change_value = false;
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.set_value("");
@@ -2122,22 +2145,45 @@ impl OptionsUi {
         if page == Page::Packs {
             self.pack_screen = None;
         }
-        if matches!(
-            page,
-            Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr
-        ) {
-            self.graphics.reset();
+        if let Some(at) = Self::graphics_page(page) {
+            self.graphics.open(at);
+        }
+        if page == Page::SplitSetup {
+            self.split_setup.reset();
         }
         if page == Page::SplitProfiles {
             self.split_profiles.reset();
         }
     }
-    /// The graphics screen level of `page`, if it is one.
-    fn graphics_level(page: Page) -> Option<crate::graphics_ui::Level> {
+    /// What the graphics screen's actions do to these options.
+    fn graphics_events(
+        &mut self,
+        s: &mut Settings,
+        actions: Vec<crate::graphics_ui::Action>,
+    ) -> Vec<Event> {
+        use crate::graphics_ui::Action;
+        let mut events = Vec::new();
+        for action in actions {
+            match action {
+                Action::ButtonClick => events.push(Event::ButtonClick),
+                Action::Changed => events.push(Event::Changed),
+                Action::SliderDrag => events.push(Event::SliderDrag),
+                Action::BindKey(name) => self.selected_key = Some(name),
+                Action::Calibrate => {
+                    self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
+                    self.push(Page::HdrCalibration);
+                }
+                Action::Done => events.extend(self.back(s)),
+            }
+        }
+        events
+    }
+    /// Where the graphics screen opens for `page`, if it is one of its pages.
+    fn graphics_page(page: Page) -> Option<crate::graphics_ui::Page> {
         match page {
-            Page::Graphics => Some(crate::graphics_ui::Level::Simple),
-            Page::GraphicsAdvanced => Some(crate::graphics_ui::Level::Advanced),
-            Page::GraphicsHdr => Some(crate::graphics_ui::Level::Hdr),
+            Page::Graphics => Some(crate::graphics_ui::Page::General),
+            Page::GraphicsAdvanced => Some(crate::graphics_ui::Page::Advanced),
+            Page::GraphicsHdr => Some(crate::graphics_ui::Page::Hdr),
             _ => None,
         }
     }
@@ -2268,19 +2314,12 @@ impl OptionsUi {
 
     fn list_rows(&self, s: &Settings) -> Vec<Row> {
         match self.page() {
-            Page::SplitSetup => vec![Row::Buttons(
-                if self.split_guest || self.split_joined {
-                    inactive(self.extra_button(s, crate::extras::Item::Splitscreen))
-                } else {
-                    self.extra_button(s, crate::extras::Item::Splitscreen)
-                },
-                None,
-            )],
+            Page::SplitSetup => Vec::new(),
             Page::Extras => {
                 // Each section's switches two to a row, as vanilla's
                 // OptionsList.addSmall lays out an options screen.
                 let extra = |item: crate::extras::Item| {
-                    let value = format!("{}: {}", item.caption(), item.value(&s.extras));
+                    let value = format!("{}: {}", item.caption_text(), item.value(&s.extras));
                     let label = if item.key_name().is_some() && self.selected_key == item.key_name()
                     {
                         Text::literal(format!("> {value} <")).with_color(text::YELLOW)
@@ -2323,7 +2362,7 @@ impl OptionsUi {
             }
             Page::Horizon => {
                 // Two to a row, as vanilla's OptionsList.addSmall lays out
-                // buttons; each opens a page built from vanilla's widgets.
+                // buttons; each opens one of Horizon's settings pages.
                 let open =
                     |key: &str, page: Page| button(0.0, 0.0, 150.0, tr(key), Act::Push(page));
                 vec![
@@ -2382,11 +2421,35 @@ impl OptionsUi {
                         Act::CopyAgentDetails,
                     )),
                 )];
+                rows.push(Row::Buttons(
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        tr(if self.agent_recording {
+                            "horizon.agent.record_stop"
+                        } else {
+                            "horizon.agent.record_session"
+                        }),
+                        Act::ToggleRecording,
+                    ),
+                    Some(button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        tr("horizon.agent.export_repro"),
+                        Act::ExportRepro,
+                    )),
+                ));
+                rows.push(Row::Buttons(
+                    self.extra_button(s, crate::extras::Item::ReproKeys),
+                    None,
+                ));
                 rows.extend(self.agent_status.iter().cloned().map(Row::Note));
                 rows
             }
             Page::Video => {
-                // Horizon's graphics screens, Simple and Advanced.
+                // Horizon's graphics settings screen, at General and at Advanced.
                 let mut rows = vec![Row::Buttons(
                     button(
                         0.0,
@@ -3217,6 +3280,14 @@ impl OptionsUi {
             if widget.list {
                 widget.y += previous_scroll - self.scroll;
             }
+            if let WKind::Button {
+                act: Act::Cycle(Opt::RotateWithMinecarts),
+                active,
+                ..
+            } = &mut widget.kind
+            {
+                *active = self.in_world && self.minecart_improvements;
+            }
         }
         self.row_bands = rows
             .bands
@@ -3370,10 +3441,16 @@ impl OptionsUi {
             c.draw(batch, atlas, cursor);
             return;
         }
-        if let Some(level) = Self::graphics_level(self.page()) {
+        if Self::graphics_page(self.page()).is_some() {
             self.graphics.binding = self.selected_key;
-            self.graphics
-                .draw(level, s, batch, atlas, cursor, self.in_world);
+            self.graphics.draw(s, batch, atlas, cursor, self.in_world);
+            return;
+        }
+        if self.page() == Page::SplitSetup {
+            self.split_setup.on = s.extras.splitscreen;
+            // The controller picks a tile up between presses: the screen's size from the draw.
+            self.split_setup.size = (batch.width, batch.height);
+            self.split_setup.draw(batch, atlas, cursor, self.in_world);
             return;
         }
         if self.page() == Page::SplitProfiles {
@@ -3388,7 +3465,7 @@ impl OptionsUi {
             let m = crate::screen_draw::Measure(&atlas.font);
             let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
             let packs = self.packs(atlas, (w, h));
-            let mut draws = packs.draw(&m, mouse, blink);
+            let mut draws = packs.draw(&m, mouse, blink, crate::hud_overlays::now_ms());
             packs.bind_icons(&mut draws, atlas, &mut batch.patches);
             crate::screen_draw::paint(batch, atlas, &draws);
             return;
@@ -3411,6 +3488,9 @@ impl OptionsUi {
             self.narrate_list(&widgets, list_key, (top, bottom), w, cursor);
         }
         let mut tooltip = None;
+        // The widget a keyboard-focused tooltip belongs to: `MenuTooltipPositioner`
+        // keeps it against that widget, not at the pointer.
+        let mut tooltip_rect: Option<[f32; 4]> = None;
         for (wd_idx, wd) in widgets.iter().enumerate() {
             if !visible(wd) {
                 continue;
@@ -3420,9 +3500,9 @@ impl OptionsUi {
                 .as_ref()
                 .is_some_and(|fid| matches_focus(fid, wd_idx, wd));
             let start = batch.vertices.len();
-            let hover = (ui::hovered(cursor, wd.x, wd.y, wd.w, wd.h)
-                && (!wd.list || cursor.1 >= top && cursor.1 < bottom))
-                || is_focused;
+            let pointer_over = ui::hovered(cursor, wd.x, wd.y, wd.w, wd.h)
+                && (!wd.list || cursor.1 >= top && cursor.1 < bottom);
+            let hover = pointer_over || is_focused;
             // A pack's option: its label within the widget (the name shortened), and on hover
             // the whole label when it was, then what the pack says of it.
             let shader = s.shader_options.as_ref();
@@ -3466,6 +3546,7 @@ impl OptionsUi {
                     .collect();
                 if !lines.is_empty() {
                     tooltip = Some(lines);
+                    tooltip_rect = (!pointer_over).then_some([wd.x, wd.y, wd.w, wd.h]);
                 }
             }
             if hover && let Some(tip) = tooltip_text(s, wd) {
@@ -3480,6 +3561,7 @@ impl OptionsUi {
                         .collect::<Vec<_>>(),
                     _ => atlas.font.split(&tip, 170.0),
                 });
+                tooltip_rect = (!pointer_over).then_some([wd.x, wd.y, wd.w, wd.h]);
             }
             match &wd.kind {
                 WKind::Button { label, active, .. } => {
@@ -3651,7 +3733,10 @@ impl OptionsUi {
             self.settings_search = search;
         }
         if let Some(lines) = tooltip {
-            ui::tooltip(batch, atlas, &lines, cursor);
+            match tooltip_rect {
+                Some(rect) => ui::tooltip_menu(batch, atlas, &lines, cursor, rect),
+                None => ui::tooltip(batch, atlas, &lines, cursor),
+            }
         }
     }
     /// Mouse press/drag. Returns events for the game.
@@ -3682,6 +3767,26 @@ impl OptionsUi {
             }
             return Vec::new();
         }
+        if self.page() == Page::SplitSetup {
+            use crate::split_ui::Click;
+            if right {
+                return Vec::new();
+            }
+            self.split_setup.on = s.extras.splitscreen;
+            return match self.split_setup.click((x, y), size, drag) {
+                Click::Nothing => Vec::new(),
+                Click::Pressed => vec![Event::ButtonClick],
+                Click::Switch => {
+                    crate::extras::Item::Splitscreen.cycle(&mut s.extras, false);
+                    vec![Event::ButtonClick, Event::Changed]
+                }
+                Click::Done => {
+                    let mut events = vec![Event::ButtonClick];
+                    events.extend(self.back(s));
+                    events
+                }
+            };
+        }
         if self.page() == Page::SplitProfiles {
             use crate::split_profiles::Click;
             if right || drag {
@@ -3706,8 +3811,7 @@ impl OptionsUi {
             let outcome = c.click((x, y), size, drag);
             return self.calibration_outcome(s, outcome);
         }
-        if let Some(level) = Self::graphics_level(self.page()) {
-            use crate::graphics_ui::Action;
+        if Self::graphics_page(self.page()).is_some() {
             // Waiting on a key: a mouse button binds, as on Key Binds.
             if self.selected_key.is_some() && !drag {
                 let button = if right {
@@ -3717,36 +3821,10 @@ impl OptionsUi {
                 };
                 return self.bind_mouse(s, button);
             }
-            let mut events = Vec::new();
-            for action in self
+            let actions = self
                 .graphics
-                .click(level, s, (x, y), size, framebuffer, drag, right)
-            {
-                match action {
-                    Action::ButtonClick => events.push(Event::ButtonClick),
-                    Action::Changed => events.push(Event::Changed),
-                    Action::SliderDrag => events.push(Event::SliderDrag),
-                    Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
-                    Action::OpenHdr => self.push(Page::GraphicsHdr),
-                    Action::BindKey(name) => self.selected_key = Some(name),
-                    Action::Calibrate => {
-                        self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
-                        self.push(Page::HdrCalibration);
-                    }
-                    Action::OpenSimple => {
-                        if self.stack.len() >= 2
-                            && self.stack[self.stack.len() - 2] == Page::Graphics
-                        {
-                            events.extend(self.back(s));
-                        } else {
-                            self.stack.pop();
-                            self.push(Page::Graphics);
-                        }
-                    }
-                    Action::Done => events.extend(self.back(s)),
-                }
-            }
-            return events;
+                .click(s, (x, y), size, framebuffer, drag, right);
+            return self.graphics_events(s, actions);
         }
         if self.page() == Page::Packs {
             let mut events = Vec::new();
@@ -3786,6 +3864,7 @@ impl OptionsUi {
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
+                self.focus_from_keyboard = false;
                 self.can_change_value = false;
                 search.click(atlas, x, false, false);
                 self.scroll = 0.0;
@@ -3798,6 +3877,7 @@ impl OptionsUi {
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
                 self.focus = Some(FocusId::Search);
+                self.focus_from_keyboard = false;
                 self.can_change_value = false;
                 search.click(atlas, x, false, false);
                 self.scroll = 0.0;
@@ -3915,7 +3995,10 @@ impl OptionsUi {
             if matches!(wd.kind, WKind::Text { .. }) {
                 continue;
             }
+            // A click focuses the widget for its highlight only: vanilla's wheel
+            // steps a keyboard-focused widget from anywhere, not a clicked one.
             self.focus = Some(focus_id(wd_idx, &wd));
+            self.focus_from_keyboard = false;
             match wd.kind {
                 WKind::Button {
                     active: true, act, ..
@@ -4035,6 +4118,8 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::ToggleRecording => events.push(Event::ToggleRecording),
+                        Act::ExportRepro => events.push(Event::ExportRepro),
                         Act::None => {}
                     }
                 }
@@ -4090,8 +4175,11 @@ impl OptionsUi {
         let slider = self.dragging.take().is_some() | self.shader_dragging.take().is_some();
         let graphics_slider = self.graphics.release();
         let calibration_slider = self.calibration.as_mut().is_some_and(|c| c.release());
+        let split_drop = self.split_setup.release();
         if slider || graphics_slider || calibration_slider {
             vec![Event::ButtonClick, Event::Changed]
+        } else if split_drop {
+            vec![Event::ButtonClick]
         } else {
             Vec::new()
         }
@@ -4136,15 +4224,20 @@ impl OptionsUi {
         }
         events
     }
-    /// The mouse wheel at the cursor. Over a cycle button it takes the step
-    /// (`CycleButton.mouseScrolled`: up goes back) and the list stays put;
-    /// over a slider it nudges the slider up or down.
+    /// The mouse wheel at the cursor. Vanilla scrolls the list
+    /// (`AbstractScrollArea.mouseScrolled`), except that a hovered cycle button
+    /// takes the step and keeps the wheel (`CycleButton.mouseScrolled`: up goes
+    /// back); `AbstractSliderButton` does not override it, so a slider under the
+    /// cursor lets the list scroll.
     ///
-    /// **Horizon improvement (diverges from Vanilla 26.3):** when a slider or
-    /// cycle button is keyboard-focused (highlighted), the wheel steps or
-    /// cycles that widget regardless of where the cursor is. Vanilla 26.3
-    /// does not intercept the wheel for sliders at all; this makes keyboard
-    /// navigation far more usable.
+    /// **Horizon improvement (diverges from Vanilla 26.3):** a slider or cycle
+    /// button focused by the keyboard (Tab, the arrows, a pad) steps or cycles on
+    /// the wheel wherever the cursor is. Vanilla 26.3 does not intercept the wheel
+    /// for sliders at all; this makes keyboard navigation far more usable. Focus
+    /// left by a click does not count (`focus_from_keyboard`): vanilla's wheel
+    /// ignores it, and honouring it toggled the clicked option on every later wheel
+    /// event, from anywhere on the screen, while the list never scrolled.
+    /// The graphics screen has its own wheel (`GraphicsUi::wheel`).
     pub fn wheel(
         &mut self,
         s: &mut Settings,
@@ -4155,48 +4248,23 @@ impl OptionsUi {
     ) -> Vec<Event> {
         self.size = size;
         self.framebuffer = framebuffer;
-        if let Some(level) = Self::graphics_level(self.page()) {
-            use crate::graphics_ui::Action;
-            let actions = self
-                .graphics
-                .wheel(level, s, cursor, size, framebuffer, amount);
-            let mut events = Vec::new();
-            for action in actions {
-                match action {
-                    Action::ButtonClick => events.push(Event::ButtonClick),
-                    Action::Changed => events.push(Event::Changed),
-                    Action::SliderDrag => events.push(Event::SliderDrag),
-                    Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
-                    Action::OpenHdr => self.push(Page::GraphicsHdr),
-                    Action::OpenSimple => {
-                        if self.stack.len() >= 2
-                            && self.stack[self.stack.len() - 2] == Page::Graphics
-                        {
-                            events.extend(self.back(s));
-                        } else {
-                            self.stack.pop();
-                            self.push(Page::Graphics);
-                        }
-                    }
-                    Action::BindKey(name) => self.selected_key = Some(name),
-                    Action::Calibrate => {
-                        self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
-                        self.push(Page::HdrCalibration);
-                    }
-                    Action::Done => events.extend(self.back(s)),
-                }
-            }
-            return events;
+        if Self::graphics_page(self.page()).is_some() {
+            let actions = self.graphics.wheel(s, size, cursor, framebuffer, amount);
+            return self.graphics_events(s, actions);
         }
         let plain = self.resource_error.is_none()
             && !(self.pack_screen.is_some() && self.stack.last() == Some(&Page::Packs));
-        if !plain {
+        // The "Scroll wheel changes settings" extra off: the wheel only scrolls.
+        if !plain || !s.extras.wheel_cycles_settings {
             self.scroll_at(s, size, cursor, amount);
             return Vec::new();
         }
         // Horizon improvement: a keyboard-focused slider or cycle button
         // intercepts the wheel before hover detection (see doc-comment above).
-        if amount != 0.0 {
+        // A click focuses its widget for the highlight too, and vanilla's wheel
+        // must not act on that: it would toggle the clicked option from anywhere
+        // on the screen and the list would never scroll.
+        if amount != 0.0 && self.focus_from_keyboard {
             let (widgets, _, _, _) = self.layout(s, size.0, size.1);
             match &self.focus {
                 Some(FocusId::Slider(opt)) => {
@@ -4262,8 +4330,8 @@ impl OptionsUi {
         if self.resource_error.is_some() {
             return;
         }
-        if let Some(level) = Self::graphics_level(self.page()) {
-            self.graphics.scroll(level, s, size.1, amount);
+        if Self::graphics_page(self.page()).is_some() {
+            self.graphics.scroll(s, size, amount);
             return;
         }
         match &mut self.pack_screen {
@@ -4334,7 +4402,7 @@ impl OptionsUi {
     }
     /// Escape or Done: leave the current page, applying page results.
     /// After an input on HDR calibration: Save keeps what it landed on, Cancel what was
-    /// set before; both go back to Graphics: HDR.
+    /// set before; both go back to the graphics screen's HDR page.
     fn calibration_outcome(
         &mut self,
         s: &mut Settings,
@@ -4382,6 +4450,7 @@ impl OptionsUi {
         self.selected_key = None;
         self.selected_pad_action = None;
         self.focus = None;
+        self.focus_from_keyboard = false;
         self.settings_search.focused = false;
         self.language_search.focused = false;
         self.can_change_value = false;
@@ -4444,6 +4513,8 @@ impl OptionsUi {
             self.scroll = 0.0;
         } else if self.page() == Page::SplitProfiles {
             self.split_profiles.type_text(text);
+        } else if Self::graphics_page(self.page()).is_some() && self.graphics.typing() {
+            self.graphics.type_text(text);
         } else if self.settings_search_active() {
             self.settings_search.insert_text(text);
             self.scroll = 0.0;
@@ -4474,6 +4545,9 @@ impl OptionsUi {
         }
         if self.page() == Page::SplitProfiles {
             return self.split_profiles.shortcut(shortcut, clipboard);
+        }
+        if Self::graphics_page(self.page()).is_some() {
+            return self.graphics.shortcut(shortcut, clipboard);
         }
         if self.settings_search_active() {
             if self.settings_search.shortcut(shortcut, clipboard) {
@@ -4589,37 +4663,11 @@ impl OptionsUi {
             return Vec::new();
         }
 
-        if let Some(level) = Self::graphics_level(self.page()) {
-            use crate::graphics_ui::Action;
+        if Self::graphics_page(self.page()).is_some() {
             let size = (self.size.0.max(480.0), self.size.1.max(240.0));
             let fb = [self.framebuffer[0].max(480), self.framebuffer[1].max(240)];
-            let (actions, handled) = self.graphics.key_modifiers(level, s, key, shift, size, fb);
-            let mut events = Vec::new();
-            for action in actions {
-                match action {
-                    Action::ButtonClick => events.push(Event::ButtonClick),
-                    Action::Changed => events.push(Event::Changed),
-                    Action::SliderDrag => events.push(Event::SliderDrag),
-                    Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
-                    Action::OpenHdr => self.push(Page::GraphicsHdr),
-                    Action::OpenSimple => {
-                        if self.stack.len() >= 2
-                            && self.stack[self.stack.len() - 2] == Page::Graphics
-                        {
-                            events.extend(self.back(s));
-                        } else {
-                            self.stack.pop();
-                            self.push(Page::Graphics);
-                        }
-                    }
-                    Action::BindKey(name) => self.selected_key = Some(name),
-                    Action::Calibrate => {
-                        self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
-                        self.push(Page::HdrCalibration);
-                    }
-                    Action::Done => events.extend(self.back(s)),
-                }
-            }
+            let (actions, handled) = self.graphics.key_modifiers(s, key, text, shift, size, fb);
+            let mut events = self.graphics_events(s, actions);
             if key == K::Escape {
                 events.extend(self.back(s));
                 return events;
@@ -4729,6 +4777,7 @@ impl OptionsUi {
             };
             let (next_id, rect, in_list) = &focusables[next_idx];
             self.focus = Some(next_id.clone());
+            self.focus_from_keyboard = true;
             self.can_change_value = matches!(next_id, FocusId::Slider(_));
             if *in_list {
                 if rect[1] < top {
@@ -4767,6 +4816,7 @@ impl OptionsUi {
                     if let Some(next_idx) = gamepad::focus_step_rect(from, dir, &rects) {
                         let (next_id, rect, in_list) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
+                        self.focus_from_keyboard = true;
                         self.can_change_value = false;
                         if *in_list {
                             if rect[1] < top {
@@ -4780,6 +4830,7 @@ impl OptionsUi {
                 }
             } else {
                 self.focus = Some(focusables[0].0.clone());
+                self.focus_from_keyboard = true;
                 self.can_change_value = false;
             }
             return Vec::new();
@@ -4802,6 +4853,7 @@ impl OptionsUi {
                     if let Some(next_idx) = step {
                         let (next_id, rect, in_list) = &focusables[next_idx];
                         self.focus = Some(next_id.clone());
+                        self.focus_from_keyboard = true;
                         self.can_change_value = false;
                         if *in_list {
                             if rect[1] < top {
@@ -4819,6 +4871,7 @@ impl OptionsUi {
                 }
             } else {
                 self.focus = Some(focusables[0].0.clone());
+                self.focus_from_keyboard = true;
                 self.can_change_value = false;
             }
             return Vec::new();
@@ -4842,6 +4895,7 @@ impl OptionsUi {
                     match act {
                         Act::Push(p) => {
                             self.focus = None;
+                            self.focus_from_keyboard = false;
                             self.can_change_value = false;
                             if p == Page::ShaderPacks {
                                 events.push(Event::ListShaderPacks);
@@ -4850,6 +4904,7 @@ impl OptionsUi {
                         }
                         Act::Done => {
                             self.focus = None;
+                            self.focus_from_keyboard = false;
                             self.can_change_value = false;
                             events.extend(self.back(s));
                         }
@@ -4889,6 +4944,7 @@ impl OptionsUi {
                         }
                         Act::ModSettings(i) => {
                             self.focus = None;
+                            self.focus_from_keyboard = false;
                             self.can_change_value = false;
                             self.push(Page::NativeMod(i));
                             events.push(Event::NativeSettings(i));
@@ -4914,6 +4970,7 @@ impl OptionsUi {
                         // The shader options page's buttons, as a click does them.
                         Act::ShaderOptions => {
                             self.focus = None;
+                            self.focus_from_keyboard = false;
                             self.can_change_value = false;
                             s.shader_options = None;
                             self.push(Page::ShaderOptions);
@@ -4931,6 +4988,7 @@ impl OptionsUi {
                         Act::ShaderScreen(screen) => {
                             if let Some(options) = &mut s.shader_options {
                                 self.focus = None;
+                                self.focus_from_keyboard = false;
                                 options.path.push(screen);
                                 self.scroll = 0.0;
                             }
@@ -4963,6 +5021,8 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::ToggleRecording => events.push(Event::ToggleRecording),
+                        Act::ExportRepro => events.push(Event::ExportRepro),
                         Act::None => {}
                     }
                     return events;
@@ -4986,6 +5046,24 @@ impl OptionsUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window allows the input method only while `typing` says a search
+    /// box has the focus (`Game::text_field_focused`), so a page without one
+    /// must not claim the keys: the movement and menu keys keep working there.
+    #[test]
+    fn only_a_focused_search_box_takes_text() {
+        let mut ui = OptionsUi::default();
+        assert!(!ui.typing(), "the main page has no text box");
+        ui.show(Page::Language);
+        assert!(ui.typing(), "the language list's search takes the keys");
+        ui.show(Page::Video);
+        assert!(!ui.typing(), "the settings search is not focused");
+        ui.settings_search.focused = true;
+        assert!(ui.typing(), "the settings search, once focused, does");
+        ui.settings_search.focused = false;
+        ui.show(Page::Packs);
+        assert!(!ui.typing(), "the pack screen's search is not open yet");
+    }
 
     #[test]
     fn accessibility_sliders_and_toggles_survive_options_round_trip() {
@@ -5371,6 +5449,61 @@ mod tests {
             vec![Event::ButtonClick]
         );
         assert!(ui.resource_error.is_none());
+    }
+
+    /// The texts of an options page, as laid out in `code`'s language, and the keys it lacked.
+    fn page_texts(code: &str, pages: &[Page]) -> (Vec<String>, Vec<String>) {
+        let s = Settings::default();
+        lang::scoped(lang::Language::load(&[], code), || {
+            let mut texts = Vec::new();
+            for page in pages {
+                let mut ui = OptionsUi::default();
+                ui.show(*page);
+                for w in ui.layout(&s, 480.0, 4000.0).0 {
+                    match w.kind {
+                        WKind::Button { label: t, .. }
+                        | WKind::Slider { label: t, .. }
+                        | WKind::Text { text: t, .. } => texts.push(t.plain()),
+                        _ => {}
+                    }
+                }
+            }
+            texts
+        })
+    }
+
+    /// Horizon's own options pages said "Splitscreen...", "Hide block-break particles" and
+    /// "Hotbar: Previous Slot" in every language (#1927).
+    #[test]
+    fn horizon_option_pages_follow_the_language() {
+        let (texts, missed) = page_texts("de_de", &[Page::Horizon, Page::Extras, Page::PadBinds]);
+        for want in [
+            "Splitscreen …",
+            "Partikel",
+            "Blockpartikel weg: Aus",
+            "Weicher Chat: Aus",
+            "Nachrichtenmarkierung: An",
+            "Kanäle für UI-Töne: Aus",
+            "Schnellzugriffsleiste: Vorheriger Platz",
+            "Schnellzugriffsleiste: Nächster Platz",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} not in {texts:?}");
+        }
+        // Every key these pages ask for is in the table; vanilla's own keys (`options.*`,
+        // `key.*`: dotted ids without spaces) come from the prepared resources, which this
+        // language does not have.
+        let missed: Vec<_> = missed
+            .into_iter()
+            .filter(|k| k.starts_with("horizon.") || k.contains(' ') || !k.contains('.'))
+            .collect();
+        assert_eq!(missed, Vec::<String>::new());
+        let (texts, _) = page_texts("pl_pl", &[Page::Extras, Page::PadBinds]);
+        for want in [
+            "Ukryj cząstki bloków: Wył.",
+            "Pasek szybkiego wyboru: poprzednie pole",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} not in {texts:?}");
+        }
     }
 
     #[test]
@@ -7051,6 +7184,22 @@ mod tests {
     }
 
     #[test]
+    fn the_graphics_screens_wheel_scrolls_even_over_a_slider_being_changed() {
+        use crate::graphics_ui::{H, Item, Target};
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Graphics);
+        let size = (640.0, 360.0);
+        s.horizon.chunk_updates = 16;
+        ui.graphics.focus = Some(Target::Item(Item::Horizon(H::ChunkUpdates)));
+        ui.graphics.can_change_value = true;
+        let before = ui.graphics.scroll_amount();
+        ui.wheel(&mut s, size, (320.0, 150.0), [1920, 1080], -1.0);
+        assert_eq!(s.horizon.chunk_updates, 16);
+        assert!(ui.graphics.scroll_amount() > before);
+    }
+
+    #[test]
     fn horizon_pages_slider_and_wheel_parity() {
         use winit::keyboard::KeyCode as K;
         let atlas = atlas();
@@ -7082,13 +7231,14 @@ mod tests {
 
         // 2. Horizon Graphics page through OptionsUi:
         // Tab onto ChunkUpdates slider, ArrowRight adjusts value, Space toggles can_change_value
-        ui.show(Page::GraphicsAdvanced);
+        ui.show(Page::Graphics);
+        ui.graphics.open(crate::graphics_ui::Page::Performance);
         s.horizon.chunk_updates = 10;
         ui.size = size;
         ui.framebuffer = [854, 480];
 
         // Tab into controls
-        for _ in 0..15 {
+        for _ in 0..80 {
             ui.key(&mut s, &atlas, K::Tab, None);
             if ui.graphics.focus
                 == Some(crate::graphics_ui::Target::Item(
@@ -7118,6 +7268,129 @@ mod tests {
         // ArrowRight does not change ChunkUpdates when can_change_value is false
         ui.key(&mut s, &atlas, K::ArrowRight, None);
         assert_eq!(s.horizon.chunk_updates, 11);
+    }
+
+    /// Vanilla's wheel scrolls the list (`AbstractScrollArea.mouseScrolled`); only a
+    /// widget focused by the keyboard takes the step from anywhere on the screen.
+    /// A click focuses its widget for the highlight, and honouring that focus made a
+    /// clicked option toggle on every later wheel event while the list never scrolled.
+    #[test]
+    fn a_clicked_option_lets_the_wheel_scroll_the_list() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        let framebuffer = [854, 480];
+        let click_size = (427.0, 400.0);
+        let (widgets, click_top, click_bottom, _) = ui.layout(&s, click_size.0, click_size.1);
+
+        // A click leaves the widget focused for its highlight, not for the wheel.
+        let wd = widgets
+            .iter()
+            .find(|wd| {
+                matches!(
+                    wd.kind,
+                    WKind::Button {
+                        act: Act::Cycle(_),
+                        ..
+                    }
+                ) && (!wd.list || (wd.y >= click_top && wd.y + wd.h <= click_bottom))
+            })
+            .expect("a visible cycle button");
+        ui.click(
+            &mut s,
+            &atlas,
+            wd.x + 5.0,
+            wd.y + 5.0,
+            click_size,
+            framebuffer,
+            false,
+            false,
+        );
+        assert!(
+            matches!(ui.focus, Some(FocusId::Cycle(_))),
+            "the click focuses the cycle button it hit"
+        );
+        assert!(
+            !ui.focus_from_keyboard,
+            "a click does not leave keyboard focus"
+        );
+
+        // The wheel over the list's empty margin scrolls it at a size where the
+        // page overflows, and the clicked cycle option stays put: no ButtonClick,
+        // no Changed.
+        let size = (427.0, 240.0);
+        let (_, top, bottom, content) = ui.layout(&s, size.0, size.1);
+        assert!(
+            content > bottom - top,
+            "the video page scrolls at this size"
+        );
+        let before = s.view_bobbing;
+        let start = ui.scroll;
+        let cursor = (2.0, (top + bottom) / 2.0);
+        let events = ui.wheel(&mut s, size, cursor, framebuffer, -1.0);
+        assert_eq!(s.view_bobbing, before, "the clicked option does not toggle");
+        assert!(!events.contains(&Event::ButtonClick), "no click reaches it");
+        assert!(!events.contains(&Event::Changed));
+        assert!(ui.scroll > start, "the list scrolls down instead");
+
+        // Keyboard focus keeps the documented divergence: the wheel steps it
+        // wherever the cursor is, even off the widget.
+        ui.focus = Some(FocusId::Cycle(Opt::ViewBobbing));
+        ui.focus_from_keyboard = true;
+        let events = ui.wheel(&mut s, size, cursor, framebuffer, -1.0);
+        assert_ne!(s.view_bobbing, before, "a keyboard-focused option cycles");
+        assert!(events.contains(&Event::ButtonClick));
+        assert!(events.contains(&Event::Changed));
+    }
+
+    #[test]
+    fn the_wheel_only_scrolls_with_the_extra_off() {
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        let framebuffer = [854, 480];
+        let size = (427.0, 240.0);
+        let (widgets, top, bottom, content) = ui.layout(&s, size.0, size.1);
+        assert!(
+            content > bottom - top,
+            "the video page scrolls at this size"
+        );
+        let (opt, over) = widgets
+            .iter()
+            .find_map(|wd| match wd.kind {
+                WKind::Button {
+                    act: Act::Cycle(opt),
+                    ..
+                } if !wd.list || (wd.y >= top && wd.y + wd.h <= bottom) => {
+                    Some((opt, (wd.x + 5.0, wd.y + 5.0)))
+                }
+                _ => None,
+            })
+            .expect("a visible cycle button");
+
+        s.extras.wheel_cycles_settings = false;
+        let before = format!("{s:?}");
+        let start = ui.scroll;
+        let events = ui.wheel(&mut s, size, over, framebuffer, -1.0);
+        assert_eq!(format!("{s:?}"), before, "the hovered option stays put");
+        assert!(!events.contains(&Event::Changed));
+        assert!(
+            ui.scroll > start,
+            "the list scrolls under the cursor instead"
+        );
+        // Keyboard focus doesn't take the wheel either.
+        ui.focus = Some(FocusId::Cycle(opt));
+        ui.focus_from_keyboard = true;
+        ui.wheel(&mut s, size, over, framebuffer, -1.0);
+        assert_eq!(format!("{s:?}"), before);
+
+        // On (the default), vanilla's CycleButton.mouseScrolled again.
+        s.extras.wheel_cycles_settings = true;
+        let before = format!("{s:?}");
+        let events = ui.wheel(&mut s, size, over, framebuffer, -1.0);
+        assert_ne!(format!("{s:?}"), before, "{opt:?} cycles");
+        assert!(events.contains(&Event::Changed));
     }
 
     #[test]

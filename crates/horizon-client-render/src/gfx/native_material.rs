@@ -46,6 +46,8 @@ struct HorizonMaterialOut {
     @location(11) base: vec3<f32>,
     @location(12) displaced: f32,
     @location(13) @interpolate(flat) normal: vec3<f32>,
+    // terrain.wgsl's `emission`, for HDR output's mark.
+    @location(14) @interpolate(flat) hdr_code: u32,
 }
 fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
     light: vec2<u32>, origin: vec3<f32>) -> HorizonMaterialOut {
@@ -79,9 +81,11 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     let fluid = high >= 8u && (high & 7u) < 6u;
     out.face = select(0u, high & 7u, fluid);
     out.fluid_quad = u32(fluid);
-    // The face's HDR tier (mesher.rs's `emitting`: 0 none, 1 low, 2 incandescent, 3 bright,
-    // 4 very bright) as how strongly it shines: a redstone torch 7/15, a torch 14/15.
-    let tier = 15u - (flags & 15u);
+    // The tier (0 none, 1 low, 2 incandescent, 3 bright, 4 very bright) as how strongly the
+    // face shines: a redstone torch 7/15, a torch 14/15, glowstone 1.
+    out.hdr_code = 15u - (flags & 15u);
+    // Codes above 4 are the same tiers, shining all over rather than in their bright parts.
+    let tier = select(out.hdr_code, out.hdr_code - 4u, out.hdr_code > 4u);
     out.emission = select(min(f32(tier) * 7.0 / 15.0, 1.0), 0.0, tier == 0u);
     out.displaced = 0.0;
     out.normal = vec3(0.0);
@@ -175,9 +179,10 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     let dynamic = horizon_terrain_dynamic_block_light(in.position) / 240.0;
     let light = vec2(max(in.light.x, min(dynamic, 1.0)), in.light.y);
     let tangent = horizon_material_tangent(in.base, in.uv, normal);
+    // No sprite tags on this branch: its materials come from `material_ids`.
     return material(MaterialInput(albedo, in.tint, light, in.lightmap, in.position, in.uv,
-        translucent, in.face, fluid, screen, material_id, in.emission, normal, tangent,
-        in.displaced)).color;
+        translucent, 0u, material_id, screen, in.face, fluid, in.emission, normal, tangent,
+        horizon_terrain_native_colored_light(in.position), in.displaced)).color;
 }
 var<private> horizon_material_normal: vec3<f32>;
 var<private> horizon_material_albedo: vec3<f32>;
@@ -189,6 +194,22 @@ struct HorizonMaterialSolid {
     // The texture and tint before any light, for light the post stage adds.
     @location(2) albedo: vec4<f32>,
 }
+// What `fs_solid` leaves in the frame's alpha for HDR output, from the sprite before the pack's
+// material: the pack decides the colour, Horizon still knows which pixels are light sources.
+fn horizon_material_mark(in: HorizonMaterialOut, texel: vec4<f32>) -> f32 {
+    if in.hdr_code > 0u {
+        let whole = in.hdr_code > 4u;
+        let tier = select(in.hdr_code, in.hdr_code - 4u, whole);
+        let l = in.layer & 0x7fffu;
+        let t = textureLoad(horizon_terrain_emission_thresholds,
+            vec2(i32(l % horizon_terrain_SPRITE_SPLIT), i32(l / horizon_terrain_SPRITE_SPLIT)), 0);
+        let y = horizon_terrain_brightness(texel.rgb);
+        if whole || y >= t.r {
+            return horizon_terrain_hdr_mark(tier, y);
+        }
+    }
+    return 1.0;
+}
 @fragment fn horizon_material_fs_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     if length(in.base) < horizon_displace_distance - 0.05 && horizon_displaced_layer(in.layer) {
         discard;
@@ -197,13 +218,15 @@ struct HorizonMaterialSolid {
 }
 fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     let color = horizon_material_color(in, false);
+    let texel = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
     if horizon_surface.w == 0.0 {
         set_surface(horizon_material_normal, 0.0, 0.0);
     }
     var out: HorizonMaterialSolid;
-    out.color = horizon_material_fogged(vec4(color.rgb, 1.0), in.spherical, in.cylindrical);
+    let mark = horizon_material_mark(in, texel);
+    out.color = horizon_material_fogged(vec4(color.rgb, mark), in.spherical, in.cylindrical);
     out.surface = vec4(horizon_surface.xyz, in.clip.z);
     out.albedo = vec4(horizon_material_albedo, 1.0);
     return out;
