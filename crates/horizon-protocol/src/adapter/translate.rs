@@ -53,11 +53,21 @@ pub fn ids_of(version: ServerVersion) -> Option<&'static Ids> {
         },
         ..super::v1_21_11_ids::IDS
     };
+    static V1_21_10: Ids = Ids {
+        quirks: BEFORE_26_3,
+        // As 1.21.11's, without the zombie nautilus variant 1.21.11 added after the chicken's.
+        entity_data_serializer: ids::Remap::Runs {
+            up: &[(0, 0, 22), (22, 23, 1), (23, 25, 4), (27, 30, 1), (28, 33, 9)],
+            down: &[(0, 0, 22), (23, 22, 1), (25, 23, 4), (30, 27, 1), (33, 28, 9)],
+        },
+        ..super::v1_21_10_ids::IDS
+    };
     match version {
         ServerVersion::Current => None,
         ServerVersion::V26_2 => Some(&V26_2),
         ServerVersion::V26_1 => Some(&V26_1),
         ServerVersion::V1_21_11 => Some(&V1_21_11),
+        ServerVersion::V1_21_10 => Some(&V1_21_10),
     }
 }
 
@@ -100,7 +110,7 @@ pub fn clientbound(
     use packet_ids::play::clientbound as cb;
     // A release at a time: 26.1's packets are brought to 26.2's layout first.
     // 1.21.11's configuration ends with the world clocks 26.1 syncs as a registry.
-    if session.version == ServerVersion::V1_21_11
+    if session.version.at_most(ServerVersion::V1_21_11)
         && (state, id)
             == (
                 State::Configuration,
@@ -117,16 +127,21 @@ pub fn clientbound(
             Some(v1_21_11::world_clocks()),
         )));
     }
-    let before = match session.version {
-        ServerVersion::V26_1 => v26_1::clientbound(session, state, id, payload)?,
-        ServerVersion::V1_21_11 => {
-            let first = v1_21_11::clientbound(session, state, id, payload)?;
-            let second =
-                v26_1::clientbound(session, state, id, first.as_deref().unwrap_or(payload))?;
-            second.or(first)
+    // The steps of each release from the server's up to 26.2, oldest first.
+    let mut before: Option<Vec<u8>> = None;
+    type Step = fn(&Session, State, i32, &[u8]) -> Result<Option<Vec<u8>>>;
+    let steps: [(ServerVersion, Step); 3] = [
+        (ServerVersion::V1_21_10, v1_21_10::clientbound),
+        (ServerVersion::V1_21_11, v1_21_11::clientbound),
+        (ServerVersion::V26_1, v26_1::clientbound),
+    ];
+    for (from, step) in steps {
+        if session.version.at_most(from)
+            && let Some(next) = step(session, state, id, before.as_deref().unwrap_or(payload))?
+        {
+            before = Some(next);
         }
-        _ => None,
-    };
+    }
     let payload = before.as_deref().unwrap_or(payload);
     let out = match (state, id) {
         (State::Configuration, packet_ids::configuration::clientbound::UPDATE_TAGS) => {
@@ -217,9 +232,12 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
-        (State::Play, cb::SET_ENTITY_DATA) if session.version == ServerVersion::V1_21_11 => {
+        (State::Play, cb::SET_ENTITY_DATA) if session.version.at_most(ServerVersion::V1_21_11) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::SetEntityData(d) = &mut p {
+                if session.version.at_most(ServerVersion::V1_21_10) {
+                    v1_21_10::entity_data(session, d);
+                }
                 v1_21_11::entity_data(session, d);
             }
             strip_id(p.encode())
@@ -289,10 +307,10 @@ pub fn serverbound(
             w.bytes(r.rest());
             renumbered(id, w.data)
         }
-        (State::Play, sb::INTERACT) if session.version == ServerVersion::V1_21_11 => {
+        (State::Play, sb::INTERACT) if session.version.at_most(ServerVersion::V1_21_11) => {
             v1_21_11::interact(session, payload)
         }
-        (State::Play, sb::ATTACK) if session.version == ServerVersion::V1_21_11 => {
+        (State::Play, sb::ATTACK) if session.version.at_most(ServerVersion::V1_21_11) => {
             v1_21_11::attack(payload)
         }
         // 26.1 is told the entity a spectator picked by its UUID (spectate_entity, at the same id).
@@ -304,7 +322,7 @@ pub fn serverbound(
             let mut w = Writer::new();
             w.varint(0);
             let swing = match session.version {
-                ServerVersion::V1_21_11 => v1_21_11::SWING,
+                ServerVersion::V1_21_11 | ServerVersion::V1_21_10 => v1_21_11::SWING,
                 _ => V26_2_SWING,
             };
             Ok(Some((swing, w.data)))
@@ -665,6 +683,51 @@ fn animate(payload: &[u8]) -> Result<(i32, Vec<u8>)> {
     w.varint(id);
     w.u8(action);
     Ok((packet_ids::play::clientbound::ANIMATE, w.data))
+}
+
+/// 1.21.10 (and 1.21.9) to 1.21.11.
+mod v1_21_10 {
+    use super::*;
+
+    use crate::entity_data::{Value, serializer};
+
+    /// 1.21.10's packet in 1.21.11's layout; `None` when it is laid out alike. Its packets are 1.21.11's
+    /// but for `horse_screen_open`, which 1.21.11 renamed `mount_screen_open` (the id tables pair them).
+    pub fn clientbound(
+        _session: &Session,
+        _state: State,
+        _id: i32,
+        _payload: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Entity types (26.3 ids) whose entity data 1.21.11 changed.
+    const BEE: i32 = 11;
+    const WOLF: i32 = 152;
+    const MANNEQUIN: i32 = 84;
+    const PLAYER: i32 = 159;
+
+    /// 1.21.11 made the bee's and the wolf's anger end a LONG (an INT before) and an avatar's main arm a
+    /// HUMANOID_ARM (a BYTE before, with the same 0 left, 1 right). Indexes as 1.21.10 numbers them.
+    pub fn entity_data(session: &Session, data: &mut play::SetEntityData) {
+        let Some(kind) = session.kinds.lock().unwrap().get(&data.id).copied() else {
+            return;
+        };
+        for (index, ser, value) in &mut data.values {
+            match (kind, *index, &*value) {
+                (BEE, 18, Value::Int(v)) | (WOLF, 21, Value::Int(v)) => {
+                    *value = Value::Long(i64::from(*v));
+                    *ser = serializer::LONG;
+                }
+                (PLAYER | MANNEQUIN, 15, Value::Byte(v)) => {
+                    *value = Value::Id(i32::from(*v));
+                    *ser = serializer::HUMANOID_ARM;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// 1.21.11 to 26.1.
