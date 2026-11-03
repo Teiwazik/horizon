@@ -217,4 +217,36 @@ mod tests {
         }
         assert_eq!(item(926), 926);
     }
+
+    #[test]
+    fn the_26_2_tables_match_the_reports() {
+        // Read off both versions' registries and blocks reports by hand.
+        let ids = crate::adapter::ServerVersion::V26_2.ids().unwrap();
+        assert_eq!(ids.item.up(926), Some(1012)); // diamond
+        assert_eq!(ids.item.up(1), Some(1)); // stone
+        assert_eq!(ids.block_state.up(13330), Some(15177)); // oak_slab type=top waterlogged=true
+        assert_eq!(ids.block_state.up(3987), Some(5543)); // chest, first state
+        assert_eq!(ids.block_state.up(8), Some(8)); // grass_block
+        assert_eq!(ids.state_bits(), (15, 16));
+    }
+
+    #[test]
+    fn an_item_stack_is_read_and_written_in_the_servers_numbering() {
+        use crate::buf::{Codec, Reader, Writer};
+        use crate::item::{Slot, Stack};
+        let ids = crate::adapter::ServerVersion::V26_2.ids().unwrap();
+        // Three diamonds as a 26.2 server sends them: item 926, no components.
+        let sent = [3, 0x9e, 0x07, 0, 0];
+        let stack = {
+            let _up = renumbering(ids, Way::Up);
+            Slot::read(&mut Reader::new(&sent)).unwrap().unwrap()
+        };
+        assert_eq!((stack.item, stack.count), (1012, 3));
+        let mut w = Writer::new();
+        {
+            let _down = renumbering(ids, Way::Down);
+            Slot::write(&Some(Stack::new(1012, 3)), &mut w);
+        }
+        assert_eq!(w.data, sent);
+    }
 }

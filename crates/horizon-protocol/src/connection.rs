@@ -174,7 +174,7 @@ pub struct ConnReader {
     decrypt: Option<Cfb8>,
     pub threshold: Option<usize>,
     pub counters: Arc<Counters>,
-    /// Set for a server of an older release: what arrives is renumbered and translated.
+    /// Set for a server of an older release: what arrives is renumbered.
     adapter: Option<Arc<crate::adapter::Session>>,
 }
 /// Closes a connection from another thread: a read or a write blocked on it fails.
@@ -190,7 +190,7 @@ pub struct ConnWriter {
     encrypt: Option<Cfb8>,
     pub threshold: Option<usize>,
     counters: Arc<Counters>,
-    /// Set for a server of an older release: what is sent is renumbered and translated.
+    /// Set for a server of an older release: what is sent is renumbered.
     adapter: Option<Arc<crate::adapter::Session>>,
 }
 /// `InetAddress.getByName` under Java's default `java.net.preferIPv6Addresses=false`: IPv4
@@ -313,8 +313,8 @@ impl Connection {
             },
         })
     }
-    /// Speak to a server of `version` from now on (before the handshake): packets are renumbered and
-    /// translated both ways (crate::adapter). The pinned version needs nothing.
+    /// Speak to a server of `version` from now on (before the handshake): packets are renumbered both
+    /// ways (crate::adapter). The pinned version needs nothing.
     pub fn adapt(&mut self, version: crate::adapter::ServerVersion) {
         let session = (version != crate::adapter::ServerVersion::Current)
             .then(|| Arc::new(crate::adapter::Session::new(version)));
@@ -369,16 +369,18 @@ impl ConnReader {
                 if pending.len() >= prefix + len {
                     let frame = self.start + prefix..self.start + prefix + len;
                     self.start = frame.end;
-                    if let Some((id, payload)) = self.packet(frame)? {
+                    if let Some(packet) = self.packet(frame)? {
                         self.counters.received.fetch_add(1, Ordering::Relaxed);
-                        let Some(a) = &self.adapter else {
-                            return Ok((id, payload));
-                        };
-                        if let Some(packet) = a.clientbound(id, payload)? {
-                            return Ok(packet);
-                        }
-                        if let Some(packet) = a.next_incoming() {
-                            return Ok(packet);
+                        match &self.adapter {
+                            None => return Ok(packet),
+                            Some(a) => {
+                                if let Some(packet) = a.clientbound(packet.0, packet.1)? {
+                                    return Ok(packet);
+                                }
+                                if let Some(packet) = a.next_incoming() {
+                                    return Ok(packet);
+                                }
+                            }
                         }
                     }
                     continue;
@@ -428,6 +430,10 @@ impl ConnReader {
         let n = match self.stream.read(&mut self.buffer[self.end..]) {
             Ok(0) => return Err(Error::end_of_stream()),
             Ok(n) => n,
+            // A signal (a profiler attaching, SIGCHLD...) cut the read short
+            // before any byte came: nothing is wrong with the connection, the
+            // caller reads again.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(()),
             // The read timeout passed: Windows reports TimedOut, Unix
             // WouldBlock.
             Err(e)
@@ -468,8 +474,7 @@ impl ConnWriter {
     }
     /// Send one packet body (VarInt id + payload).
     pub fn send(&mut self, body: &[u8]) -> Result<()> {
-        if let Some(a) = &self.adapter {
-            let a = a.clone();
+        if let Some(a) = self.adapter.clone() {
             if let Some(body) = a.serverbound(body)? {
                 self.send_contents(&frame::contents(&body, self.threshold)?)?;
             }

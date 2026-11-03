@@ -18,59 +18,6 @@ use crate::{
     packets::{configuration, play},
 };
 
-/// The registry ids an older version numbers its own way; `None` for the pinned one.
-pub fn ids_of(version: ServerVersion) -> Option<&'static Ids> {
-    // Quirks hold for every version before the one that changed the layout.
-    const BEFORE_26_3: ids::Quirks = ids::Quirks {
-        tag_slot_display_is_id: true,
-    };
-    static V26_2: Ids = Ids {
-        quirks: BEFORE_26_3,
-        ..super::v26_2_ids::IDS
-    };
-    static V26_1: Ids = Ids {
-        quirks: BEFORE_26_3,
-        ..super::v26_1_2_ids::IDS
-    };
-    static V1_21_11: Ids = Ids {
-        quirks: BEFORE_26_3,
-        // 26.1 registered the cat, cow, pig and chicken sound variants among the others.
-        entity_data_serializer: ids::Remap::Runs {
-            up: &[
-                (0, 0, 22),
-                (22, 23, 1),
-                (23, 25, 4),
-                (27, 30, 1),
-                (28, 32, 11),
-            ],
-            down: &[
-                (0, 0, 22),
-                (23, 22, 1),
-                (25, 23, 4),
-                (30, 27, 1),
-                (32, 28, 11),
-            ],
-        },
-        ..super::v1_21_11_ids::IDS
-    };
-    static V1_21_10: Ids = Ids {
-        quirks: BEFORE_26_3,
-        // As 1.21.11's, without the zombie nautilus variant 1.21.11 added after the chicken's.
-        entity_data_serializer: ids::Remap::Runs {
-            up: &[(0, 0, 22), (22, 23, 1), (23, 25, 4), (27, 30, 1), (28, 33, 9)],
-            down: &[(0, 0, 22), (23, 22, 1), (25, 23, 4), (30, 27, 1), (33, 28, 9)],
-        },
-        ..super::v1_21_10_ids::IDS
-    };
-    match version {
-        ServerVersion::Current => None,
-        ServerVersion::V26_2 => Some(&V26_2),
-        ServerVersion::V26_1 => Some(&V26_1),
-        ServerVersion::V1_21_11 => Some(&V1_21_11),
-        ServerVersion::V1_21_10 => Some(&V1_21_10),
-    }
-}
-
 impl Ids {
     /// The table of a registry tags are sent for, by its name; registries the protocol syncs from the
     /// server's own data (biomes, enchantments, ...) are numbered by that data and alike on both sides.
@@ -104,11 +51,10 @@ pub fn clientbound(
     id: i32,
     payload: &[u8],
 ) -> Result<Option<(i32, Option<Vec<u8>>)>> {
-    let Some(ids) = ids_of(session.version) else {
+    let Some(ids) = session.version.ids() else {
         return Ok(Some((id, None)));
     };
     use packet_ids::play::clientbound as cb;
-    // A release at a time: 26.1's packets are brought to 26.2's layout first.
     // 1.21.11's configuration ends with the world clocks 26.1 syncs as a registry.
     if session.version.at_most(ServerVersion::V1_21_11)
         && (state, id)
@@ -127,11 +73,10 @@ pub fn clientbound(
             Some(v1_21_11::world_clocks()),
         )));
     }
-    // The steps of each release from the server's up to 26.2, oldest first.
+    // A release at a time: an older server's packets are brought to 26.2's layout first, oldest step first.
     let mut before: Option<Vec<u8>> = None;
     type Step = fn(&Session, State, i32, &[u8]) -> Result<Option<Vec<u8>>>;
-    let steps: [(ServerVersion, Step); 3] = [
-        (ServerVersion::V1_21_10, v1_21_10::clientbound),
+    let steps: [(ServerVersion, Step); 2] = [
         (ServerVersion::V1_21_11, v1_21_11::clientbound),
         (ServerVersion::V26_1, v26_1::clientbound),
     ];
@@ -145,7 +90,7 @@ pub fn clientbound(
     let payload = before.as_deref().unwrap_or(payload);
     let out = match (state, id) {
         (State::Configuration, packet_ids::configuration::clientbound::UPDATE_TAGS) => {
-            let mut p = decode_config(id, payload)?;
+            let mut p = configuration::Clientbound::decode(id, payload)?;
             if let configuration::Clientbound::UpdateTags(t) = &mut p {
                 tags(ids, &mut t.registries);
             }
@@ -195,16 +140,6 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
-        (State::Play, cb::UPDATE_ATTRIBUTES) => {
-            let mut p = decode_play(ids, id, payload)?;
-            if let play::Clientbound::UpdateAttributes(a) = &mut p {
-                // An attribute the pinned version lacks can't be: 26.3 only added some.
-                for v in &mut a.values {
-                    v.attribute = ids.attribute.up(v.attribute).unwrap_or(v.attribute);
-                }
-            }
-            strip_id(p.encode())
-        }
         (State::Play, cb::BLOCK_UPDATE) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::BlockUpdate(b) = &mut p {
@@ -232,12 +167,19 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
+        (State::Play, cb::UPDATE_ATTRIBUTES) => {
+            let mut p = decode_play(ids, id, payload)?;
+            if let play::Clientbound::UpdateAttributes(a) = &mut p {
+                // An attribute the pinned version lacks can't be: 26.3 only added some.
+                for v in &mut a.values {
+                    v.attribute = ids.attribute.up(v.attribute).unwrap_or(v.attribute);
+                }
+            }
+            strip_id(p.encode())
+        }
         (State::Play, cb::SET_ENTITY_DATA) if session.version.at_most(ServerVersion::V1_21_11) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::SetEntityData(d) = &mut p {
-                if session.version.at_most(ServerVersion::V1_21_10) {
-                    v1_21_10::entity_data(session, d);
-                }
                 v1_21_11::entity_data(session, d);
             }
             strip_id(p.encode())
@@ -281,7 +223,7 @@ pub fn serverbound(
             .serverbound_id(state, id)
             .map(|mapped| (mapped, payload)))
     };
-    let Some(ids) = ids_of(session.version) else {
+    let Some(ids) = session.version.ids() else {
         return renumbered(id, payload.to_vec());
     };
     use packet_ids::play::serverbound as sb;
@@ -321,9 +263,10 @@ pub fn serverbound(
         (State::Play, sb::PUNCH) => {
             let mut w = Writer::new();
             w.varint(0);
-            let swing = match session.version {
-                ServerVersion::V1_21_11 | ServerVersion::V1_21_10 => v1_21_11::SWING,
-                _ => V26_2_SWING,
+            let swing = if session.version.at_most(ServerVersion::V1_21_11) {
+                v1_21_11::SWING
+            } else {
+                V26_2_SWING
             };
             Ok(Some((swing, w.data)))
         }
@@ -341,10 +284,6 @@ pub fn serverbound(
 
 /// 26.2's serverbound `swing` (play), which 26.3 replaced with `punch`.
 const V26_2_SWING: i32 = 63;
-
-fn decode_config(id: i32, payload: &[u8]) -> Result<configuration::Clientbound> {
-    configuration::Clientbound::decode(id, payload)
-}
 
 /// A play packet decoded with the older version's ids renumbered as they are read.
 fn decode_play(ids: &'static Ids, id: i32, payload: &[u8]) -> Result<play::Clientbound> {
@@ -497,6 +436,30 @@ fn light(r: &mut Reader) -> Result<crate::chunk::LightData> {
     })
 }
 
+fn light_update(payload: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let x = r.varint()?;
+    let z = r.varint()?;
+    let light = light(&mut r)?;
+    let mut w = Writer::new();
+    play::LightUpdate::write(&play::LightUpdate { x, z, light }, &mut w);
+    Ok(w.data)
+}
+
+fn renumber_states(ids: &Ids, states: &Paletted, new_bits: u8) -> Paletted {
+    let up = |id: i32| ids.block_state.up(id).unwrap_or(0);
+    if !states.palette.is_empty() {
+        // A palette: renumbering its entries is enough.
+        let mut out = states.clone();
+        out.palette.iter_mut().for_each(|p| *p = up(*p));
+        return out;
+    }
+    let values: Vec<i32> = (0..crate::chunk::BLOCKS)
+        .map(|i| up(states.get(i)))
+        .collect();
+    Paletted::from_values(&values, Strategy::Blocks, new_bits)
+}
+
 /// 26.2 keeps an advancement's tab position in its display (two floats after the background); 26.3 sends
 /// it after the whole advancement, displayed or not. What follows the added advancements is unchanged.
 fn advancements(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
@@ -546,30 +509,6 @@ fn advancements(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
     }
     w.bytes(r.rest());
     Ok(w.data)
-}
-
-fn light_update(payload: &[u8]) -> Result<Vec<u8>> {
-    let mut r = Reader::new(payload);
-    let x = r.varint()?;
-    let z = r.varint()?;
-    let light = light(&mut r)?;
-    let mut w = Writer::new();
-    play::LightUpdate::write(&play::LightUpdate { x, z, light }, &mut w);
-    Ok(w.data)
-}
-
-fn renumber_states(ids: &Ids, states: &Paletted, new_bits: u8) -> Paletted {
-    let up = |id: i32| ids.block_state.up(id).unwrap_or(0);
-    if !states.palette.is_empty() {
-        // A palette: renumbering its entries is enough.
-        let mut out = states.clone();
-        out.palette.iter_mut().for_each(|p| *p = up(*p));
-        return out;
-    }
-    let values: Vec<i32> = (0..crate::chunk::BLOCKS)
-        .map(|i| up(states.get(i)))
-        .collect();
-    Paletted::from_values(&values, Strategy::Blocks, new_bits)
 }
 
 /// 26.2: flags, position, spread, one max speed, an Int count, then the particle. 26.3 sends the particle
@@ -685,51 +624,6 @@ fn animate(payload: &[u8]) -> Result<(i32, Vec<u8>)> {
     Ok((packet_ids::play::clientbound::ANIMATE, w.data))
 }
 
-/// 1.21.10 (and 1.21.9) to 1.21.11.
-mod v1_21_10 {
-    use super::*;
-
-    use crate::entity_data::{Value, serializer};
-
-    /// 1.21.10's packet in 1.21.11's layout; `None` when it is laid out alike. Its packets are 1.21.11's
-    /// but for `horse_screen_open`, which 1.21.11 renamed `mount_screen_open` (the id tables pair them).
-    pub fn clientbound(
-        _session: &Session,
-        _state: State,
-        _id: i32,
-        _payload: &[u8],
-    ) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Entity types (26.3 ids) whose entity data 1.21.11 changed.
-    const BEE: i32 = 11;
-    const WOLF: i32 = 152;
-    const MANNEQUIN: i32 = 84;
-    const PLAYER: i32 = 159;
-
-    /// 1.21.11 made the bee's and the wolf's anger end a LONG (an INT before) and an avatar's main arm a
-    /// HUMANOID_ARM (a BYTE before, with the same 0 left, 1 right). Indexes as 1.21.10 numbers them.
-    pub fn entity_data(session: &Session, data: &mut play::SetEntityData) {
-        let Some(kind) = session.kinds.lock().unwrap().get(&data.id).copied() else {
-            return;
-        };
-        for (index, ser, value) in &mut data.values {
-            match (kind, *index, &*value) {
-                (BEE, 18, Value::Int(v)) | (WOLF, 21, Value::Int(v)) => {
-                    *value = Value::Long(i64::from(*v));
-                    *ser = serializer::LONG;
-                }
-                (PLAYER | MANNEQUIN, 15, Value::Byte(v)) => {
-                    *value = Value::Id(i32::from(*v));
-                    *ser = serializer::HUMANOID_ARM;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 /// 1.21.11 to 26.1.
 mod v1_21_11 {
     use super::*;
@@ -760,7 +654,7 @@ mod v1_21_11 {
                 let entity = r.varint()?;
                 r.uuid()?;
                 let kind = r.varint()?;
-                if let Some(ids) = ids_of(session.version)
+                if let Some(ids) = session.version.ids()
                     && let Some(kind) = ids.entity_type.up(kind)
                 {
                     session.kinds.lock().unwrap().insert(entity, kind);
@@ -892,6 +786,46 @@ mod v1_21_11 {
         w.varint(1);
         w.bool(false);
         Ok(Some((INTERACT, w.data)))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_1_21_11_time_becomes_the_overworld_clock() {
+            let mut w = Writer::new();
+            w.i64(100);
+            w.i64(6000);
+            w.bool(false);
+            let body = set_time(&w.data).unwrap();
+            let p =
+                play::Clientbound::decode(packet_ids::play::clientbound::SET_TIME, &body).unwrap();
+            let play::Clientbound::SetTime(t) = p else {
+                panic!("{p:?}")
+            };
+            assert_eq!(t.game_time, 100);
+            assert_eq!((t.clocks[0].clock, t.clocks[0].total_ticks), (0, 6000));
+            assert_eq!(t.clocks[0].rate, 0.0); // the day time stands still
+        }
+
+        #[test]
+        fn an_interaction_is_sent_as_interact_at_then_interact() {
+            let session = Session::new(ServerVersion::V1_21_11);
+            let mut w = Writer::new();
+            w.varint(9); // entity
+            w.varint(1); // off hand
+            crate::buf::LpVec3::write(&[0.5, 1.0, 0.0], &mut w);
+            w.bool(true);
+            let (id, first) = interact(&session, &w.data).unwrap().unwrap();
+            assert_eq!(id, INTERACT);
+            let mut r = Reader::new(&first);
+            assert_eq!((r.varint().unwrap(), r.varint().unwrap()), (9, 2)); // INTERACT_AT
+            assert!((r.f32().unwrap() - 0.5).abs() < 0.01); // LpVec3 is approximate
+            let then = session.take_outgoing();
+            // INTERACT (action 0) with the off hand, sneaking.
+            assert_eq!(then, vec![vec![INTERACT as u8, 9, 0, 1, 1]]);
+        }
     }
 }
 
@@ -1071,25 +1005,21 @@ mod tests {
     use super::*;
 
     fn ids() -> &'static Ids {
-        ids_of(ServerVersion::V26_2).unwrap()
+        super::super::ServerVersion::V26_2.ids().unwrap()
     }
 
     #[test]
-    fn the_26_2_tables_match_the_reports() {
-        // Read off both versions' registries and blocks reports by hand.
+    fn a_26_2_chunk_section_on_the_global_palette_is_repacked_wider() {
         let ids = ids();
-        assert_eq!(ids.item.up(926), Some(1012)); // diamond
-        assert_eq!(ids.item.up(1), Some(1)); // stone
-        assert_eq!(ids.block_state.up(13330), Some(15177)); // oak_slab type=top waterlogged=true
-        assert_eq!(ids.block_state.up(3987), Some(5543)); // chest, first state
-        assert_eq!(ids.block_state.up(8), Some(8)); // grass_block
-        assert_eq!(ids.state_bits(), (15, 16));
-        assert_eq!(
-            ids.entity_type
-                .down(packet_ids_entity::FALLING_BLOCK)
-                .and_then(|o| ids.entity_type.up(o)),
-            Some(packet_ids_entity::FALLING_BLOCK)
-        );
+        // Every block a different state from 0..4096: past 8 bits, so the global palette at 15 bits.
+        let values: Vec<i32> = (0..4096).map(|i| 13000 + i).collect();
+        let old = Paletted::from_values(&values, Strategy::Blocks, 15);
+        assert_eq!(old.bits, 15);
+        let new = renumber_states(ids, &old, 16);
+        assert_eq!(new.bits, 16);
+        // oak_slab's first state, 13330 in 26.2, is 15177 in 26.3.
+        assert_eq!(new.get(330), 15177);
+        assert_eq!(new.get(0), ids.block_state.up(13000).unwrap());
     }
 
     #[test]
@@ -1152,16 +1082,59 @@ mod tests {
     }
 
     #[test]
-    fn a_26_2_chunk_section_on_the_global_palette_is_repacked_wider() {
+    fn falling_blocks_are_known_in_both_numberings() {
         let ids = ids();
-        // Every block a different state from 0..4096: past 8 bits, so the global palette at 15 bits.
-        let values: Vec<i32> = (0..4096).map(|i| 13000 + i).collect();
-        let old = Paletted::from_values(&values, Strategy::Blocks, 15);
-        assert_eq!(old.bits, 15);
-        let new = renumber_states(ids, &old, 16);
-        assert_eq!(new.bits, 16);
-        // oak_slab's first state, 13330 in 26.2, is 15177 in 26.3.
-        assert_eq!(new.get(330), 15177);
-        assert_eq!(new.get(0), ids.block_state.up(13000).unwrap());
+        assert_eq!(
+            ids.entity_type
+                .down(packet_ids_entity::FALLING_BLOCK)
+                .and_then(|o| ids.entity_type.up(o)),
+            Some(packet_ids_entity::FALLING_BLOCK)
+        );
+    }
+
+    #[test]
+    fn a_26_2_light_mask_of_longs_becomes_26_3s_bytes() {
+        let mut w = Writer::new();
+        w.varint(3);
+        w.varint(-2);
+        // Sky mask: sections 0 and 2 (one long, 0b101); block mask: section 9 (bit 9); both empty masks none.
+        for mask in [&[0b101_i64][..], &[1 << 9], &[], &[]] {
+            w.varint(mask.len() as i32);
+            mask.iter().for_each(|&l| w.i64(l));
+        }
+        w.varint(0);
+        w.varint(0);
+        let body = light_update(&w.data).unwrap();
+        let p =
+            play::Clientbound::decode(packet_ids::play::clientbound::LIGHT_UPDATE, &body).unwrap();
+        let play::Clientbound::LightUpdate(l) = p else {
+            panic!("{p:?}");
+        };
+        assert_eq!((l.x, l.z), (3, -2));
+        assert_eq!(l.light.sky_mask, vec![0b101]);
+        assert_eq!(l.light.block_mask, vec![0, 0b10]);
+        assert!(l.light.empty_sky_mask.is_empty());
+    }
+
+    #[test]
+    fn a_26_3_destroy_direction_change_is_not_sent_to_26_2() {
+        let session = Session::new(super::super::ServerVersion::V26_2);
+        let action = |n: i32| {
+            let mut w = Writer::new();
+            w.varint(n);
+            w.i64(0);
+            w.u8(1);
+            serverbound(
+                &session,
+                State::Play,
+                packet_ids::play::serverbound::PLAYER_ACTION,
+                &w.data,
+            )
+            .unwrap()
+            .map(|(_, payload)| payload[0])
+        };
+        assert_eq!(action(0), Some(0)); // start destroying
+        assert_eq!(action(1), None); // change_destroy_direction, new in 26.3
+        assert_eq!(action(3), Some(2)); // stop destroying: 3 in 26.3, 2 in 26.2
     }
 }
