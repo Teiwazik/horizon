@@ -927,7 +927,6 @@ impl NativeMaterial {
             displaced.map_or(0.0, |d| f64::from(d.distance)),
         ));
         if let Some(d) = displaced {
-            constants.push(("horizon_displace_cells", f64::from(d.cells)));
             constants.push(("horizon_displace_steps", f64::from(u8::from(d.steps))));
         }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1029,96 +1028,99 @@ impl NativeMaterial {
                 cache: None,
             })
         };
-        let pipeline = |layout: &wgpu::PipelineLayout,
-                        vertex: &str,
-                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-                        fragment: &str,
-                        blend: Option<wgpu::BlendState>| {
-            pipeline_in(layout, vertex, buffers, fragment, blend, Pass::Shaded)
-        };
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let instanced = layout(None);
         let buffers = [Some(vertices.clone()), Some(instances)];
-        let solid = pipeline(
-            &instanced,
-            "horizon_material_vs",
-            &buffers,
-            "horizon_material_fs_solid",
-            None,
-        );
-        let translucent = pipeline(
-            &instanced,
-            "horizon_material_vs",
-            &buffers,
-            "horizon_material_fs_translucent",
-            blend,
-        );
-        let flat = shape.flat.map(|group| {
-            let layout = layout(Some(group));
-            let buffers = [Some(vertices.clone())];
-            let vs = "horizon_material_vs_flat";
-            (
-                pipeline(&layout, vs, &buffers, "horizon_material_fs_solid", None),
-                pipeline(
-                    &layout,
-                    vs,
-                    &buffers,
-                    "horizon_material_fs_translucent",
-                    blend,
-                ),
-            )
-        });
-        let displaced_layout = displaced.map(|d| layout(Some(d.layout)));
-        let grid = |fragment, pass| {
-            displaced_layout.as_ref().map(|layout| {
-                pipeline_in(
-                    layout,
-                    "horizon_material_vs_displaced",
-                    &[],
-                    fragment,
-                    None,
-                    pass,
-                )
-            })
-        };
-        let displaced = grid("horizon_material_fs_displaced", Pass::Shaded);
         let flat_layout = shape.flat.map(|group| layout(Some(group)));
+        let displaced_layout = displaced.map(|d| layout(Some(d.layout)));
         let flat_vertices = [Some(vertices.clone())];
-        let flat_in = |fragment, pass| {
-            flat_layout.as_ref().map(|layout| {
-                pipeline_in(
-                    layout,
-                    "horizon_material_vs_flat",
-                    &flat_vertices,
-                    fragment,
-                    None,
-                    pass,
-                )
-            })
-        };
-        let prepass = Prepass {
-            depth: pipeline_in(
-                &instanced,
-                "horizon_material_vs",
-                &buffers,
-                "horizon_material_fs_depth",
-                None,
-                Pass::Depth,
-            ),
-            depth_flat: flat_in("horizon_material_fs_depth", Pass::Depth),
-            solid: pipeline_in(
-                &instanced,
-                "horizon_material_vs",
-                &buffers,
-                "horizon_material_fs_solid",
-                None,
-                Pass::After,
-            ),
-            flat: flat_in("horizon_material_fs_solid", Pass::After),
-        };
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(format!("{}: {e}", stage.file));
         }
+        // Each pipeline compiles the whole material for its entry points: the driver takes
+        // seconds over one tracing rays the first time it sees an option's value, so they are
+        // built on threads at once (wgpu's error scopes are each thread's own).
+        let checked = |make: &(dyn Fn() -> wgpu::RenderPipeline + Sync)| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let pipeline = make();
+            match pollster::block_on(scope.pop()) {
+                Some(e) => Err(format!("{}: {e}", stage.file)),
+                None => Ok(pipeline),
+            }
+        };
+        let instanced_in = |fragment: &str, blend, pass| {
+            pipeline_in(&instanced, "horizon_material_vs", &buffers, fragment, blend, pass)
+        };
+        let flat_in = |fragment: &str, blend, pass| {
+            flat_layout.as_ref().map(|layout| {
+                pipeline_in(layout, "horizon_material_vs_flat", &flat_vertices, fragment, blend, pass)
+            })
+        };
+        type Built = Result<wgpu::RenderPipeline, String>;
+        type Maybe = Result<Option<wgpu::RenderPipeline>, String>;
+        let one = |f: &(dyn Fn() -> wgpu::RenderPipeline + Sync)| -> Built { checked(f) };
+        let maybe = |f: &(dyn Fn() -> Option<wgpu::RenderPipeline> + Sync)| -> Maybe {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let pipeline = f();
+            match pollster::block_on(scope.pop()) {
+                Some(e) => Err(format!("{}: {e}", stage.file)),
+                None => Ok(pipeline),
+            }
+        };
+        let (solid, translucent, flat_solid, flat_translucent, displaced, depth, depth_flat, after, after_flat) =
+            std::thread::scope(|s| {
+                let solid = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::Shaded)));
+                let translucent = s.spawn(|| {
+                    one(&|| instanced_in("horizon_material_fs_translucent", blend, Pass::Shaded))
+                });
+                let flat_solid = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::Shaded)));
+                let flat_translucent = s.spawn(|| {
+                    maybe(&|| flat_in("horizon_material_fs_translucent", blend, Pass::Shaded))
+                });
+                let displaced = s.spawn(|| {
+                    maybe(&|| {
+                        displaced_layout.as_ref().map(|layout| {
+                            pipeline_in(
+                                layout,
+                                "horizon_material_vs_displaced",
+                                &[],
+                                "horizon_material_fs_displaced",
+                                None,
+                                Pass::Shaded,
+                            )
+                        })
+                    })
+                });
+                let depth = s.spawn(|| one(&|| instanced_in("horizon_material_fs_depth", None, Pass::Depth)));
+                let depth_flat = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_depth", None, Pass::Depth)));
+                let after = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::After)));
+                let after_flat = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::After)));
+                fn stopped<T>() -> Result<T, String> {
+                    Err("a material pipeline's build stopped".to_owned())
+                }
+                (
+                    solid.join().unwrap_or_else(|_| stopped()),
+                    translucent.join().unwrap_or_else(|_| stopped()),
+                    flat_solid.join().unwrap_or_else(|_| stopped()),
+                    flat_translucent.join().unwrap_or_else(|_| stopped()),
+                    displaced.join().unwrap_or_else(|_| stopped()),
+                    depth.join().unwrap_or_else(|_| stopped()),
+                    depth_flat.join().unwrap_or_else(|_| stopped()),
+                    after.join().unwrap_or_else(|_| stopped()),
+                    after_flat.join().unwrap_or_else(|_| stopped()),
+                )
+            });
+        let flat = match (flat_solid?, flat_translucent?) {
+            (Some(solid), Some(translucent)) => Some((solid, translucent)),
+            _ => None,
+        };
+        let (solid, translucent, displaced) = (solid?, translucent?, displaced?);
+        let prepass = Prepass {
+            depth: depth?,
+            depth_flat: depth_flat?,
+            solid: after?,
+            flat: after_flat?,
+        };
         Ok(Self {
             solid,
             translucent,

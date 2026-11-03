@@ -559,7 +559,6 @@ impl NativeShadow {
         ]);
         if let Some(g) = &grid {
             constants.push(("horizon_displace_distance", f64::from(g.distance)));
-            constants.push(("horizon_displace_cells", f64::from(g.cells)));
             constants.push(("horizon_displace_steps", f64::from(u8::from(g.steps))));
         }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

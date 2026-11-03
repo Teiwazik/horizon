@@ -9,6 +9,7 @@
 //! displaced pipeline draws one instance a quad.
 
 use crate::mesher::TerrainVertex;
+use wgpu::util::DeviceExt;
 
 /// The solid quads the grid can draw a frame, and the sections they come from.
 const MAX_QUADS: u64 = 1 << 16;
@@ -43,7 +44,7 @@ fn horizon_displaced_layer(layer: u32) -> bool {
 ";
 
 /// The grid's points (`horizon_displace_point`): one instance a quad the pick chose, its
-/// corners read from the copy of the arena, each of its `horizon_displace_cells` squared
+/// corners read from the copy of the arena, each of its band's cells (`horizon_displace_grid`) squared
 /// cells two triangles moved along the face's normal by the pack's `displacement`, measured
 /// from the texture's mean height so that the face's edges, pinned there, meet their
 /// neighbours whatever their relief. Needs `RELIEF`, the pack's `displacement` and
@@ -59,8 +60,8 @@ struct HorizonDisplaceSection {
 @group(1) @binding(8) var<storage, read> horizon_displace_vertices: array<u32>;
 @group(1) @binding(9) var<storage, read> horizon_displace_picked: array<vec2<u32>>;
 @group(1) @binding(10) var<storage, read> horizon_displace_sections: array<HorizonDisplaceSection>;
-// The grid's cells along a face's side.
-override horizon_displace_cells: u32 = 16u;
+// The grid's cells along a face's side: x, the band's (`Band`), fewer away from the eye.
+@group(1) @binding(11) var<uniform> horizon_displace_grid: vec4<u32>;
 // Each cell a flat step with walls to its neighbours (`grid_vertices`), not a smooth surface.
 override horizon_displace_steps: bool = false;
 struct HorizonDisplaceCorner {
@@ -136,7 +137,7 @@ fn horizon_displace_uv(q: HorizonDisplaceQuad, s: f32, t: f32) -> vec2<f32> {
 // How far cell (`i`, `j`) sinks: nothing outside the face, whose edges keep the mean height so
 // that they meet their neighbours.
 fn horizon_displace_cell_depth(q: HorizonDisplaceQuad, i: i32, j: i32) -> f32 {
-    let g = i32(horizon_displace_cells);
+    let g = i32(horizon_displace_grid.x);
     if i < 0 || j < 0 || i >= g || j >= g {
         return 0.0;
     }
@@ -160,7 +161,7 @@ fn horizon_displace_cell_depth(q: HorizonDisplaceQuad, i: i32, j: i32) -> f32 {
 // them, its flat top and its walls to the next cell along each side. A wall faces the way
 // out of the higher cell and takes that cell's texture.
 fn horizon_displace_step(v: u32, q: HorizonDisplaceQuad) -> HorizonDisplacePoint {
-    let g = horizon_displace_cells;
+    let g = horizon_displace_grid.x;
     let cell = v / 18u;
     let part = (v / 6u) % 3u;
     let i = i32(cell % (g + 1u)) - 1;
@@ -235,7 +236,7 @@ fn horizon_displace_point(v: u32, instance: u32) -> HorizonDisplacePoint {
             normalize(cross(c1.position - c0.position, c2.position - c0.position))));
     }
     // The cell's two triangles wind as the quad's (0, 1, 2) and (0, 2, 3).
-    let g = horizon_displace_cells;
+    let g = horizon_displace_grid.x;
     let cell = v / 6u;
     let k = v % 6u;
     let s = f32(cell % g + ((0x16u >> k) & 1u)) / f32(g);
@@ -277,7 +278,8 @@ struct Params {
     capacity: u32,
     // 1 for the shadow map's list: every side, wherever the eye looks.
     shadow: u32,
-    pad0: u32,
+    // The band's near edge: quads nearer belong to the band before.
+    inner: f32,
     pad1: u32,
     pad2: u32,
 }
@@ -340,7 +342,8 @@ fn outside(lo: vec3<f32>, hi: vec3<f32>) -> bool {
     let p3 = corner(quad, 3u, section.origin.xyz);
     let lo = min(min(p0, p1), min(p2, p3));
     let hi = max(max(p0, p1), max(p2, p3));
-    if length(clamp(vec3(0.0), lo, hi)) >= params.distance {
+    let nearest = length(clamp(vec3(0.0), lo, hi));
+    if nearest >= params.distance || nearest < params.inner {
         return;
     }
     // Facing away from the eye (at the origin), where the flat quad is culled too, or out of
@@ -367,7 +370,8 @@ struct Params {
     margin: f32,
     capacity: u32,
     shadow: u32,
-    pad: [u32; 3],
+    inner: f32,
+    pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -388,18 +392,38 @@ pub struct Near<'a> {
     pub origin: [f32; 3],
 }
 
-/// One list of picked quads and its indirect draw.
-pub struct Picks {
-    /// The grid's cells along a face's side.
-    pub cells: u32,
-    /// Each cell a flat step with walls.
-    pub steps: bool,
+/// The quads of one band of distances and their indirect draw.
+struct Band {
+    /// Its cells along a face's side.
+    cells: u32,
+    /// Its nearest quads' distance, and how far it goes.
+    inner: f32,
+    outer: f32,
     params: wgpu::Buffer,
     /// The indirect draw: the grid's vertices, then the quads picked.
     draw: wgpu::Buffer,
     pick_group: wgpu::BindGroup,
-    /// Group 1 of the pipelines drawing it (bindings 8 to 10).
-    pub draw_group: wgpu::BindGroup,
+    /// Group 1 of the pipelines drawing it (bindings 8 to 11).
+    draw_group: wgpu::BindGroup,
+}
+
+/// One list of picked quads (the eye's or the shadow map's), drawn in bands: the full grid
+/// near the eye, half its cells past `FAR_FROM` of the distance, where a cell is a few pixels
+/// and most of the quads lie (the vertices of every quad's grid were most of the cost).
+pub struct Picks {
+    /// The grid's cells along a face's side, near the eye.
+    pub cells: u32,
+    /// Each cell a flat step with walls.
+    pub steps: bool,
+    bands: Vec<Band>,
+}
+
+/// Where the coarser band starts, as a share of `[displacement] distance`.
+const FAR_FROM: f32 = 0.5;
+
+/// The cells of the band past `FAR_FROM`: half, but no fewer than 8.
+fn far_cells(cells: u32) -> u32 {
+    (cells / 2).max(8).min(cells)
 }
 
 pub struct Displacement {
@@ -515,12 +539,22 @@ impl Displacement {
                 storage(8, true, vertex),
                 storage(9, true, vertex),
                 storage(10, true, vertex),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: vertex,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource }
         }
-        let picks = |cells: u32| {
+        let band = |cells: u32, inner: f32, outer: f32| {
             let params = buffer(
                 "Displacement parameters",
                 std::mem::size_of::<Params>() as u64,
@@ -532,6 +566,11 @@ impl Displacement {
                 16,
                 U::STORAGE | U::INDIRECT | U::COPY_DST,
             );
+            let grid = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Displacement grid"),
+                contents: bytemuck::cast_slice(&[cells, 0, 0, 0]),
+                usage: U::UNIFORM,
+            });
             let pick_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Displacement pick"),
                 layout: &pick_layout,
@@ -551,15 +590,31 @@ impl Displacement {
                     entry(8, vertices.as_entire_binding()),
                     entry(9, picked.as_entire_binding()),
                     entry(10, sections.as_entire_binding()),
+                    entry(11, grid.as_entire_binding()),
                 ],
             });
-            Picks {
+            Band {
                 cells,
-                steps,
+                inner,
+                outer,
                 params,
                 draw,
                 pick_group,
                 draw_group,
+            }
+        };
+        let picks = |cells: u32| {
+            let far = far_cells(cells);
+            let bands = if far < cells {
+                let split = distance * FAR_FROM;
+                vec![band(cells, 0.0, split), band(far, split, distance)]
+            } else {
+                vec![band(cells, 0.0, distance)]
+            };
+            Picks {
+                cells,
+                steps,
+                bands,
             }
         };
         let view = picks(cells);
@@ -652,20 +707,23 @@ impl Displacement {
         });
         pass.set_pipeline(&self.pick);
         for (picks, shadow) in lists {
-            let params = Params {
-                view_proj: view_proj.to_cols_array_2d(),
-                distance: self.distance,
-                sections: table.len() as u32,
-                margin: RELIEF_MARGIN,
-                capacity: MAX_QUADS as u32,
-                shadow,
-                pad: [0; 3],
-            };
-            queue.write_buffer(&picks.params, 0, bytemuck::bytes_of(&params));
-            let vertices = grid_vertices(picks.cells, picks.steps);
-            queue.write_buffer(&picks.draw, 0, bytemuck::cast_slice(&[vertices, 0, 0, 0]));
-            pass.set_bind_group(0, &picks.pick_group, &[]);
-            pass.dispatch_workgroups(most.div_ceil(64), table.len() as u32, 1);
+            for band in &picks.bands {
+                let params = Params {
+                    view_proj: view_proj.to_cols_array_2d(),
+                    distance: band.outer,
+                    sections: table.len() as u32,
+                    margin: RELIEF_MARGIN,
+                    capacity: MAX_QUADS as u32,
+                    shadow,
+                    inner: band.inner,
+                    pad: [0; 2],
+                };
+                queue.write_buffer(&band.params, 0, bytemuck::bytes_of(&params));
+                let vertices = grid_vertices(band.cells, picks.steps);
+                queue.write_buffer(&band.draw, 0, bytemuck::cast_slice(&[vertices, 0, 0, 0]));
+                pass.set_bind_group(0, &band.pick_group, &[]);
+                pass.dispatch_workgroups(most.div_ceil(64), table.len() as u32, 1);
+            }
         }
     }
 
@@ -680,13 +738,22 @@ impl Displacement {
             return;
         }
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(1, &picks.draw_group, &[]);
-        pass.draw_indirect(&picks.draw, 0);
+        for band in &picks.bands {
+            pass.set_bind_group(1, &band.draw_group, &[]);
+            pass.draw_indirect(&band.draw, 0);
+        }
     }
 }
 
 #[cfg(test)]
 mod grid_vertices_tests {
+    #[test]
+    fn the_far_band_takes_half_the_cells_but_no_fewer_than_8() {
+        assert_eq!(super::far_cells(64), 32);
+        assert_eq!(super::far_cells(16), 8);
+        assert_eq!(super::far_cells(8), 8);
+        assert_eq!(super::far_cells(4), 4);
+    }
     #[test]
     fn a_stepped_grid_has_a_top_and_two_walls_a_cell_and_the_first_edges() {
         assert_eq!(super::grid_vertices(16, false), 16 * 16 * 6);
