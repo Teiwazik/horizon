@@ -5063,7 +5063,7 @@ mod tests {
         particle.sprite = Sprite::Index(0);
         engine.particles.push(particle);
         let mut vertices = Vec::new();
-        engine.render(DVec3::ZERO, 0.0, 0.0, 0.0, &|_| 0, &mut vertices);
+        engine.render(DVec3::ZERO, 0.0, 0.0, 0.0, &|_| 0, false, &mut vertices);
         assert_eq!(vertices.len(), 4);
         assert!(vertices.iter().all(
             |v| v.color >> 24 == 127 && v.layer & crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY != 0

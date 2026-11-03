@@ -344,6 +344,8 @@ fn frame(hud: &HudBatch) -> Frame<'_> {
         skin: None,
         glowing: &[],
         dynamic_lights: &[],
+        dynamic_states: &[],
+        particle_lights: &[],
         clouds: None,
         lightning: Default::default(),
         additive: &[],
