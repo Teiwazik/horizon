@@ -6137,15 +6137,15 @@ impl Renderer {
         }
         laps.lap("r_prepare");
         // Frame generation: its present thread acquires and presents, this frame draws
-        // into frames of its own. Not over menus that blur the frame, a shader pack's
-        // own post passes, HDR or the title screen.
+        // into frames of its own. Not over menus that blur the frame, a `shaders/` pack's
+        // own post passes, HDR or the title screen. One of Horizon's own packs draws its
+        // picture into the frame generation's world.
         let fg = self.frame_gen.on
             && !self.frame_gen.paused
             && self.hdr.is_none()
             && !frame.title
             && frame.menu_blur.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.as_ref().is_none_or(|n| n.post.is_none())
             && (self.surface.is_none()
                 || self.config.usage.contains(wgpu::TextureUsages::COPY_DST));
         if !fg {
@@ -9260,11 +9260,16 @@ impl Renderer {
             let history_reset = native.frame.take_history_reset();
             // Under an upscaling mode the pack draws at the world's size and TAA rebuilds it.
             let packed = self.world_post.pack_output().cloned();
+            // Under frame generation the picture goes to its world, which makes the frames.
+            let fg_world = fg_frames
+                .as_ref()
+                .map(|_| self.frame_gen.world(&self.device, &self.world_post, &self.config));
+            let shown = fg_world.as_ref().unwrap_or(&view_target);
             post.run(
                 &self.device,
                 &mut encoder,
                 (color, depth, &native.frame.surface_view),
-                packed.as_ref().unwrap_or(&view_target),
+                packed.as_ref().unwrap_or(shown),
                 size,
                 history_reset,
                 native.timing.as_mut(),
@@ -9275,19 +9280,25 @@ impl Renderer {
                     .map(|rays| (&self.group, rays, &native.frame.albedo_view)),
             );
             if packed.is_some() {
-                self.world_post.finish(
-                    &self.queue,
-                    &mut encoder,
-                    &view_target,
-                    native.timing.as_mut(),
-                );
+                self.world_post
+                    .finish(&self.queue, &mut encoder, shown, native.timing.as_mut());
             }
-        } else if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
+        } else if fg_frames.is_some() && scaled.is_some() {
             let world = self
                 .frame_gen
                 .world(&self.device, &self.world_post, &self.config);
             self.world_post
                 .finish(&self.queue, &mut encoder, &world, self.own_timing.as_mut());
+        } else if scaled.is_some() {
+            self.world_post.finish(
+                &self.queue,
+                &mut encoder,
+                &view_target,
+                self.own_timing.as_mut(),
+            );
+        }
+        // Frame generation: the real frame from its world, and the made one between.
+        if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
             let camera = frame_gen::Camera {
                 jittered,
                 view_proj,
@@ -9325,13 +9336,6 @@ impl Renderer {
                 };
                 self.draw_overlay(&mut encoder, frame, &generated_view, generated, &overlay);
             }
-        } else if scaled.is_some() {
-            self.world_post.finish(
-                &self.queue,
-                &mut encoder,
-                &view_target,
-                self.own_timing.as_mut(),
-            );
         }
         if !frame.title {
             let (depth, depth_size) = match &scaled {
