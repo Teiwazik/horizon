@@ -173,6 +173,8 @@ pub(crate) mod upload;
 mod view;
 mod wgsl_prefix;
 mod world_post;
+#[cfg(feature = "dlss")]
+mod dlss;
 
 /// A section's instance: its camera-relative origin and, in `w`, the step of
 /// its fixed-point UVs (`terrain.wgsl`'s `terrain_uv`).
@@ -1816,11 +1818,12 @@ async fn open_backend(
     allow_cpu: bool,
 ) -> std::result::Result<Opened, NoDevice> {
     let name = backends_name(backends);
-    let instance = wgpu::Instance::new(instance_descriptor(
-        backends,
-        Some(window),
-        allow_nonconformant,
-    ));
+    let descriptor = instance_descriptor(backends, Some(window), allow_nonconformant);
+    #[cfg(feature = "dlss")]
+    let instance = dlss::create_instance(&descriptor, Some(window))
+        .unwrap_or_else(|| wgpu::Instance::new(descriptor));
+    #[cfg(not(feature = "dlss"))]
+    let instance = wgpu::Instance::new(descriptor);
     let surface = if offscreen {
         None
     } else {
@@ -1915,11 +1918,18 @@ async fn open_backend(
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     };
-    #[cfg(not(target_os = "macos"))]
-    let opened = match info.backend {
-        wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(&adapter, &desc),
+    #[cfg(feature = "dlss")]
+    let dlss_opened = match info.backend {
+        wgpu::Backend::Vulkan => dlss::open_device(&adapter, &desc),
         _ => None,
     };
+    #[cfg(not(feature = "dlss"))]
+    let dlss_opened = None;
+    #[cfg(not(target_os = "macos"))]
+    let opened = dlss_opened.or_else(|| match info.backend {
+        wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(&adapter, &desc),
+        _ => None,
+    });
     #[cfg(target_os = "macos")]
     let opened = None;
     let opened = match opened {
@@ -4070,7 +4080,10 @@ impl Renderer {
                 cull
             });
         let depth = Self::depth(&device, &config);
-        let world_post = world_post::Post::new(&device, config.format.remove_srgb_suffix());
+        #[allow(unused_mut)]
+        let mut world_post = world_post::Post::new(&device, config.format.remove_srgb_suffix());
+        #[cfg(feature = "dlss")]
+        world_post.enable_dlss(&device, &adapter);
         let uploads = upload::Uploads::new(&device);
         let section_uploads = upload::Uploads::with_chunk(&device, SECTION_UPLOAD_CHUNK);
         let stars = stars::Stars::new(&device, config.format.remove_srgb_suffix());

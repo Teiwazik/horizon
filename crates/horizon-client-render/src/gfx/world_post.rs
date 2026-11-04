@@ -91,6 +91,9 @@ pub struct Post {
     /// The last TAA frame's unjittered `view_proj` and camera, `None` once a frame ran without it.
     taa_previous: Option<(DMat4, DVec3)>,
     taa_this_frame: TaaUniform,
+    /// NVIDIA DLSS in place of TAA's resolve, when the build has it and it started.
+    #[cfg(feature = "dlss")]
+    dlss: Option<super::dlss::Dlss>,
 }
 
 impl Post {
@@ -292,6 +295,8 @@ impl Post {
             taa_frame: 0,
             taa_previous: None,
             taa_this_frame: bytemuck::Zeroable::zeroed(),
+            #[cfg(feature = "dlss")]
+            dlss: None,
         }
     }
 
@@ -546,10 +551,60 @@ impl Post {
         })
     }
 
+    /// Use DLSS in place of TAA's resolve from now on, when NGX started on this device.
+    #[cfg(feature = "dlss")]
+    pub fn enable_dlss(&mut self, device: &wgpu::Device, adapter: &wgpu::Adapter) {
+        if self.dlss.is_none() {
+            self.dlss = super::dlss::Dlss::new(device, adapter);
+        }
+    }
+
+    /// DLSS's picture of this frame, when it runs: everything `encoder` held is submitted
+    /// before it, and `encoder` continues after.
+    #[cfg(feature = "dlss")]
+    fn dlss(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        motion: Option<&wgpu::TextureView>,
+    ) -> Option<wgpu::BindGroup> {
+        let target = self.target.as_ref()?;
+        let taa = target.taa.as_ref()?;
+        let res = self.taa_resources.as_ref()?;
+        let hdr = self.format == wgpu::TextureFormat::Rgba16Float;
+        let dlss = self.dlss.as_mut()?;
+        if !dlss.ready(device, queue, taa.size, target.size, self.upscale, hdr) {
+            return None;
+        }
+        let j = self.taa_this_frame.jitter;
+        let reset = j[2] > 0.0 || self.taa_previous.is_none();
+        let jitter_pixels = [
+            j[0] * target.size[0] as f32 / 2.0,
+            -j[1] * target.size[1] as f32 / 2.0,
+        ];
+        let out = dlss.run(
+            device,
+            queue,
+            encoder,
+            &taa.input,
+            &taa.depth,
+            motion.unwrap_or(&res.no_motion),
+            target.size,
+            super::dlss::MotionUniform {
+                reproject: self.taa_this_frame.reproject,
+                jitter: j,
+            },
+            jitter_pixels,
+            reset,
+        )?;
+        Some(self.bind(device, &out))
+    }
+
     /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on;
     /// `motion`: what moves on its own this frame (`frame_gen::FrameGen::object_motion`).
     pub fn finish(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -557,6 +612,18 @@ impl Post {
         mut timing: Option<&mut super::pack_timing::PassTiming>,
         motion: Option<&wgpu::TextureView>,
     ) {
+        #[cfg(feature = "dlss")]
+        if self.taa_on
+            && let Some(group) = self.dlss(device, queue, encoder, motion)
+        {
+            let pipeline = if self.upscale > 1.0 {
+                &self.sharpen
+            } else {
+                &self.copy
+            };
+            self.draw_onto(encoder, screen, &group, pipeline, timing);
+            return;
+        }
         let Some(target) = &self.target else { return };
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
             self.finish_with(encoder, screen, &target.group, timing.as_deref_mut());

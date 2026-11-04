@@ -108,6 +108,8 @@ winresource = "0.1"
 
 [features]
 default = ["audio", "controllers"]
+# NVIDIA DLSS (a local build): horizon-client-render's `dlss`.
+dlss = ["horizon-client-render/dlss"]
 # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
 # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).
 audio = ["horizon-client-render/audio", "horizon-client-lib/audio"]

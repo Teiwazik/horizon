@@ -69,9 +69,15 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# NVIDIA DLSS (the `dlss` feature, a local build's): needs NVIDIA's SDK at build time (`DLSS_SDK`).
+dlss_wgpu = { version = "6", optional = true }
+
 [features]
 # Sound output: horizon-client's `audio` feature.
 audio = ["dep:cpal"]
+# NVIDIA DLSS Super Resolution in place of TAA's upscaling (HORIZON_DLSS=1).
+dlss = ["dep:dlss_wgpu", "horizon-hdr/dlss"]
 # Helpers horizon-client's tests build their fixtures with.
 test-support = []
 
