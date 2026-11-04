@@ -279,6 +279,15 @@ impl Game<'_> {
     /// `ClientLevel.addEntity` for a server's lightning bolt: on a client it
     /// only flashes, sounds and draws (`LightningBolt.tick` off the server).
     pub(super) fn spawn_remote_bolt(&mut self, id: u32, at: [f64; 3]) {
+        if let Some(p) = &self.player {
+            let d = [
+                p.position.x - at[0],
+                p.position.y - at[1],
+                p.position.z - at[2],
+            ];
+            let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            self.pad_rumble(horizon_client::gamepad::Rumble::Thunder(distance));
+        }
         self.bolts.retain(|b| b.id != id);
         let r = &mut self.world.random;
         let seed = r.next_long();

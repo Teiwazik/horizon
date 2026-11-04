@@ -5964,7 +5964,6 @@ impl Game<'_> {
         if canceled {
             return Ok(());
         }
-        self.pad_rumble(horizon_client::gamepad::Rumble::BlockBroken);
         let broken = state;
         let facts = self.res.facts().get(state).clone();
         let state = self.crack_mined_pot(pos, state);

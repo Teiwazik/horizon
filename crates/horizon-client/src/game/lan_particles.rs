@@ -468,6 +468,18 @@ impl Game<'_> {
             self.particles
                 .track_explosion(p.center, p.radius, p.block_count.max(0) as usize);
         }
+        if let Some(pl) = &self.player {
+            let d = [
+                pl.position.x - p.center[0],
+                pl.position.y - p.center[1],
+                pl.position.z - p.center[2],
+            ];
+            let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            self.pad_rumble(horizon_client::gamepad::Rumble::Explosion {
+                distance,
+                radius: p.radius,
+            });
+        }
         // Entity.pushFromExplosion.
         if let (Some(push), Some(player)) = (p.knockback, self.player.as_mut()) {
             player.velocity = Vec3::new(

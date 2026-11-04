@@ -17,4 +17,7 @@ impl Haptics {
 
     /// Stop at once. Nothing plays on iOS.
     pub fn stop(&self) {}
+
+    /// The ambience under the effects. Nothing plays on iOS.
+    pub fn set_water(&self, _level: f32) {}
 }

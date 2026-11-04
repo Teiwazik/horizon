@@ -320,6 +320,7 @@ impl Game<'_> {
             self.pad.devices.output = Some(horizon_dualsense::Link::start());
         }
         self.pad_haptics();
+        self.pad_ambience();
         self.pad_show();
         let now = Instant::now();
         self.pad.devices.rumbles.retain(|(_, end)| *end > now);
@@ -457,6 +458,24 @@ impl Game<'_> {
                 self.pad.devices.haptics = horizon_dualsense::haptics::Haptics::open();
             }
         }
+    }
+
+    /// What the HD haptics feel between effects: the water around the player's head.
+    fn pad_ambience(&mut self) {
+        let Some(haptics) = self.pad.devices.haptics.as_ref() else {
+            return;
+        };
+        let playing = self.focused
+            && self.title.is_none()
+            && self.screen == Screen::Playing
+            && !self.pause
+            && self.settings.controller.vibration;
+        let under = playing
+            && self.player.as_ref().is_some_and(|p| {
+                let eye = p.position.y + f64::from(p.dimensions.eye_height);
+                self.eye_in_water(p.position.x, eye, p.position.z)
+            });
+        haptics.set_water(if under { 1.0 } else { 0.0 });
     }
 
     /// Release the DualSense's output (the game is quitting).

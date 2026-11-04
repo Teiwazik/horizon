@@ -3973,6 +3973,10 @@ impl Game<'_> {
                 if p.event == 0 {
                     self.remote_arrow_puff(p.id as u32);
                 }
+                // LivingEntity.handleEntityEvent 29: this player's shield took a hit.
+                if p.event == 29 && self.remote.as_ref().is_some_and(|r| r.entity_id == p.id) {
+                    self.pad_rumble(horizon_client::gamepad::Rumble::ShieldBlock);
+                }
                 // LivingEntity.handleEntityEvent 2: a spear's hit felt.
                 if p.event == 2 {
                     self.remote_kinetic_hit(p.id);
@@ -7173,6 +7177,7 @@ impl Game<'_> {
     }
     /// MultiPlayerGameMode.destroyBlock: the predicted break.
     fn predict_break(&mut self, pos: [i32; 3], state: BlockStateId, sequence: i32) {
+        self.pad_rumble(horizon_client::gamepad::Rumble::BlockBroken);
         self.tutorial_destroy(state, 1.0);
         // BlockStatePredictionHandler.retainKnownServerState.
         if let Some(r) = self.remote.as_mut() {
@@ -8639,6 +8644,8 @@ impl Game<'_> {
                     id: self.mobs[i].id as i32,
                 }));
                 self.remote_player_attack(i);
+                let charge = self.attack_strength_scale();
+                self.pad_rumble(horizon_client::gamepad::Rumble::Attack(charge));
                 self.reset_attack_strength();
             }
         } else if !self.entity_targeted()
@@ -8878,6 +8885,12 @@ impl Game<'_> {
             self.with_hand(hand, |g| {
                 if !g.use_item_stopped(&stack, ticks) {
                     return;
+                }
+                if &*stack.item == "minecraft:bow" {
+                    // BowItem.getPowerForTime.
+                    let t = g.ticks_held(&stack, ticks) as f32 / 20.0;
+                    let power = ((t * t + t * 2.0) / 3.0).min(1.0);
+                    g.pad_rumble(horizon_client::gamepad::Rumble::Shot(power));
                 }
                 if &*stack.item == "minecraft:trident" {
                     g.release_trident(g.ticks_held(&stack, ticks));

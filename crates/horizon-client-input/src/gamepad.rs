@@ -933,6 +933,14 @@ pub enum Rumble {
         radius: f32,
     },
     Totem,
+    /// A melee hit landed, with the attack's charge (0..1).
+    Attack(f32),
+    /// The raised shield took a hit.
+    ShieldBlock,
+    /// A bow let go at this power (0..1).
+    Shot(f32),
+    /// Lightning struck this far away (blocks).
+    Thunder(f64),
 }
 /// A vibration: the heavy (low-frequency) and light motors, 0..1, and how
 /// long it lasts.
@@ -949,6 +957,10 @@ impl Rumble {
             Rumble::BlockBroken => "block",
             Rumble::Explosion { .. } => "explosion",
             Rumble::Totem => "totem",
+            Rumble::Attack(_) => "attack",
+            Rumble::ShieldBlock => "shield",
+            Rumble::Shot(_) => "shot",
+            Rumble::Thunder(_) => "thunder",
         }
     }
     /// The pulse, or `None` when it is too faint to feel.
@@ -962,9 +974,33 @@ impl Rumble {
             Rumble::Hurt(_) => None,
             Rumble::BlockBroken => Some(Pulse {
                 strong: 0.0,
-                weak: 0.25,
+                weak: 0.45,
                 millis: 60,
             }),
+            Rumble::Attack(charge) => Some(Pulse {
+                strong: 0.15 + 0.35 * charge.clamp(0.0, 1.0),
+                weak: 0.35,
+                millis: 90,
+            }),
+            Rumble::ShieldBlock => Some(Pulse {
+                strong: 0.55,
+                weak: 0.2,
+                millis: 120,
+            }),
+            Rumble::Shot(power) => (power >= 0.1).then_some(Pulse {
+                strong: 0.1,
+                weak: 0.3 + 0.4 * power.min(1.0),
+                millis: 80,
+            }),
+            Rumble::Thunder(distance) => {
+                // Felt within 64 blocks, a rumble that fades with distance.
+                let near = (1.0 - distance / 64.0) as f32;
+                (near > 0.05).then_some(Pulse {
+                    strong: 0.7 * near,
+                    weak: 0.2 * near,
+                    millis: 600,
+                })
+            }
             Rumble::Explosion { distance, radius } => {
                 // Felt up to four times the blast radius, fading with distance.
                 let reach = f64::from(radius.max(1.0)) * 4.0;
@@ -995,7 +1031,16 @@ impl Rumble {
             millis,
         };
         match self {
-            Rumble::BlockBroken => vec![Pulse { millis: 35, ..p }],
+            Rumble::BlockBroken => vec![Pulse { millis: 45, ..p }],
+            Rumble::Attack(_) | Rumble::Shot(_) => vec![step(1.0, 40), step(0.4, 50)],
+            Rumble::ShieldBlock => vec![step(1.0, 60), step(0.3, 60)],
+            Rumble::Thunder(_) => vec![
+                step(0.3, 60),
+                step(1.0, 120),
+                step(0.7, 160),
+                step(0.4, 160),
+                step(0.15, 100),
+            ],
             Rumble::Hurt(_) => {
                 let tail = p.millis.saturating_sub(50) / 2;
                 vec![step(1.0, 50), step(0.55, tail), step(0.25, tail)]
@@ -1584,7 +1629,7 @@ mod tests {
             Rumble::Totem.shape().iter().map(|s| s.millis).sum::<u32>(),
             500
         );
-        assert_eq!(Rumble::BlockBroken.shape()[0].millis, 35);
+        assert_eq!(Rumble::BlockBroken.shape()[0].millis, 45);
         assert!(Rumble::Hurt(0.0).shape().is_empty());
     }
 
