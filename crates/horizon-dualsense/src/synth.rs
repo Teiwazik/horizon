@@ -111,6 +111,14 @@ pub type Feed = Arc<Mutex<VecDeque<[f32; 2]>>>;
 /// Tuned on the pad by hand: an emphasis of 3 was harsh and clipped.
 pub const SOUND_GAIN: f32 = 2.0;
 pub const SOUND_EMPHASIS: f32 = 1.8;
+/// Quiet sounds (rain, the water's hum) are lifted toward this level, up to `MAX_BOOST` times,
+/// following the loudest of the last 0.3 s; loud ones keep their own.
+const BOOST_TARGET: f32 = 0.6;
+const MAX_BOOST: f32 = 5.0;
+const BOOST_RELEASE: f32 = 0.3;
+/// The feed's frames kept ahead: play starts once this many wait (the mixer hands them over in
+/// bursts of a buffer), and more than twice as many are dropped down to it (the two clocks drift).
+const PRIME: usize = 96;
 
 /// What the actuators play: the queued effect over the ambience and the game's sounds.
 pub struct Voice {
@@ -123,6 +131,10 @@ pub struct Voice {
     last: [f32; 2],
     /// Frames played since the feed last had any.
     starved: u32,
+    /// Waiting for `PRIME` frames before playing the feed again.
+    buffering: bool,
+    /// The sound's recent peak, for the boost.
+    envelope: f32,
 }
 
 impl Voice {
@@ -135,6 +147,8 @@ impl Voice {
             feed: None,
             last: [0.0; 2],
             starved: u32::MAX,
+            buffering: true,
+            envelope: 0.0,
         }
     }
 
@@ -174,16 +188,31 @@ impl Voice {
     pub fn next(&mut self) -> [f32; 2] {
         let effect = self.queue.pop_front().unwrap_or_default();
         let [a, b] = self.ambience.next(self.water);
-        let sound = self.feed.as_ref().and_then(|f| f.lock().ok()?.pop_front());
+        let buffering = &mut self.buffering;
+        let sound = self.feed.as_ref().and_then(|f| {
+            let mut f = f.lock().ok()?;
+            if *buffering && f.len() < PRIME {
+                return None;
+            }
+            if f.len() > PRIME * 2 {
+                let extra = f.len() - PRIME;
+                f.drain(..extra);
+            }
+            let frame = f.pop_front();
+            *buffering = frame.is_none();
+            frame
+        });
         let felt = match sound {
             Some(frame) => {
                 self.starved = 0;
-                let felt = [0, 1].map(|i| {
-                    let lifted = frame[i] + SOUND_EMPHASIS * (frame[i] - self.last[i]);
-                    (lifted * SOUND_GAIN).tanh()
-                });
+                let lifted = [0, 1]
+                    .map(|i| (frame[i] + SOUND_EMPHASIS * (frame[i] - self.last[i])) * SOUND_GAIN);
                 self.last = frame;
-                felt
+                let peak = lifted[0].abs().max(lifted[1].abs());
+                let release = (-1.0 / (BOOST_RELEASE * self.rate as f32)).exp();
+                self.envelope = peak.max(self.envelope * release);
+                let boost = (BOOST_TARGET / self.envelope.max(1e-6)).clamp(1.0, MAX_BOOST);
+                lifted.map(|v| (v * boost).tanh())
             }
             None => {
                 self.starved = self.starved.saturating_add(1);
@@ -268,20 +297,51 @@ mod tests {
         let mut v = Voice::new(BT_HAPTICS_RATE);
         v.set_feed(Some(feed.clone()));
         assert!(!v.active());
-        feed.lock().unwrap().extend([[0.5, 0.0], [0.5, 0.0]]);
+        // Not before PRIME frames wait.
+        feed.lock().unwrap().extend([[0.5, 0.0]; PRIME - 1]);
         assert!(v.active());
-        // A step: lifted at its edge, then the level alone, both rounded by tanh.
-        let first = v.next();
-        assert!((first[0] - (0.5f32 * 2.8 * 2.0).tanh()).abs() < 1e-6);
-        assert!((v.next()[0] - 1.0f32.tanh()).abs() < 1e-6);
         assert_eq!(v.next(), [0.0; 2]);
-        // It rests after a tenth of a second of silence.
+        feed.lock().unwrap().push_back([0.5, 0.0]);
+        // A loud step: lifted at its edge, then the level alone, rounded by tanh, not boosted.
+        assert!((v.next()[0] - 2.8f32.tanh()).abs() < 1e-6);
+        assert!((v.next()[0] - 1.0f32.tanh()).abs() < 1e-6);
+        for _ in 2..PRIME {
+            v.next();
+        }
+        // Emptied: silence, and it rests after a tenth of a second of it.
+        assert_eq!(v.next(), [0.0; 2]);
         let mut n = 1;
         while v.active() {
             v.next();
             n += 1;
         }
         assert_eq!(n, 300);
+    }
+
+    #[test]
+    fn quiet_sounds_are_boosted_and_a_late_feed_drops_its_backlog() {
+        let feed = Feed::default();
+        let mut v = Voice::new(BT_HAPTICS_RATE);
+        v.set_feed(Some(feed.clone()));
+        // Rain-like: a quiet hiss, raised once the envelope settles.
+        let quiet: Vec<[f32; 2]> = (0..PRIME * 2)
+            .map(|i| if i % 2 == 0 { [0.02; 2] } else { [-0.02; 2] })
+            .collect();
+        feed.lock().unwrap().extend(&quiet);
+        let out: Vec<f32> = (0..PRIME * 2).map(|_| v.next()[0].abs()).collect();
+        // 0.02 swinging by 0.04 each frame: 0.092 lifted, 0.184 doubled, then raised to the
+        // target level (about 3.3 times).
+        assert!(
+            (out[PRIME] - BOOST_TARGET.tanh()).abs() < 1e-3,
+            "{}",
+            out[PRIME]
+        );
+        // Three primes queued: two are dropped, one is kept.
+        feed.lock()
+            .unwrap()
+            .extend(std::iter::repeat_n([0.1; 2], PRIME * 3));
+        v.next();
+        assert_eq!(feed.lock().unwrap().len(), PRIME - 1);
     }
 
     #[test]

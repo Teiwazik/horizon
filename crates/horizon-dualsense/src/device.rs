@@ -489,10 +489,10 @@ impl Writer {
         let period = Duration::from_secs_f64(
             crate::synth::BT_HAPTICS_FRAMES as f64 / f64::from(crate::synth::BT_HAPTICS_RATE),
         );
-        // Again every half second while it plays: the kernel's rumble can take them back any time.
+        // Again every 5 s while it plays: the kernel's rumble can take them back any time.
         let reclaim = self
             .reclaimed
-            .is_none_or(|at| at.elapsed() >= Duration::from_millis(500));
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(5));
         if self.next_haptics.is_none() || reclaim {
             self.reclaimed = Some(Instant::now());
             // A report with the haptics-select flag (the kernel's rumble, another host's) leaves
