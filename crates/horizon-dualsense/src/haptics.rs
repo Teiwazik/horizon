@@ -46,7 +46,7 @@ impl Haptics {
                     let level = f32::from_bits(target.load(Ordering::Relaxed));
                     let mut queue = source.lock().unwrap_or_else(|e| e.into_inner());
                     for frame in data.chunks_mut(4) {
-                        let [left, right] = queue.pop_front().unwrap_or_default();
+                        let [left, right]: [f32; 2] = queue.pop_front().unwrap_or_default();
                         let [a, b] = ambience.next(level);
                         frame.copy_from_slice(&[
                             0.0,
