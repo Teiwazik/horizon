@@ -16123,11 +16123,16 @@ impl Game<'_> {
     /// `Screen.extractBlurredBackground` over the panorama or the world and
     /// HUD, when `menuBackgroundBlurriness` is at least 1.
     fn menu_blur(&self) -> Option<f32> {
-        let blurred = self.remote_loading()
-            || self.title.as_ref().is_some_and(|t| {
+        // No closure here: horizon-mixins injects into this function (Plasmo Voice).
+        let on_title = match &self.title {
+            Some(t) => {
                 matches!(self.screen, Screen::Options | Screen::Win)
                     || !matches!(t.mode, horizon_client::title::Mode::Main)
-            })
+            }
+            None => false,
+        };
+        let blurred = self.remote_loading()
+            || on_title
             || (self.title.is_none()
                 && self.player.is_some()
                 && (self.screen.blurs_background(self.pause_menu)
