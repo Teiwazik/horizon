@@ -728,6 +728,22 @@ impl Game<'_> {
             .iter()
             .filter(|m| m.distance_sqr(center) <= radius * radius)
             .map(|m| {
+                // Built apart: one json! this long passes the default recursion limit.
+                let villager = horizon_client::mobs::villager::ext(m).map(|e| serde_json::json!({
+                        "food_level": e.food_level,
+                        "inventory": e.inventory.iter().map(|s| format!("{}x{}", s.count, s.item)).collect::<Vec<_>>(),
+                        "gossips": e.gossips.len(),
+                        "last_slept": e.last_slept,
+                        "raid": e.raid,
+                    }));
+                let raider = horizon_client::mobs::raider::state(m).map(|s| serde_json::json!({
+                        "raid": s.raid_id,
+                        "wave": s.wave,
+                        "leader": s.patrol_leader,
+                        "patrolling": s.patrolling,
+                        "patrol_target": s.patrol_target,
+                        "vehicle": m.extra.mount,
+                    }));
                 let mut state = serde_json::json!({
                     "id": m.id,
                     "kind": m.kind.id,
@@ -763,21 +779,8 @@ impl Game<'_> {
                     "head": m.extra.head.as_deref(),
                     "body": m.extra.body.as_deref(),
                     "warden": horizon_client::mobs::warden::describe(m),
-                    "villager": horizon_client::mobs::villager::ext(m).map(|e| serde_json::json!({
-                        "food_level": e.food_level,
-                        "inventory": e.inventory.iter().map(|s| format!("{}x{}", s.count, s.item)).collect::<Vec<_>>(),
-                        "gossips": e.gossips.len(),
-                        "last_slept": e.last_slept,
-                        "raid": e.raid,
-                    })),
-                    "raider": horizon_client::mobs::raider::state(m).map(|s| serde_json::json!({
-                        "raid": s.raid_id,
-                        "wave": s.wave,
-                        "leader": s.patrol_leader,
-                        "patrolling": s.patrolling,
-                        "patrol_target": s.patrol_target,
-                        "vehicle": m.extra.mount,
-                    })),
+                    "villager": villager,
+                    "raider": raider,
                 });
                 // Drawn seated (Entity.isPassenger); set apart because the
                 // json! above is at the macro recursion limit.
