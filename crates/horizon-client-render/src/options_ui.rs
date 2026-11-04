@@ -1750,14 +1750,29 @@ fn native_pack_option_rows(s: &Settings, i: usize, at: u8) -> Vec<Row> {
             button(0.0, 0.0, width, label, Act::NativePackOption(i, o))
         }
         PageItem::Presets if !pack.presets.is_empty() => {
-            let name = pack
-                .preset()
-                .map_or("Custom", |p| pack.presets[p].name.as_str());
-            let label = Text::option_name_value(Text::literal("Preset"), Text::literal(name));
+            // As shader packs' profiles show it: the value in a colour by its rung.
+            let (name, color) = match pack.preset() {
+                Some(p) => {
+                    let name = pack.presets[p].name.as_str();
+                    let color = match name.to_lowercase().as_str() {
+                        "potato" | "very low" => 0xFF5555,
+                        "low" => 0xFFAA00,
+                        "medium" => 0xFFFF55,
+                        "high" => 0x55FF55,
+                        "ultra" => 0x55FFFF,
+                        "extreme" | "insane" => 0xFF55FF,
+                        _ => 0xFFFFFF,
+                    };
+                    (name, color)
+                }
+                None => ("Custom", 0xAAAAAA),
+            };
+            let label =
+                Text::option_name_value(Text::literal("Profile"), Text::colored(name, color));
             button(0.0, 0.0, width, label, Act::NativePackPreset(i))
         }
         PageItem::Page(p) if p < pack.pages.len() => {
-            let label = Text::literal(format!("{}...", pack.pages[p].name));
+            let label = Text::literal(format!("{} >", pack.pages[p].name));
             let page = Page::NativePackOptions(i, p as u8);
             button(0.0, 0.0, width, label, Act::Push(page))
         }
