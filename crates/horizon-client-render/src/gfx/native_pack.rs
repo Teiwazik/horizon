@@ -93,6 +93,10 @@ impl NativePack {
             textures,
             lights,
             terrain.pbr,
+            option_on(
+                constants,
+                report.manifest.rays.as_ref().and_then(|r| r.option.as_ref()),
+            ),
         );
         // `[displacement]`, unless its option is off; nothing to displace without heights.
         let displacement = report

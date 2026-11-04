@@ -9,6 +9,8 @@
 
 mod interpolation;
 mod motion;
+/// The format of the object motion texture (`object_motion`).
+pub const MOTION_FORMAT: wgpu::TextureFormat = motion::FORMAT;
 mod optical_flow;
 
 use glam::{DMat4, DVec3, Mat4};
@@ -62,6 +64,9 @@ pub struct FrameGen {
     offscreen_generated: Option<wgpu::Texture>,
     /// Motion vectors for what moves on its own, made on the first frame.
     motion: Option<motion::ObjectMotion>,
+    /// This frame's object motion when it was drawn before TAA (`object_motion`), for
+    /// `generate` to use rather than draw it again.
+    drawn_motion: Option<wgpu::TextureView>,
     /// Real frames and made ones handed to the screen since `shown_since`, and the share
     /// of real frames that had a made frame over the last half second (the F3 screen's),
     /// `None` while off.
@@ -114,6 +119,7 @@ impl FrameGen {
             hand_view: Mat4::IDENTITY,
             offscreen_generated: None,
             motion: None,
+            drawn_motion: None,
             real: 0,
             made: 0,
             shown_since: Instant::now(),
@@ -184,9 +190,33 @@ impl FrameGen {
         spans: &[(u32, u64)],
         camera: DVec3,
     ) {
+        self.drawn_motion = None;
         self.motion
             .get_or_insert_with(|| motion::ObjectMotion::new(device, atlas.clone()))
             .track(entities, spans, camera);
+    }
+
+    /// Draws this frame's object motion now (after the world, before TAA, which reads it too),
+    /// at the world's `size`; `previous`: last frame's projection from this camera. `None`
+    /// until `track_entities` ran.
+    #[allow(clippy::too_many_arguments)]
+    pub fn object_motion(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        size: [u32; 2],
+        jittered: Mat4,
+        current: Mat4,
+        previous: Mat4,
+    ) -> Option<wgpu::TextureView> {
+        let view = self
+            .motion
+            .as_mut()?
+            .draw(device, queue, encoder, depth, size, jittered, current, previous);
+        self.drawn_motion = Some(view.clone());
+        Some(view)
     }
 
     /// This frame's unjittered clip space to the last frame's, from their `view_proj`s
@@ -311,20 +341,23 @@ impl FrameGen {
         span(&mut timing, encoder, "Frame generation (real frame)");
         let reset = gpu.reset || camera.reproject.is_none();
         let reproject = camera.reproject.unwrap_or(Mat4::IDENTITY);
-        let object_motion = self
-            .motion
-            .as_mut()
-            .expect("track_entities() ran this frame")
-            .draw(
-                device,
-                queue,
-                encoder,
-                &camera.depth,
-                camera.render_size,
-                camera.jittered,
-                camera.view_proj,
-                reproject * camera.view_proj,
-            );
+        let object_motion = match self.drawn_motion.take() {
+            Some(view) => view,
+            None => self
+                .motion
+                .as_mut()
+                .expect("track_entities() ran this frame")
+                .draw(
+                    device,
+                    queue,
+                    encoder,
+                    &camera.depth,
+                    camera.render_size,
+                    camera.jittered,
+                    camera.view_proj,
+                    reproject * camera.view_proj,
+                ),
+        };
         span(&mut timing, encoder, "Frame generation (object motion)");
         gpu.flow.dispatch(
             device,

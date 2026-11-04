@@ -279,6 +279,7 @@ impl NativeFrame {
         textures: Vec<(wgpu::TextureView, wgpu::Sampler)>,
         lights: super::block_light::LightTable,
         pbr: Option<&[wgpu::Texture; 2]>,
+        rays: bool,
     ) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Native shader pack frame"),
@@ -336,7 +337,8 @@ impl NativeFrame {
             array_entry(13),
         ];
         entries.extend(pack_texture_entries(textures.len()));
-        let rays = super::native_rt::RayScene::new(device);
+        // Not while the pack's `[rays] option` is off: no scene, and `ray_tracing()` false.
+        let rays = rays.then(|| super::native_rt::RayScene::new(device)).flatten();
         let mut entries = entries.to_vec();
         if rays.is_some() {
             entries.push(wgpu::BindGroupLayoutEntry {
@@ -1951,7 +1953,7 @@ mod tests {
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None);
+        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None, true);
         queue.write_buffer(
             &frame.buffer,
             0,
@@ -2074,7 +2076,7 @@ file = \"b.wgsl\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None);
+        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None, true);
         let mut post = NativePost::new(
             &device,
             report.stages,

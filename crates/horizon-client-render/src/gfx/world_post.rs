@@ -32,7 +32,10 @@ struct WorldTarget {
 struct History {
     size: [u32; 2],
     history: [wgpu::TextureView; 2],
-    resolve: [wgpu::BindGroup; 2],
+    /// What the resolve reads besides the history: the world (or the pack's output) and its
+    /// depth; its group is made each frame, with that frame's entity motion.
+    input: wgpu::TextureView,
+    depth: wgpu::TextureView,
     show: [wgpu::BindGroup; 2],
 }
 
@@ -53,6 +56,8 @@ struct TaaResources {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
+    /// A 1×1 motion texture of nothing, for frames without entity motion.
+    no_motion: wgpu::TextureView,
 }
 
 pub struct Post {
@@ -174,6 +179,9 @@ impl Post {
                     },
                     texture(2, float),
                     texture(3, wgpu::TextureSampleType::Depth),
+                    // What moves on its own (frame generation's object motion): mobs, items,
+                    // the boat or cart the player rides.
+                    texture(5, wgpu::TextureSampleType::Float { filterable: false }),
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -228,10 +236,27 @@ impl Post {
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
+                    let no_motion = device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("Horizon TAA no motion"),
+                            size: wgpu::Extent3d {
+                                width: 1,
+                                height: 1,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: super::frame_gen::MOTION_FORMAT,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        })
+                        .create_view(&Default::default());
                     Some(TaaResources {
                         layout: taa_layout,
                         pipeline: taa_pipeline,
                         uniform,
+                        no_motion,
                     })
                 }
                 Some(e) => {
@@ -316,6 +341,13 @@ impl Post {
             jitter: [jitter.x, jitter.y, reset, 0.0],
         };
         Mat4::from_translation(jitter.extend(0.0))
+    }
+
+    /// This frame's unjittered clip space to the last frame's, while TAA runs and has a last
+    /// frame.
+    pub fn taa_reprojection(&self) -> Option<Mat4> {
+        (self.taa_on && self.taa_this_frame.jitter[2] == 0.0)
+            .then(|| Mat4::from_cols_array_2d(&self.taa_this_frame.reproject))
     }
 
     /// This frame's jitter in rendered pixels, y down (FSR's `jitterOffset`); zero
@@ -438,44 +470,17 @@ impl Post {
             });
             let taa_input = packed.as_ref().unwrap_or(&color);
             let taa = history_size.and_then(|output| {
-                let res = self.taa_resources.as_ref()?;
+                self.taa_resources.as_ref()?;
                 let history = [0, 1].map(|_| {
                     make_tex("TAA history", output, HISTORY_FORMAT, sampled)
                         .create_view(&Default::default())
-                });
-                let resolve = [0, 1].map(|i| {
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Horizon TAA"),
-                        layout: &res.layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(taa_input),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&history[1 - i]),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(&depth),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: res.uniform.as_entire_binding(),
-                            },
-                        ],
-                    })
                 });
                 let show = [0, 1].map(|i| self.bind(device, &history[i]));
                 Some(History {
                     size: output,
                     history,
-                    resolve,
+                    input: taa_input.clone(),
+                    depth: depth.clone(),
                     show,
                 })
             });
@@ -541,13 +546,16 @@ impl Post {
         })
     }
 
-    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on.
+    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on;
+    /// `motion`: what moves on its own this frame (`frame_gen::FrameGen::object_motion`).
     pub fn finish(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
+        motion: Option<&wgpu::TextureView>,
     ) {
         let Some(target) = &self.target else { return };
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
@@ -575,8 +583,21 @@ impl Post {
             color_attachments: &attachments,
             ..Default::default()
         });
+        let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
+        let resolve = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Horizon TAA"),
+            layout: &res.layout,
+            entries: &[
+                entry(0, wgpu::BindingResource::TextureView(&taa.input)),
+                entry(1, wgpu::BindingResource::Sampler(&self.sampler)),
+                entry(2, wgpu::BindingResource::TextureView(&taa.history[1 - i])),
+                entry(3, wgpu::BindingResource::TextureView(&taa.depth)),
+                entry(4, res.uniform.as_entire_binding()),
+                entry(5, wgpu::BindingResource::TextureView(motion.unwrap_or(&res.no_motion))),
+            ],
+        });
         pass.set_pipeline(&res.pipeline);
-        pass.set_bind_group(0, &taa.resolve[i], &[]);
+        pass.set_bind_group(0, &resolve, &[]);
         pass.draw(0..3, 0..1);
         drop(pass);
         let pipeline = if self.upscale > 1.0 {

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use horizon_shader_api::{OptionKind, OptionPage, PackOption};
+use horizon_shader_api::{OptionKind, OptionPage, PackOption, Preset};
 
 pub const DIR: &str = "shaderpacks";
 
@@ -28,6 +28,8 @@ pub struct Entry {
     pub values: Vec<f64>,
     /// Its options page's `[[pages]]`; empty for one page of every option.
     pub pages: Vec<OptionPage>,
+    /// Its `[[presets]]`.
+    pub presets: Vec<Preset>,
 }
 
 impl Entry {
@@ -50,6 +52,36 @@ impl Entry {
         } else {
             step_value(&o.kind, *v, back)
         };
+        true
+    }
+
+    /// The preset the values match, if any (the first, when several do).
+    pub fn preset(&self) -> Option<usize> {
+        self.presets.iter().position(|p| {
+            p.values
+                .iter()
+                .all(|&(i, v)| self.values.get(i).is_some_and(|&now| (now - v).abs() < 1e-6))
+        })
+    }
+
+    /// The next preset's values (`back`: the one before), from the one they match; from
+    /// "Custom", the first (or the last). Whether the pack has any.
+    pub fn step_preset(&mut self, back: bool) -> bool {
+        let n = self.presets.len();
+        if n == 0 {
+            return false;
+        }
+        let next = match (self.preset(), back) {
+            (Some(i), false) => (i + 1) % n,
+            (Some(i), true) => (i + n - 1) % n,
+            (None, false) => 0,
+            (None, true) => n - 1,
+        };
+        for &(i, v) in &self.presets[next].values {
+            if let Some(slot) = self.values.get_mut(i) {
+                *slot = v;
+            }
+        }
         true
     }
 
@@ -90,9 +122,9 @@ fn entry(path: &Path) -> Option<Entry> {
                 .ok()
                 .map(|p| p.manifest)
         };
-        let (title, options, pages) = manifest.map_or_else(
-            || (file.clone(), Vec::new(), Vec::new()),
-            |m| (m.name, m.options, m.pages),
+        let (title, options, pages, presets) = manifest.map_or_else(
+            || (file.clone(), Vec::new(), Vec::new(), Vec::new()),
+            |m| (m.name, m.options, m.pages, m.presets),
         );
         let values = load_values(path, &options);
         return Some(Entry {
@@ -102,6 +134,7 @@ fn entry(path: &Path) -> Option<Entry> {
             options,
             values,
             pages,
+            presets,
         });
     }
     let zip = path.is_file()
@@ -115,6 +148,7 @@ fn entry(path: &Path) -> Option<Entry> {
         options: Vec::new(),
         values: Vec::new(),
         pages: Vec::new(),
+        presets: Vec::new(),
     })
 }
 

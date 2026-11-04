@@ -93,6 +93,9 @@ struct Taa {
 @group(0) @binding(2) var history: texture_2d<f32>;
 @group(0) @binding(3) var depth: texture_depth_2d;
 @group(0) @binding(4) var<uniform> taa: Taa;
+// What moves on its own, at the world's size: xy where the pixel was last frame (in UV, from
+// here), z 1 where set. 1×1 and empty without it.
+@group(0) @binding(5) var motion: texture_2d<f32>;
 
 // Catmull-Rom over the history in 5 bilinear taps: sharper than one under motion.
 fn sample_history(uv: vec2<f32>) -> vec3<f32> {
@@ -173,7 +176,17 @@ fn clip_box(c: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
     }
     let ndc = vec2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let previous = taa.reproject * vec4(ndc, near, 1.0);
-    let uv = vec2(0.5, -0.5) * previous.xy / previous.w + 0.5;
+    var uv = vec2(0.5, -0.5) * previous.xy / previous.w + 0.5;
+    // A mob, an item or the boat the player rides moved by itself, not with the camera:
+    // its own vector, or its history comes from where the world behind it was (a boat
+    // ridden at speed trailed copies of itself).
+    let motion_size = vec2<i32>(textureDimensions(motion));
+    if motion_size.x > 1 {
+        let own = textureLoad(motion, clamp(p, vec2(0), motion_size - 1), 0);
+        if own.z > 0.5 {
+            uv = in.uv + own.xy;
+        }
+    }
     if taa.jitter.z > 0.0 || any(uv != clamp(uv, vec2(0.0), vec2(1.0))) {
         return vec4(centre.rgb, centre.a);
     }

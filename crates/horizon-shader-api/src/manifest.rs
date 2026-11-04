@@ -44,6 +44,9 @@ pub struct Manifest {
     /// How the settings screen lays the options out; the first page is the one it opens on.
     /// Empty: one page with every option.
     pub pages: Vec<OptionPage>,
+    /// `[[presets]]`: sets of option values the settings screen's `"presets"` item steps
+    /// through.
+    pub presets: Vec<Preset>,
     pub budget: Budget,
     /// The shadow map the pack asks for, if any.
     pub shadow: Option<Shadow>,
@@ -51,6 +54,8 @@ pub struct Manifest {
     pub displacement: Option<Displacement>,
     /// When the material stage's water mirror (`reflection`) is drawn; needs `[material]`.
     pub reflection: Option<Reflection>,
+    /// When Horizon traces rays for the pack, where the device can (`ray_tracing()`).
+    pub rays: Option<Rays>,
     /// Material ids by sprite, in order: the first entry whose pattern matches wins.
     pub materials: Vec<Material>,
     /// Images every stage reads, in order (`TEXTURE_BINDING` + their index).
@@ -253,6 +258,14 @@ pub struct Reflection {
     pub option: Option<String>,
 }
 
+/// `[rays]`: the option that turns ray tracing on and off. While it is 0, Horizon builds no
+/// ray scene and `ray_tracing()` is false in every stage: the pack draws as on a device
+/// without it, and the frame pays nothing for the scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rays {
+    pub option: Option<String>,
+}
+
 /// How far from the camera `[displacement]` reaches, in blocks, and its grid's cells a side.
 pub const DISPLACEMENT_DISTANCES: std::ops::RangeInclusive<f32> = 4.0..=32.0;
 pub const DISPLACEMENT_CELLS: std::ops::RangeInclusive<u32> = 4..=64;
@@ -339,6 +352,20 @@ pub enum PageItem {
     Page(usize),
     /// `""`: an empty slot.
     Empty,
+    /// `"presets"`: a button stepping through `Manifest::presets`, naming the one the values
+    /// match (else "Custom").
+    Presets,
+}
+
+/// `[[presets]]`: a name for a set of option values, e.g. a quality level.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// The options it sets (index into `Manifest::options`) and their constants, as the
+    /// values file keeps them: 0 or 1, the number, or a choice's index. The others keep theirs.
+    pub values: Vec<(usize, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -391,10 +418,13 @@ struct Raw {
     #[serde(default)]
     pages: Vec<RawPage>,
     #[serde(default)]
+    presets: Vec<RawPreset>,
+    #[serde(default)]
     budget: RawBudget,
     shadow: Option<RawShadow>,
     displacement: Option<RawDisplacement>,
     reflection: Option<RawReflection>,
+    rays: Option<RawReflection>,
     #[serde(default)]
     materials: Vec<RawMaterial>,
     #[serde(default)]
@@ -548,6 +578,62 @@ struct RawDisplacement {
 #[serde(deny_unknown_fields)]
 struct RawReflection {
     option: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPreset {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    values: toml::Table,
+}
+
+/// How many presets a pack may declare.
+pub const MAX_PRESETS: usize = 8;
+
+/// `[[presets]]` checked against the options: each value of its option's type and in range.
+fn check_presets(raw: Vec<RawPreset>, options: &[PackOption]) -> Result<Vec<Preset>, String> {
+    if raw.len() > MAX_PRESETS {
+        return Err(format!("{} presets; a pack may declare {MAX_PRESETS}", raw.len()));
+    }
+    raw.into_iter()
+        .map(|p| {
+            let fail = |m: String| format!("preset {:?}: {m}", p.id);
+            let mut values = Vec::new();
+            for (id, value) in &p.values {
+                let Some(i) = options.iter().position(|o| o.id == *id) else {
+                    return Err(fail(format!("no option {id:?}")));
+                };
+                let number = value.as_float().or_else(|| value.as_integer().map(|v| v as f64));
+                let constant = match &options[i].kind {
+                    OptionKind::Bool { .. } => value.as_bool().map(|b| f64::from(u8::from(b))),
+                    OptionKind::Float { min, max, .. } => {
+                        number.filter(|v| (f64::from(*min)..=f64::from(*max)).contains(v))
+                    }
+                    OptionKind::Int { min, max, .. } => number
+                        .filter(|v| v.fract() == 0.0)
+                        .filter(|v| (f64::from(*min)..=f64::from(*max)).contains(v)),
+                    OptionKind::Choice { values, .. } => value
+                        .as_str()
+                        .and_then(|s| values.iter().position(|v| v == s))
+                        .map(|i| i as f64),
+                };
+                let Some(constant) = constant else {
+                    return Err(fail(format!("{id} = {value}: not a value of that option")));
+                };
+                values.push((i, constant));
+            }
+            values.sort_by_key(|v| v.0);
+            Ok(Preset {
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                values,
+            })
+        })
+        .collect()
 }
 
 fn default_displacement_distance() -> f32 {
@@ -880,6 +966,7 @@ impl Manifest {
             options.push(option);
         }
         let pages = check_pages(raw.pages, &options).map_err(err)?;
+        let presets = check_presets(raw.presets, &options).map_err(err)?;
         let gpu_ms = match raw.budget.gpu_ms {
             Some(ms) if !(ms > 0.0 && ms <= f64::from(MAX_GPU_MS)) => {
                 return Err(err(format!(
@@ -960,6 +1047,17 @@ impl Manifest {
             }
             None => None,
         };
+        let rays = match raw.rays {
+            Some(r) => {
+                if let Some(id) = &r.option
+                    && !options.iter().any(|o| o.id == *id)
+                {
+                    return Err(err(format!("rays.option: `{id}` is no option")));
+                }
+                Some(Rays { option: r.option })
+            }
+            None => None,
+        };
         Ok(Manifest {
             id: raw.id,
             name: raw.name,
@@ -976,10 +1074,12 @@ impl Manifest {
             weather: raw.weather,
             options,
             pages,
+            presets,
             budget: Budget { gpu_ms },
             shadow,
             displacement,
             reflection,
+            rays,
             materials,
             textures,
             lights,
@@ -1112,6 +1212,8 @@ fn read_pages(raw: &[RawPage], options: &[PackOption]) -> Result<Vec<OptionPage>
             for item in &page.items {
                 let item = if item.is_empty() {
                     PageItem::Empty
+                } else if item == "presets" {
+                    PageItem::Presets
                 } else if let Some(link) = item.strip_prefix("page:") {
                     match raw.iter().position(|p| p.id == link) {
                         Some(i) if i == at => return Err(fail("links to itself".into())),

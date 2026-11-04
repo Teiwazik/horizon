@@ -7545,6 +7545,9 @@ impl Renderer {
         if fg {
             self.frame_gen
                 .halfway_hand(frame.hand, hand_view, &mut self.entity_batch.combined);
+        }
+        // Entities' own motion: frame generation's, and TAA's (a ridden boat ghosted without).
+        if fg || self.world_post.taa_reprojection().is_some() {
             self.frame_gen.track_entities(
                 &self.device,
                 &self.entity_atlas,
@@ -9475,6 +9478,20 @@ impl Renderer {
         {
             n.timing = world_timer.take();
         }
+        // What moves on its own, for TAA (and frame generation after it), before TAA runs.
+        let taa_motion = match (self.world_post.taa_reprojection(), &scaled) {
+            (Some(reproject), Some((_, depth))) => self.frame_gen.object_motion(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                depth,
+                self.world_post.size().unwrap_or(size),
+                jittered,
+                view_proj,
+                reproject * view_proj,
+            ),
+            _ => None,
+        };
         if let Some((color, depth)) = &scaled
             && pack_post
             && let Some((dimension, Some(mut post))) = self.pack_post.take()
@@ -9624,21 +9641,35 @@ impl Renderer {
                     .map(|rays| (&self.group, rays, &native.frame.albedo_view)),
             );
             if packed.is_some() {
-                self.world_post
-                    .finish(&self.queue, &mut encoder, shown, native.timing.as_mut());
+                self.world_post.finish(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    shown,
+                    native.timing.as_mut(),
+                    taa_motion.as_ref(),
+                );
             }
         } else if fg_frames.is_some() && scaled.is_some() {
             let world = self
                 .frame_gen
                 .world(&self.device, &self.world_post, &self.config);
-            self.world_post
-                .finish(&self.queue, &mut encoder, &world, self.own_timing.as_mut());
+            self.world_post.finish(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &world,
+                self.own_timing.as_mut(),
+                taa_motion.as_ref(),
+            );
         } else if scaled.is_some() {
             self.world_post.finish(
+                &self.device,
                 &self.queue,
                 &mut encoder,
                 &view_target,
                 self.own_timing.as_mut(),
+                taa_motion.as_ref(),
             );
         }
         // Frame generation: the real frame from its world, and the made one between.

@@ -1293,6 +1293,8 @@ enum Act {
     NativePackOptions(usize),
     /// Option `.1` of that pack: its next value.
     NativePackOption(usize, usize),
+    /// The pack's next preset (`[[presets]]`).
+    NativePackPreset(usize),
     /// Every option of that pack back to its default.
     NativePackReset(usize),
     /// Shader Options: the next value of an option, a screen of the pack, the next profile,
@@ -1746,6 +1748,13 @@ fn native_pack_option_rows(s: &Settings, i: usize, at: u8) -> Vec<Row> {
             let label =
                 Text::option_name_value(Text::literal(option.name.clone()), Text::literal(value));
             button(0.0, 0.0, width, label, Act::NativePackOption(i, o))
+        }
+        PageItem::Presets if !pack.presets.is_empty() => {
+            let name = pack
+                .preset()
+                .map_or("Custom", |p| pack.presets[p].name.as_str());
+            let label = Text::option_name_value(Text::literal("Preset"), Text::literal(name));
+            button(0.0, 0.0, width, label, Act::NativePackPreset(i))
         }
         PageItem::Page(p) if p < pack.pages.len() => {
             let label = Text::literal(format!("{}...", pack.pages[p].name));
@@ -4251,6 +4260,13 @@ impl OptionsUi {
                                 events.push(Event::NativePackOptions(pack));
                             }
                         }
+                        Act::NativePackPreset(pack) => {
+                            if let Some(entry) = s.shader_packs.get_mut(pack)
+                                && entry.step_preset(false)
+                            {
+                                events.push(Event::NativePackOptions(pack));
+                            }
+                        }
                         Act::NativePackReset(pack) => {
                             if let Some(entry) = s.shader_packs.get_mut(pack) {
                                 entry.reset_options();
@@ -5171,6 +5187,13 @@ impl OptionsUi {
                                 events.push(Event::NativePackOptions(pack));
                             }
                         }
+                        Act::NativePackPreset(pack) => {
+                            if let Some(entry) = s.shader_packs.get_mut(pack)
+                                && entry.step_preset(false)
+                            {
+                                events.push(Event::NativePackOptions(pack));
+                            }
+                        }
                         Act::NativePackReset(pack) => {
                             if let Some(entry) = s.shader_packs.get_mut(pack) {
                                 entry.reset_options();
@@ -5560,6 +5583,7 @@ mod tests {
                     items: vec![horizon_shader_api::PageItem::Option(0)],
                 },
             ],
+            presets: Vec::new(),
         }];
         let mut ui = OptionsUi::default();
         ui.show(Page::ShaderPacks);
