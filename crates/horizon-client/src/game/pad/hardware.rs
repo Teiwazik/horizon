@@ -452,9 +452,7 @@ impl Game<'_> {
             self.pad.devices.haptics_tried = false;
         } else if !self.pad.devices.haptics_tried {
             self.pad.devices.haptics_tried = true;
-            if std::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
-                && std::env::var_os("HORIZON_NO_AUDIO").is_none()
-            {
+            if hd_haptics_asked() && std::env::var_os("HORIZON_NO_AUDIO").is_none() {
                 self.pad.devices.haptics = horizon_dualsense::haptics::Haptics::open();
             }
         }
@@ -462,9 +460,10 @@ impl Game<'_> {
 
     /// What the HD haptics feel between effects: the water around the player's head.
     fn pad_ambience(&mut self) {
-        let Some(haptics) = self.pad.devices.haptics.as_ref() else {
+        let bluetooth = self.pad_bt_haptics();
+        if self.pad.devices.haptics.is_none() && bluetooth.is_none() {
             return;
-        };
+        }
         let playing = self.focused
             && self.title.is_none()
             && self.screen == Screen::Playing
@@ -475,7 +474,21 @@ impl Game<'_> {
                 let eye = p.position.y + f64::from(p.dimensions.eye_height);
                 self.eye_in_water(p.position.x, eye, p.position.z)
             });
-        haptics.set_water(if under { 1.0 } else { 0.0 });
+        let level = if under { 1.0 } else { 0.0 };
+        if let Some(haptics) = &self.pad.devices.haptics {
+            haptics.set_water(level);
+        }
+        if let Some(output) = self.pad_bt_haptics() {
+            output.set_water(level);
+        }
+    }
+
+    /// The DualSense's output when it is on Bluetooth and HD haptics are asked for: they play
+    /// through its haptics reports there, as no audio device comes with it.
+    fn pad_bt_haptics(&self) -> Option<&horizon_dualsense::Link> {
+        self.pad_output()
+            .filter(|o| o.open() == Some(horizon_dualsense::Transport::Bluetooth))
+            .filter(|_| hd_haptics_asked())
     }
 
     /// Release the DualSense's output (the game is quitting).
@@ -503,6 +516,17 @@ impl Game<'_> {
                 )
             });
             haptics.play(&steps.collect::<Vec<_>>());
+            return;
+        }
+        if let Some(output) = self.pad_bt_haptics() {
+            let steps = rumble.shape().into_iter().map(|step| {
+                (
+                    step.strong,
+                    step.weak,
+                    Duration::from_millis(u64::from(step.millis)),
+                )
+            });
+            output.haptics(steps.collect());
             return;
         }
         if let Some(output) = self.pad_output() {
@@ -575,4 +599,9 @@ impl Game<'_> {
             "trigger_effects": devices.shown.map(|s| s.triggers),
         })
     }
+}
+
+/// HD haptics are asked for with `HORIZON_DUALSENSE_HAPTICS=1`.
+fn hd_haptics_asked() -> bool {
+    std::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
 }

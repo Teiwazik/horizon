@@ -8,7 +8,7 @@ use hidapi::{BusType, HidApi, HidDevice, HidResult};
 use std::sync::Arc;
 #[cfg(not(target_os = "ios"))]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 #[cfg(not(target_os = "ios"))]
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -100,6 +100,11 @@ impl DualSense {
         Ok(())
     }
 
+    /// A report as it is (the Bluetooth haptics' 0x32).
+    pub fn write_raw(&self, report: &[u8]) -> HidResult<()> {
+        self.device.write(report).map(|_| ())
+    }
+
     /// An input report (USB 0x01, Bluetooth 0x31), waiting up to `millis` (-1: forever).
     pub fn read(&self, buf: &mut [u8], millis: i32) -> HidResult<usize> {
         self.device.read_timeout(buf, millis)
@@ -134,6 +139,10 @@ pub type Rumble = Vec<([u8; 2], Duration)>;
 enum Message {
     State(State),
     Rumble(Rumble),
+    /// HD haptics over Bluetooth: a vibration's steps (heavy, light, length).
+    Haptics(Vec<(f32, f32, Duration)>),
+    /// HD haptics over Bluetooth: the water ambience's level.
+    Water(f32),
     Scan,
 }
 
@@ -143,6 +152,8 @@ pub struct Link {
     tx: Option<Sender<Message>>,
     /// 0: no pad open, else 1 + the transport.
     open: Arc<AtomicU8>,
+    /// The water level last sent, as f32 bits.
+    water: AtomicU32,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -161,6 +172,7 @@ impl Link {
         Link {
             tx: Some(tx),
             open,
+            water: AtomicU32::new(0),
             thread,
         }
     }
@@ -171,6 +183,7 @@ impl Link {
         Link {
             tx: None,
             open: Arc::new(AtomicU8::new(0)),
+            water: AtomicU32::new(0),
             thread: None,
         }
     }
@@ -181,6 +194,20 @@ impl Link {
             1 => Some(Transport::Usb),
             2 => Some(Transport::Bluetooth),
             _ => None,
+        }
+    }
+
+    /// Play a vibration through the actuators' HD haptics over Bluetooth, replacing the one
+    /// playing: (heavy, light, length) steps.
+    pub fn haptics(&self, steps: Vec<(f32, f32, Duration)>) {
+        self.send(Message::Haptics(steps));
+    }
+
+    /// The HD haptics' water ambience over Bluetooth, 0..1; sent only when it changes.
+    pub fn set_water(&self, level: f32) {
+        let bits = level.clamp(0.0, 1.0).to_bits();
+        if self.water.swap(bits, Ordering::Relaxed) != bits {
+            self.send(Message::Water(level));
         }
     }
 
@@ -235,6 +262,10 @@ struct Writer {
     rumble: Rumble,
     /// When the vibration's current step ends.
     step_end: Option<Instant>,
+    /// HD haptics over Bluetooth: what plays, the reports' counter, and when the next is due.
+    voice: crate::synth::Voice,
+    haptics_counter: u8,
+    next_haptics: Option<Instant>,
     scans_left: u32,
     next_scan: Instant,
 }
@@ -280,6 +311,9 @@ impl Writer {
             lights: Lights::Ready,
             rumble: Vec::new(),
             step_end: None,
+            voice: crate::synth::Voice::new(crate::synth::BT_HAPTICS_RATE),
+            haptics_counter: 0,
+            next_haptics: None,
             scans_left: 1,
             next_scan: Instant::now(),
         }
@@ -296,6 +330,7 @@ impl Writer {
                 self.step_end,
                 (self.pad.is_none() && self.scans_left > 0).then_some(self.next_scan),
                 waiting.then(|| now + Duration::from_millis(250)),
+                self.next_haptics,
             ]
             .into_iter()
             .flatten()
@@ -311,6 +346,8 @@ impl Writer {
                     self.rumble.reverse();
                     self.step_end = None;
                 }
+                Ok(Message::Haptics(steps)) => self.voice.play(&steps),
+                Ok(Message::Water(level)) => self.voice.set_water(level),
                 Ok(Message::Scan) => {
                     // A pad that was unplugged while idle fails to read.
                     let mut buf = [0; 80];
@@ -333,6 +370,7 @@ impl Writer {
             self.watch_animation();
             self.advance_rumble();
             self.flush();
+            self.stream_haptics();
         }
         if let Some(pad) = self.pad.as_mut() {
             // The lights go back to a host's defaults, if they were changed.
@@ -404,6 +442,40 @@ impl Writer {
         if over {
             self.lights = Lights::Ready;
         }
+    }
+
+    /// Over Bluetooth, the HD haptics' reports while anything plays, one every 32 frames of
+    /// 3 kHz; behind by more than a few, it starts again from now rather than catching up.
+    fn stream_haptics(&mut self) {
+        let bluetooth = self
+            .pad
+            .as_ref()
+            .is_some_and(|p| p.transport() == Transport::Bluetooth);
+        if !bluetooth || !self.voice.active() {
+            self.next_haptics = None;
+            return;
+        }
+        let period = Duration::from_secs_f64(
+            crate::synth::BT_HAPTICS_FRAMES as f64 / f64::from(crate::synth::BT_HAPTICS_RATE),
+        );
+        let now = Instant::now();
+        let mut due = match self.next_haptics {
+            Some(due) if now.saturating_duration_since(due) < period * 4 => due,
+            _ => now,
+        };
+        while due <= now && self.voice.active() {
+            let frames = std::array::from_fn(|_| self.voice.next());
+            let report = crate::synth::bt_haptics_report(self.haptics_counter, &frames);
+            self.haptics_counter = self.haptics_counter.wrapping_add(1);
+            let Some(pad) = self.pad.as_ref() else {
+                return;
+            };
+            if let Err(e) = pad.write_raw(&report) {
+                return self.lost(&e.to_string());
+            }
+            due += period;
+        }
+        self.next_haptics = self.voice.active().then_some(due);
     }
 
     /// Move to the vibration's next step once this one is over.

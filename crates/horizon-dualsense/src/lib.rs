@@ -13,6 +13,7 @@ pub mod haptics;
 #[cfg(target_os = "ios")]
 #[path = "haptics_stub.rs"]
 pub mod haptics;
+pub mod synth;
 pub mod trigger;
 
 pub use device::{Link, Transport};
