@@ -461,7 +461,13 @@ impl Game<'_> {
     /// What the HD haptics feel between effects: the water around the player's head.
     fn pad_ambience(&mut self) {
         let bluetooth = self.pad_bt_haptics();
-        if self.pad.devices.haptics.is_none() && bluetooth.is_none() {
+        let feeding = self
+            .pad
+            .devices
+            .output
+            .as_ref()
+            .is_some_and(|o| o.is_feeding());
+        if self.pad.devices.haptics.is_none() && bluetooth.is_none() && !feeding {
             return;
         }
         let playing = self.focused
@@ -478,8 +484,13 @@ impl Game<'_> {
         if let Some(haptics) = &self.pad.devices.haptics {
             haptics.set_water(level);
         }
-        if let Some(output) = self.pad_bt_haptics() {
-            output.set_water(level);
+        // Over Bluetooth the game's own sounds are felt (the water's among them), while
+        // vibration is on and the window has the pad.
+        let feel = bluetooth.is_some() && self.settings.controller.vibration;
+        if let Some(output) = self.pad.devices.output.as_ref()
+            && output.is_feeding() != feel
+        {
+            output.set_feed(feel.then(|| self.audio.haptic_feed()));
         }
     }
 
@@ -518,15 +529,9 @@ impl Game<'_> {
             haptics.play(&steps.collect::<Vec<_>>());
             return;
         }
-        if let Some(output) = self.pad_bt_haptics() {
-            let steps = rumble.shape().into_iter().map(|step| {
-                (
-                    step.strong,
-                    step.weak,
-                    Duration::from_millis(u64::from(step.millis)),
-                )
-            });
-            output.haptics(steps.collect());
+        // Over Bluetooth the HD haptics play the game's sounds: the hit, the blast and the
+        // block are felt as they sound.
+        if self.pad_bt_haptics().is_some() {
             return;
         }
         if let Some(output) = self.pad_output() {

@@ -2,6 +2,7 @@
 //! USB audio device, 3 kHz in its Bluetooth haptics reports.
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The frequencies the heavy and light parts of a vibration play at.
@@ -102,12 +103,26 @@ impl Ambience {
     }
 }
 
-/// What the actuators play: the queued effect over the ambience.
+/// The game's sounds at the voice's rate, stereo, filled by its mixer.
+pub type Feed = Arc<Mutex<VecDeque<[f32; 2]>>>;
+
+/// How the game's sounds are shaped for the actuators: louder, the highs lifted (a voice coil
+/// and the box filter that brought them down to 3 kHz both lose them), the peaks rounded off.
+/// Tuned on the pad by hand: an emphasis of 3 was harsh and clipped.
+pub const SOUND_GAIN: f32 = 2.0;
+pub const SOUND_EMPHASIS: f32 = 1.8;
+
+/// What the actuators play: the queued effect over the ambience and the game's sounds.
 pub struct Voice {
     rate: u32,
     queue: VecDeque<f32>,
     ambience: Ambience,
     water: f32,
+    feed: Option<Feed>,
+    /// The last sound frame, for the emphasis.
+    last: [f32; 2],
+    /// Frames played since the feed last had any.
+    starved: u32,
 }
 
 impl Voice {
@@ -117,7 +132,22 @@ impl Voice {
             queue: VecDeque::new(),
             ambience: Ambience::new(rate),
             water: 0.0,
+            feed: None,
+            last: [0.0; 2],
+            starved: u32::MAX,
         }
+    }
+
+    /// Feel the game's sounds from `feed` (None: no more).
+    pub fn set_feed(&mut self, feed: Option<Feed>) {
+        self.feed = feed;
+    }
+
+    fn feed_len(&self) -> usize {
+        self.feed
+            .as_ref()
+            .and_then(|f| f.lock().ok().map(|f| f.len()))
+            .unwrap_or(0)
     }
 
     /// Play a vibration, replacing the one playing.
@@ -132,14 +162,39 @@ impl Voice {
 
     /// Whether anything is left to play (an effect, the ambience or its fade).
     pub fn active(&self) -> bool {
-        !self.queue.is_empty() || self.water > 0.0 || self.ambience.level >= 1e-4
+        !self.queue.is_empty()
+            || self.water > 0.0
+            || self.ambience.level >= 1e-4
+            // A tenth of a second of the feed's silence before it rests.
+            || self.starved < self.rate / 10
+            || self.feed_len() > 0
     }
 
     /// The next frame (left, right actuator).
     pub fn next(&mut self) -> [f32; 2] {
         let effect = self.queue.pop_front().unwrap_or_default();
         let [a, b] = self.ambience.next(self.water);
-        [(effect + a).clamp(-1.0, 1.0), (effect + b).clamp(-1.0, 1.0)]
+        let sound = self.feed.as_ref().and_then(|f| f.lock().ok()?.pop_front());
+        let felt = match sound {
+            Some(frame) => {
+                self.starved = 0;
+                let felt = [0, 1].map(|i| {
+                    let lifted = frame[i] + SOUND_EMPHASIS * (frame[i] - self.last[i]);
+                    (lifted * SOUND_GAIN).tanh()
+                });
+                self.last = frame;
+                felt
+            }
+            None => {
+                self.starved = self.starved.saturating_add(1);
+                self.last = [0.0; 2];
+                [0.0; 2]
+            }
+        };
+        [
+            (effect + a + felt[0]).clamp(-1.0, 1.0),
+            (effect + b + felt[1]).clamp(-1.0, 1.0),
+        ]
     }
 }
 
@@ -205,6 +260,28 @@ mod tests {
         }
         // 10 ms at 3 kHz, then the ramp down.
         assert_eq!(n, 30 + 12);
+    }
+
+    #[test]
+    fn voice_plays_the_feed_shaped() {
+        let feed = Feed::default();
+        let mut v = Voice::new(BT_HAPTICS_RATE);
+        v.set_feed(Some(feed.clone()));
+        assert!(!v.active());
+        feed.lock().unwrap().extend([[0.5, 0.0], [0.5, 0.0]]);
+        assert!(v.active());
+        // A step: lifted at its edge, then the level alone, both rounded by tanh.
+        let first = v.next();
+        assert!((first[0] - (0.5f32 * 2.8 * 2.0).tanh()).abs() < 1e-6);
+        assert!((v.next()[0] - 1.0f32.tanh()).abs() < 1e-6);
+        assert_eq!(v.next(), [0.0; 2]);
+        // It rests after a tenth of a second of silence.
+        let mut n = 1;
+        while v.active() {
+            v.next();
+            n += 1;
+        }
+        assert_eq!(n, 300);
     }
 
     #[test]

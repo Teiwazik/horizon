@@ -771,6 +771,8 @@ pub trait Backend {
     fn set_looping(&mut self, channel: ChannelId, looping: bool);
     fn set_position(&mut self, channel: ChannelId, position: [f64; 3]);
     fn set_relative(&mut self, channel: ChannelId, relative: bool);
+    /// Whether the controller's HD haptics feel it (Horizon: not music, records or the UI).
+    fn set_haptic(&mut self, _channel: ChannelId, _haptic: bool) {}
     /// Attach the sound's buffer or stream (when loaded) and play it.
     fn start(&mut self, channel: ChannelId, sound: &Sound, looping: bool);
     fn stop(&mut self, channel: ChannelId);
@@ -1189,6 +1191,7 @@ impl SoundEngine {
         backend.set_looping(channel, looping && !streaming);
         backend.set_position(channel, position);
         backend.set_relative(channel, relative);
+        backend.set_haptic(channel, !matches!(source, MUSIC | RECORDS | UI));
         backend.start(channel, &sound, looping);
         if tickable {
             self.ticking.push(id);

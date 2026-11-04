@@ -6,7 +6,6 @@ use crate::{TRIGGER_OFF, TriggerEffect};
 #[cfg(not(target_os = "ios"))]
 use hidapi::{BusType, HidApi, HidDevice, HidResult};
 use std::sync::Arc;
-#[cfg(not(target_os = "ios"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
@@ -143,6 +142,8 @@ enum Message {
     Haptics(Vec<(f32, f32, Duration)>),
     /// HD haptics over Bluetooth: the water ambience's level.
     Water(f32),
+    /// HD haptics over Bluetooth: the game's sounds to feel.
+    Feed(Option<crate::synth::Feed>),
     Scan,
 }
 
@@ -154,6 +155,8 @@ pub struct Link {
     open: Arc<AtomicU8>,
     /// The water level last sent, as f32 bits.
     water: AtomicU32,
+    /// Whether a sound feed was sent.
+    feeding: AtomicBool,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -173,6 +176,7 @@ impl Link {
             tx: Some(tx),
             open,
             water: AtomicU32::new(0),
+            feeding: AtomicBool::new(false),
             thread,
         }
     }
@@ -184,6 +188,7 @@ impl Link {
             tx: None,
             open: Arc::new(AtomicU8::new(0)),
             water: AtomicU32::new(0),
+            feeding: AtomicBool::new(false),
             thread: None,
         }
     }
@@ -209,6 +214,19 @@ impl Link {
         if self.water.swap(bits, Ordering::Relaxed) != bits {
             self.send(Message::Water(level));
         }
+    }
+
+    /// Feel the game's sounds through the HD haptics over Bluetooth (None: no more). The
+    /// thread wakes to read the feed every few milliseconds while it is set.
+    pub fn set_feed(&self, feed: Option<crate::synth::Feed>) {
+        if self.feeding.swap(feed.is_some(), Ordering::Relaxed) != feed.is_some() {
+            self.send(Message::Feed(feed));
+        }
+    }
+
+    /// Whether a sound feed is set.
+    pub fn is_feeding(&self) -> bool {
+        self.feeding.load(Ordering::Relaxed)
     }
 
     /// Look for the pad again (a controller connected).
@@ -266,6 +284,10 @@ struct Writer {
     voice: crate::synth::Voice,
     haptics_counter: u8,
     next_haptics: Option<Instant>,
+    /// A sound feed is set: the thread polls it while the pad is on Bluetooth.
+    feeding: bool,
+    /// When the PCM was last handed back the actuators (see `stream_haptics`).
+    reclaimed: Option<Instant>,
     scans_left: u32,
     next_scan: Instant,
 }
@@ -314,6 +336,8 @@ impl Writer {
             voice: crate::synth::Voice::new(crate::synth::BT_HAPTICS_RATE),
             haptics_counter: 0,
             next_haptics: None,
+            feeding: false,
+            reclaimed: None,
             scans_left: 1,
             next_scan: Instant::now(),
         }
@@ -331,6 +355,9 @@ impl Writer {
                 (self.pad.is_none() && self.scans_left > 0).then_some(self.next_scan),
                 waiting.then(|| now + Duration::from_millis(250)),
                 self.next_haptics,
+                // The feed's sounds come any time: look every 5 ms.
+                (self.feeding && self.next_haptics.is_none() && self.pad.is_some())
+                    .then(|| now + Duration::from_millis(5)),
             ]
             .into_iter()
             .flatten()
@@ -348,6 +375,10 @@ impl Writer {
                 }
                 Ok(Message::Haptics(steps)) => self.voice.play(&steps),
                 Ok(Message::Water(level)) => self.voice.set_water(level),
+                Ok(Message::Feed(feed)) => {
+                    self.feeding = feed.is_some();
+                    self.voice.set_feed(feed);
+                }
                 Ok(Message::Scan) => {
                     // A pad that was unplugged while idle fails to read.
                     let mut buf = [0; 80];
@@ -458,7 +489,12 @@ impl Writer {
         let period = Duration::from_secs_f64(
             crate::synth::BT_HAPTICS_FRAMES as f64 / f64::from(crate::synth::BT_HAPTICS_RATE),
         );
-        if self.next_haptics.is_none() {
+        // Again every half second while it plays: the kernel's rumble can take them back any time.
+        let reclaim = self
+            .reclaimed
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(500));
+        if self.next_haptics.is_none() || reclaim {
+            self.reclaimed = Some(Instant::now());
             // A report with the haptics-select flag (the kernel's rumble, another host's) leaves
             // the actuators to the motors' emulation, and the PCM unheard, until a report
             // without it: one with no flags at all changes nothing else.

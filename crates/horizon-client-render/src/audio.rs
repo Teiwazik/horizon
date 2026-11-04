@@ -45,6 +45,8 @@ struct Channel {
     world: u32,
     /// The sound file it started and when, to tell another player's copy of it.
     started: Option<(String, std::time::Instant)>,
+    /// Whether the controller's HD haptics feel it (not music, records or the UI's clicks).
+    haptic: bool,
 }
 #[derive(Default)]
 struct Mixer {
@@ -62,12 +64,29 @@ struct Mixer {
     /// The callback's cameras (position, basis, world), kept to be refilled without allocating.
     cameras: Vec<([f64; 3], Basis, u32)>,
     limiter_peak: f32,
+    /// The game's sounds for the controller's HD haptics, when it asked for them.
+    haptic_tap: Option<HapticTap>,
+    /// The haptic sounds of one buffer (left, right per frame), reused across callbacks.
+    haptic_buf: Vec<f32>,
     /// The output device the stream was opened on (`Library.currentDeviceName`).
     #[cfg(feature = "audio")]
     device_name: String,
     /// The stream reported its device gone (`Library.isCurrentDeviceDisconnected`).
     #[cfg(feature = "audio")]
     device_lost: bool,
+}
+/// The game's sounds as the controller's HD haptics hear them: stereo frames at
+/// `HAPTIC_RATE`, filled by the mixer, emptied by the pad's output thread.
+pub type HapticFeed = Arc<Mutex<std::collections::VecDeque<[f32; 2]>>>;
+pub const HAPTIC_RATE: u32 = 3000;
+/// The feed holds at most this much (0.2 s): a reader that falls behind loses the oldest.
+const HAPTIC_KEEP: usize = HAPTIC_RATE as usize / 5;
+/// The mixer's side of the feed: a box filter down to `HAPTIC_RATE`.
+struct HapticTap {
+    feed: HapticFeed,
+    sum: [f32; 2],
+    count: u32,
+    phase: f64,
 }
 /// A camera's forward, up and right vectors.
 type Basis = ([f64; 3], [f64; 3], [f64; 3]);
@@ -341,6 +360,19 @@ impl MixerBackend {
         }
         twin
     }
+    /// The game's sounds for the controller's HD haptics, from now on.
+    fn haptic_feed(&self) -> HapticFeed {
+        let mut m = self.mixer.lock().unwrap_or_else(|e| e.into_inner());
+        m.haptic_tap
+            .get_or_insert_with(|| HapticTap {
+                feed: HapticFeed::default(),
+                sum: [0.0; 2],
+                count: 0,
+                phase: 0.0,
+            })
+            .feed
+            .clone()
+    }
     fn with(&self, channel: ChannelId, f: impl FnOnce(&mut Channel)) {
         if let Ok(mut m) = self.mixer.lock()
             && let Some(c) = m.channels.get_mut(&channel)
@@ -368,6 +400,7 @@ impl Backend for MixerBackend {
                 owner: self.owner,
                 world: self.world,
                 started: None,
+                haptic: true,
             },
         );
         Some(id)
@@ -394,6 +427,9 @@ impl Backend for MixerBackend {
     }
     fn set_relative(&mut self, channel: ChannelId, relative: bool) {
         self.with(channel, |c| c.relative = relative);
+    }
+    fn set_haptic(&mut self, channel: ChannelId, haptic: bool) {
+        self.with(channel, |c| c.haptic = haptic);
     }
     /// `getCompleteBuffer` (cached, else decoded on the decoder thread) or
     /// `getStream` (decoded on a thread of its own), then attach and
@@ -618,6 +654,13 @@ fn mix(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
         voices.push((*id, [left, right, gain], step));
     }
     mixer.cameras = cameras;
+    let tapped = mixer.haptic_tap.is_some();
+    let frames = data.len() / channels.max(1);
+    let mut haptic = std::mem::take(&mut mixer.haptic_buf);
+    haptic.clear();
+    if tapped {
+        haptic.resize(frames * 2, 0.0);
+    }
     for (id, [left, right, gain], step) in voices {
         let Some(c) = mixer.channels.get_mut(&id) else {
             continue;
@@ -625,7 +668,8 @@ fn mix(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
         let Some((samples, _)) = c.samples.clone() else {
             continue;
         };
-        for frame in data.chunks_mut(channels) {
+        let felt = tapped && c.haptic;
+        for (n, frame) in data.chunks_mut(channels).enumerate() {
             let mut i = c.position as usize;
             if i + 1 >= samples.len() {
                 if c.looping && samples.len() > 1 {
@@ -645,6 +689,10 @@ fn mix(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
                 // A mono output has no panning: the source's own gain.
                 frame[0] += s * gain;
             }
+            if felt {
+                haptic[n * 2] += s * left;
+                haptic[n * 2 + 1] += s * right;
+            }
             c.position += step;
         }
     }
@@ -655,12 +703,35 @@ fn mix(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
     let peak = data.iter().fold(1.0f32, |peak, s| peak.max(s.abs()));
     mixer.limiter_peak = mixer.limiter_peak.max(peak);
     let release = (-1.0 / (0.2 * rate as f32)).exp();
-    for frame in data.chunks_mut(channels) {
+    let mut out = Vec::new();
+    for (n, frame) in data.chunks_mut(channels).enumerate() {
         let gain = mixer.limiter_peak.recip();
         for s in frame {
             *s *= gain;
         }
+        if let Some(tap) = mixer.haptic_tap.as_mut() {
+            tap.sum[0] += haptic[n * 2] * gain;
+            tap.sum[1] += haptic[n * 2 + 1] * gain;
+            tap.count += 1;
+            tap.phase += f64::from(HAPTIC_RATE) / f64::from(rate);
+            if tap.phase >= 1.0 {
+                tap.phase -= 1.0;
+                let k = 1.0 / tap.count as f32;
+                out.push([tap.sum[0] * k, tap.sum[1] * k]);
+                tap.sum = [0.0; 2];
+                tap.count = 0;
+            }
+        }
         mixer.limiter_peak = (mixer.limiter_peak * release).max(peak);
+    }
+    mixer.haptic_buf = haptic;
+    if let Some(tap) = &mixer.haptic_tap
+        && !out.is_empty()
+        && let Ok(mut feed) = tap.feed.lock()
+    {
+        feed.extend(out);
+        let extra = feed.len().saturating_sub(HAPTIC_KEEP);
+        feed.drain(..extra);
     }
 }
 /// Why the game should not open an output, if it should not:
@@ -1187,6 +1258,11 @@ impl Audio {
     }
     /// The `uiSoundReserve` extra: positional sounds leave
     /// `sound_engine::HEARD_RESERVE` static channels free (off: vanilla's pool).
+    /// The game's sounds (not music, records or the UI) for the controller's HD haptics, at
+    /// `HAPTIC_RATE`; the mixer fills it from now on.
+    pub fn haptic_feed(&self) -> HapticFeed {
+        self.backend.haptic_feed()
+    }
     pub fn set_listener_reserve(&mut self, on: bool) {
         self.engine.listener_reserve = if on {
             crate::sound_engine::HEARD_RESERVE
@@ -1494,6 +1570,7 @@ mod tests {
             owner: 0,
             world: 0,
             started: None,
+            haptic: true,
         }
     }
 
