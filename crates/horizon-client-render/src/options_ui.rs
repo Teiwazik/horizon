@@ -1754,7 +1754,9 @@ fn native_pack_option_rows(s: &Settings, i: usize, at: u8) -> Vec<Row> {
             let (name, color) = match pack.preset() {
                 Some(p) => {
                     let name = pack.presets[p].name.as_str();
-                    let color = match name.to_lowercase().as_str() {
+                    // By the rung alone: "Low (RT)" is as low as "Low".
+                    let rung = name.split(" (").next().unwrap_or(name).to_lowercase();
+                    let color = match rung.as_str() {
                         "potato" | "very low" => 0xFF5555,
                         "low" => 0xFFAA00,
                         "medium" => 0xFFFF55,
