@@ -89,6 +89,7 @@ pub enum H {
     Antialiasing,
     Upscaling,
     UpscalingSharpness,
+    Upscaler,
     ScreenshotQuality,
     FrameGeneration,
     Hdr,
@@ -324,6 +325,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             H::Upscaling,
                             High,
                             "Renders the world smaller and rebuilds it with TAA. Faster, softer.",
+                        ),
+                        h(
+                            H::Upscaler,
+                            None,
+                            "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.",
                         ),
                         h(
                             H::UpscalingSharpness,
@@ -785,6 +791,7 @@ impl H {
                 labelled("Screenshot Quality", format!("{}x", g.screenshot_quality))
             }
             H::FrameGeneration => labelled("Frame Generation", g.frame_generation.label()),
+            H::Upscaler => labelled("Upscaler", if g.dlss { "DLSS" } else { "FSR" }),
             H::Hdr => labelled("HDR", on_off(g.hdr)),
             H::HdrCalibrate => Text::literal(lang::get(match setup(s) {
                 Setup::Unknown => "Calibrate...",
@@ -924,6 +931,7 @@ impl H {
                     back,
                 )
             }
+            H::Upscaler => g.dlss = !g.dlss,
             H::FrameGeneration => {
                 g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
             }
@@ -1084,6 +1092,7 @@ impl Item {
                     | H::PresentMode
                     | H::Workers
                     | H::FrameGeneration
+                    | H::Upscaler
                     | H::BatteryMode
                     | H::ShadowCache
                     | H::GraphicsApi
@@ -1280,6 +1289,7 @@ impl Columns {
 /// its sharpness only while it upscales.
 fn shown(item: Item, s: &Settings) -> bool {
     (item != Item::Horizon(H::Upscaling) || s.horizon.taa)
+        && (item != Item::Horizon(H::Upscaler) || s.horizon.taa)
         && (item != Item::Horizon(H::UpscalingSharpness)
             || s.horizon.upscaling != Upscaling::Native)
 }

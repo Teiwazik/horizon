@@ -81,7 +81,7 @@ pub struct Post {
     /// this much smaller and TAA rebuilds it at the resolution scale's size.
     pub upscale: f32,
     /// TAA runs this frame (`jitter`): not on the title screen or under a shader pack.
-    taa_on: bool,
+    pub taa_on: bool,
     /// A native pack's post stage runs before TAA this frame: TAA reads what it drew.
     pub pack_taa: bool,
     target: Option<WorldTarget>,
@@ -94,6 +94,10 @@ pub struct Post {
     /// NVIDIA DLSS in place of TAA's resolve, when the build has it and it started.
     #[cfg(feature = "dlss")]
     dlss: Option<super::dlss::Dlss>,
+    /// The Upscaler setting: DLSS (when it runs) or TAA's own resolve.
+    pub use_dlss: bool,
+    /// Whether DLSS made last frame's picture.
+    pub dlss_ran: bool,
 }
 
 impl Post {
@@ -297,6 +301,8 @@ impl Post {
             taa_this_frame: bytemuck::Zeroable::zeroed(),
             #[cfg(feature = "dlss")]
             dlss: None,
+            use_dlss: true,
+            dlss_ran: false,
         }
     }
 
@@ -573,6 +579,9 @@ impl Post {
         let taa = target.taa.as_ref()?;
         let res = self.taa_resources.as_ref()?;
         let hdr = self.format == wgpu::TextureFormat::Rgba16Float;
+        if !self.use_dlss {
+            return None;
+        }
         let dlss = self.dlss.as_mut()?;
         if !dlss.ready(device, queue, taa.size, target.size, self.upscale, hdr) {
             return None;
@@ -612,6 +621,7 @@ impl Post {
         mut timing: Option<&mut super::pack_timing::PassTiming>,
         motion: Option<&wgpu::TextureView>,
     ) {
+        self.dlss_ran = false;
         #[cfg(feature = "dlss")]
         if self.taa_on
             && let Some(group) = self.dlss(device, queue, encoder, motion)
@@ -622,6 +632,7 @@ impl Post {
                 &self.copy
             };
             self.draw_onto(encoder, screen, &group, pipeline, timing);
+            self.dlss_ran = true;
             return;
         }
         let Some(target) = &self.target else { return };

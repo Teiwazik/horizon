@@ -28,6 +28,7 @@ impl FrameGraph {
         &self,
         mode: Overlay,
         generated: Option<f32>,
+        upscaler: Option<String>,
         batch: &mut HudBatch,
         atlas: &HudAtlas,
     ) {
@@ -41,10 +42,13 @@ impl FrameGraph {
         let lines = [
             {
                 let fps = 1000.0 / frame.max(0.001);
+                let up = upscaler.map_or(String::new(), |l| format!(" {l}"));
                 match generated {
                     // As F3 shows it: the real frames, then all that reach the screen.
-                    Some(share) => format!("{fps:.0} fps ({:.0} FSR 3.1)", fps * (1.0 + share)),
-                    None => format!("{fps:.0} fps"),
+                    Some(share) => {
+                        format!("{fps:.0} fps ({:.0} FSR 3.1){up}", fps * (1.0 + share))
+                    }
+                    None => format!("{fps:.0} fps{up}"),
                 }
             },
             format!("frame {frame:.1} ms  max {worst:.1}"),

@@ -374,8 +374,13 @@ impl Game<'_> {
                     (self.fps * (1.0 + share)).round() as i32
                 )
             });
+        let upscaler = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.upscaler_label())
+            .map_or(String::new(), |l| format!(" {l}"));
         d.priority(format!(
-            "{} fps{generated} T: {}{present} @{refresh}Hz",
+            "{} fps{generated}{upscaler} T: {}{present} @{refresh}Hz",
             self.fps.round() as i32,
             if limit == 260 {
                 "inf".into()

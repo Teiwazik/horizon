@@ -498,6 +498,7 @@ impl Game<'_> {
                 s.horizon.upscaling.ratio(),
                 s.horizon.upscaling_sharpness as f32 / 100.0,
             );
+            r.set_dlss(s.horizon.dlss);
             r.set_frame_generation(
                 s.horizon.frame_generation != horizon_client::graphics::FrameGeneration::Off,
             );

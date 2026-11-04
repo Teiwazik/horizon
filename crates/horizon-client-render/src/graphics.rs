@@ -603,6 +603,8 @@ pub struct Graphics {
     pub screenshot_quality: u32,
     /// Frame generation (Horizon setting), off by default.
     pub frame_generation: FrameGeneration,
+    /// Upscaler: DLSS in place of TAA's own (FSR-style) resolve, where DLSS runs.
+    pub dlss: bool,
     /// HDR output (HDR10, or scRGB), where the display path offers it.
     pub hdr: bool,
     /// HDR paper white (where SDR white sits), in nits; 0 is Auto: the desktop's SDR
@@ -679,6 +681,7 @@ impl Default for Graphics {
             upscaling_sharpness: 85,
             screenshot_quality: 1,
             frame_generation: FrameGeneration::Off,
+            dlss: true,
             hdr: false,
             hdr_paper_white: 0,
             hdr_peak: 0,
@@ -801,6 +804,7 @@ impl Graphics {
                         .unwrap_or(1)
                 }
                 "frameGeneration" => g.frame_generation = FrameGeneration::parse(value),
+                "upscaler" => g.dlss = value == "dlss",
                 "hdr" => g.hdr = flag(g.hdr),
                 "hdrPaperWhite" => {
                     g.hdr_paper_white = match number(g.hdr_paper_white) {
@@ -838,7 +842,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -878,6 +882,7 @@ impl Graphics {
             self.upscaling_sharpness,
             self.screenshot_quality,
             self.frame_generation.name(),
+            if self.dlss { "dlss" } else { "fsr" },
             bool_text(self.hdr),
             self.hdr_paper_white,
             self.hdr_peak,
@@ -1050,6 +1055,7 @@ mod tests {
             upscaling_sharpness: 40,
             screenshot_quality: 4,
             frame_generation: FrameGeneration::Fsr31,
+            dlss: true,
             hdr: true,
             hdr_paper_white: 240,
             hdr_peak: 1400,

@@ -5761,6 +5761,35 @@ impl Renderer {
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
+    /// The Upscaler setting: DLSS where it runs, else TAA's own resolve.
+    pub fn set_dlss(&mut self, on: bool) {
+        self.world_post.use_dlss = on;
+    }
+    /// What rebuilds the picture, for the FPS overlay and F3: "DLSS Quality", "FSR Balanced", ...
+    pub fn upscaler_label(&self) -> Option<String> {
+        let w = &self.world_post;
+        if !w.taa_on {
+            return None;
+        }
+        let u = w.upscale;
+        let mode = if u <= 1.01 {
+            None
+        } else if u <= 1.55 {
+            Some("Quality")
+        } else if u <= 1.8 {
+            Some("Balanced")
+        } else if u <= 2.5 {
+            Some("Performance")
+        } else {
+            Some("Ultra Performance")
+        };
+        Some(match (w.dlss_ran, mode) {
+            (true, None) => "DLAA".into(),
+            (true, Some(m)) => format!("DLSS {m}"),
+            (false, None) => "TAA".into(),
+            (false, Some(m)) => format!("FSR {m}"),
+        })
+    }
     /// Frame generation on or off (FSR 3.1's frame interpolation).
     pub fn set_frame_generation(&mut self, on: bool) {
         if !on {

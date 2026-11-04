@@ -8295,9 +8295,11 @@ impl Game<'_> {
             .renderer
             .as_ref()
             .and_then(|r| r.frame_generation_share());
+        let upscaler = self.renderer.as_ref().and_then(|r| r.upscaler_label());
         self.frame_graph.draw(
             self.settings.horizon.overlay,
             generated,
+            upscaler,
             &mut batch,
             &self.gui.atlas,
         );
