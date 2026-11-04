@@ -458,6 +458,17 @@ impl Writer {
         let period = Duration::from_secs_f64(
             crate::synth::BT_HAPTICS_FRAMES as f64 / f64::from(crate::synth::BT_HAPTICS_RATE),
         );
+        if self.next_haptics.is_none() {
+            // A report with the haptics-select flag (the kernel's rumble, another host's) leaves
+            // the actuators to the motors' emulation, and the PCM unheard, until a report
+            // without it: one with no flags at all changes nothing else.
+            let Some(pad) = self.pad.as_mut() else {
+                return;
+            };
+            if let Err(e) = pad.write(&Output::default()) {
+                return self.lost(&e.to_string());
+            }
+        }
         let now = Instant::now();
         let mut due = match self.next_haptics {
             Some(due) if now.saturating_duration_since(due) < period * 4 => due,
