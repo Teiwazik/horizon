@@ -9684,6 +9684,12 @@ impl Renderer {
                     }),
             );
             if packed.is_some() {
+                // DLSS submits the frame so far before its own commands: the uploads go with it.
+                #[cfg(feature = "dlss")]
+                {
+                    self.uploads.finish(&encoder);
+                    self.section_uploads.finish(&encoder);
+                }
                 self.world_post.finish(
                     &self.device,
                     &self.queue,
@@ -9697,6 +9703,12 @@ impl Renderer {
             let world = self
                 .frame_gen
                 .world(&self.device, &self.world_post, &self.config);
+            // DLSS submits the frame so far before its own commands: the uploads go with it.
+            #[cfg(feature = "dlss")]
+            {
+                self.uploads.finish(&encoder);
+                self.section_uploads.finish(&encoder);
+            }
             self.world_post.finish(
                 &self.device,
                 &self.queue,
@@ -9706,6 +9718,12 @@ impl Renderer {
                 taa_motion.as_ref(),
             );
         } else if scaled.is_some() {
+            // DLSS submits the frame so far before its own commands: the uploads go with it.
+            #[cfg(feature = "dlss")]
+            {
+                self.uploads.finish(&encoder);
+                self.section_uploads.finish(&encoder);
+            }
             self.world_post.finish(
                 &self.device,
                 &self.queue,
