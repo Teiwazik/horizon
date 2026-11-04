@@ -311,6 +311,13 @@ pub struct Stage {
     /// chain's last picture.
     #[serde(default)]
     pub output: Option<String>,
+    /// The weather stage only: the `[[post]]` pass (by its `file`) after which the rain and snow
+    /// draw, over that pass's picture, in place of with the world: for a pack whose passes
+    /// light the terrain again from what the material stage stored (ray-traced light), which
+    /// would paint over streaks drawn before. The pass must write the chain of passes at the
+    /// world's size, and not be the last.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 /// A post pass's sizes against the world's (`[[post]] scale`).
@@ -782,6 +789,34 @@ impl Manifest {
             .any(|s| s.scale.is_some() || s.output.is_some())
         {
             return Err(err("`scale` and `output` are keys of [[post]] only".into()));
+        }
+        if raw
+            .sky
+            .iter()
+            .chain(&raw.material)
+            .chain(&raw.vertex)
+            .chain(&raw.post)
+            .any(|s| s.after.is_some())
+        {
+            return Err(err("`after` is a key of [weather] only".into()));
+        }
+        if let Some(after) = raw.weather.as_ref().and_then(|w| w.after.as_ref()) {
+            let at = raw.post.iter().position(|p| &p.file == after);
+            match at {
+                None => {
+                    return Err(err(format!("weather.after: no [[post]] pass has file {after:?}")));
+                }
+                Some(i)
+                    if i + 1 == raw.post.len()
+                        || raw.post[i].output.is_some()
+                        || raw.post[i].scale.is_some_and(|s| s != 1.0) =>
+                {
+                    return Err(err(format!(
+                        "weather.after: {after:?} must write the chain of passes at the world's size, and not be the last"
+                    )));
+                }
+                Some(_) => {}
+            }
         }
         check_post_targets(&raw.post, &raw.textures).map_err(err)?;
         let shadow = match raw.shadow {

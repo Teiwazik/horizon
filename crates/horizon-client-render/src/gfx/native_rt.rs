@@ -25,10 +25,11 @@ const DATA_VERTICES: u64 = (192 << 20) / 24;
 /// Light sources the shader loops over: the strongest here.
 pub const MAX_LIGHTS: usize = 2048;
 /// The grid of which sources reach where: cells along a side, a cell's blocks, and a cell's
-/// words: 16 bits of count, then up to 15 sources by 16 bits each, strongest first.
+/// words: 16 bits of count, then up to 63 sources by 16 bits each, strongest first (31 drew
+/// seams between cells under a crowd of lamps, each cell keeping different ones).
 const LIGHT_GRID: u32 = 20;
 const LIGHT_CELL: f32 = 8.0;
-const LIGHT_CELL_WORDS: usize = 16;
+const LIGHT_CELL_WORDS: usize = 32;
 /// `instance_custom_data` of translucent terrain.
 const TRANSLUCENT: u32 = 1 << 23;
 /// `instance_custom_data` of the entities, whose vertices aren't in the scene's buffer: the

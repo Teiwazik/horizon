@@ -139,6 +139,10 @@ stages.
 
 ## Changelog
 
+- 2026-11-04: `[weather] after`: the `[[post]]` pass (by its `file`) after which rain and snow
+  draw, over its picture, for a pack whose passes light the terrain again and would paint over
+  streaks drawn with the world; `block_light_colors`' alpha is now the block light reaching the
+  cell (spread from each source, stopped by walls) in place of how near the sources are.
 - 2026-11-03: merged with main: `MaterialInput.tags` (0 on this branch) and `colored_light`
   (`[[particle_lights]]`, and held or dropped items in their `[[lights]]` colour) join the
   material stage's input, in main's order, `displaced` last.

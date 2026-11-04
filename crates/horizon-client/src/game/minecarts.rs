@@ -2388,6 +2388,7 @@ impl Game<'_> {
         let range = (WIDTH + HEIGHT + WIDTH) / 3.0 * 64.0 * self.view_scale();
         for c in &self.carts {
             let entity_start = out.len();
+            self.mark_motion(entity_start, (4 << 32) | u64::from(c.id));
             let Some(model) = self.cart_models.models.get(&c.kind) else {
                 continue;
             };

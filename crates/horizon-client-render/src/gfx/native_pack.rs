@@ -33,6 +33,9 @@ pub struct NativePack {
     pub own_fog: bool,
     /// The weather stage's pipeline (`[weather]`), drawing rain and snow in vanilla's place.
     pub weather: Option<wgpu::RenderPipeline>,
+    /// The post pass after which it draws (`[weather] after`), in place of with the world:
+    /// its pipeline is then built for the passes' targets.
+    pub weather_after: Option<usize>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
     pub displacement: Option<Displacement>,
     /// Whether the material stage reads the water mirror (`reflection`) and `[reflection]`'s
@@ -176,6 +179,12 @@ impl NativePack {
             .as_ref()
             .and_then(|s| s.stars)
             .unwrap_or(true);
+        let weather_after = report
+            .manifest
+            .weather
+            .as_ref()
+            .and_then(|w| w.after.as_ref())
+            .and_then(|after| report.manifest.post.iter().position(|p| &p.file == after));
         let weather = report
             .stages
             .iter()
@@ -183,7 +192,11 @@ impl NativePack {
             .map(|stage| {
                 super::weather::native_pipeline(
                     device,
-                    format,
+                    if weather_after.is_some() {
+                        super::native_post::INTERMEDIATE
+                    } else {
+                        format
+                    },
                     terrain.entities,
                     terrain.weather_time,
                     &frame,
@@ -267,6 +280,7 @@ impl NativePack {
             vanilla_stars,
             own_fog,
             weather,
+            weather_after,
             displacement,
             reflection,
         };

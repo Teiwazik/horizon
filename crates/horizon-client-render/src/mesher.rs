@@ -275,6 +275,10 @@ pub struct SectionMesh {
     /// Blocks that give off light (world position, state id), for the colour of block light
     /// Horizon's shader packs read (`gfx::block_light`).
     pub lights: Vec<([i32; 3], u32)>,
+    /// The section's cells block light cannot pass (`isSolidRender`), by row (`y << 4 | z`,
+    /// bit x), when it has any: the walls the shader packs' block light floods around
+    /// (`gfx::block_light`).
+    pub light_walls: Option<Box<[u16; 256]>>,
     /// Sprite layers emitted while building this mesh. Kept distinct before
     /// upload so the renderer does not rescan every terrain vertex.
     pub sprite_layers: Vec<u16>,
@@ -293,6 +297,7 @@ impl Default for SectionMesh {
             visibility: ALL_VISIBLE,
             block_entities: Vec::new(),
             lights: Vec::new(),
+            light_walls: None,
             sprite_layers: Vec::new(),
             bounds: None,
             keep: false,
@@ -324,6 +329,7 @@ impl SectionMesh {
         self.translucent.clear();
         self.block_entities.clear();
         self.lights.clear();
+        self.light_walls = None;
         self.sprite_layers.clear();
         self.sides = Sides::default();
         self.visibility = ALL_VISIBLE;
@@ -1434,7 +1440,11 @@ impl Mesher<'_> {
         let pad = &scratch.padded;
         solid_rows(pad, &self.tables.solid, &mut scratch.solid_rows);
         let opaque = &scratch.solid_rows;
-        out.visibility = visibility_rows(&open_rows(opaque));
+        let open = open_rows(opaque);
+        out.visibility = visibility_rows(&open);
+        if open.iter().any(|&row| row != u16::MAX) {
+            out.light_walls = Some(Box::new(open.map(|row| !row)));
+        }
         let base_y = center.min_y() + sy * 16;
         if self.leaf_culling.is_interior() {
             scratch

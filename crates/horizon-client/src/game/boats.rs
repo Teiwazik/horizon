@@ -1412,6 +1412,9 @@ impl Game<'_> {
         );
         for b in &self.boats {
             let entity_start = out.len();
+            // Its own motion for frame generation and TAA: the boat one rides moves with the
+            // camera, which the world's reprojection would smear back along its way.
+            self.mark_motion(entity_start, (3 << 32) | u64::from(b.id));
             // EntityRenderer.shouldRender.
             let (previous, position) = (at(b.previous), at(b.position));
             if !self.standing_entity_in_view(

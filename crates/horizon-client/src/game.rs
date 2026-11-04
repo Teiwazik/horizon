@@ -11229,6 +11229,7 @@ impl Game<'_> {
         self.boat_geometry(camera, alpha, &mut out);
         self.mark_entity(out.len(), "minecraft:minecart");
         self.cart_geometry(camera, alpha, &mut out);
+        self.mark_motion(out.len(), 0);
         // Beams: `gbuffers_beaconbeam`, not a block entity's program (5.4 has no stage for them).
         self.mark_stage(out.len(), "NONE");
         self.beacon_geometry(camera, alpha, &mut out);

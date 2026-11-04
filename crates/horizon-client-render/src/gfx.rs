@@ -1109,6 +1109,9 @@ pub struct Renderer {
     block_entity_revision: u64,
     /// The light sources of each section and their revision, for `block_light`.
     light_blocks: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+    /// Each meshed section's cells block light can't pass (`SectionMesh::light_walls`), for
+    /// the shader packs' block light, which floods around them.
+    light_walls: FxHashMap<SectionKey, Box<[u16; 256]>>,
     light_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     occlusion: occlusion::Occlusion,
@@ -4286,6 +4289,7 @@ impl Renderer {
             newest_lod_fade: None,
             block_entity_revision: next_block_entity_revision(),
             light_blocks: Default::default(),
+            light_walls: Default::default(),
             light_revision: 0,
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             layout: crate::chunk::ColumnLayout::VANILLA,
@@ -4769,7 +4773,11 @@ impl Renderer {
             let old = self.light_blocks.insert(key, mesh.lights.clone());
             old.as_deref() != Some(&mesh.lights[..])
         };
-        if lights_changed {
+        let walls_changed = match &mesh.light_walls {
+            None => self.light_walls.remove(&key).is_some(),
+            Some(walls) => self.light_walls.insert(key, walls.clone()).as_ref() != Some(walls),
+        };
+        if lights_changed || walls_changed {
             self.light_revision += 1;
         }
         if !self.lod_retiring.is_empty() {
@@ -5450,6 +5458,7 @@ impl Renderer {
                 if self.light_blocks.remove(&key).is_some() {
                     self.light_revision += 1;
                 }
+                self.light_walls.remove(&key);
                 self.section_uploaded.remove(&key);
                 if retiring {
                     // Distant tiles still leave its column out: drawn until they don't.
@@ -5487,6 +5496,7 @@ impl Renderer {
         let before = self.light_blocks.len();
         self.light_blocks.retain(|key, _| kept(key));
         self.light_revision += (before - self.light_blocks.len()) as u64;
+        self.light_walls.retain(|key, _| kept(key));
         self.section_uploaded.retain(|key, _| kept(key));
         let released = self.sections.remove_columns(&gone);
         self.release_meshes(released);
@@ -8143,6 +8153,7 @@ impl Renderer {
                 &self.queue,
                 frame.camera,
                 &self.light_blocks,
+                &self.light_walls,
                 self.light_revision,
             );
             laps.lap("r_block_light");
@@ -9434,13 +9445,19 @@ impl Renderer {
             // terrain and clouds, so the water behind the rain is drawn first.
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             if !pack_draws_weather && !oit_on {
-                let native_weather = self
-                    .native
-                    .as_ref()
-                    .filter(|_| !frame.title)
-                    .and_then(|n| Some((n.weather.as_ref()?, &n.frame.group)));
-                self.weather
-                    .draw(&mut pass, &self.entity_group, native_weather);
+                let native = self.native.as_ref().filter(|_| !frame.title);
+                // A pack's weather drawn after one of its post passes is left to that pass;
+                // without the post stage this frame, vanilla's streaks draw (the pack's
+                // pipeline is built for the passes' targets).
+                let after_post = native.is_some_and(|n| n.weather_after.is_some());
+                let post_runs = native_post && scaled.is_some();
+                if !(after_post && post_runs) {
+                    let native_weather = native
+                        .filter(|_| !after_post)
+                        .and_then(|n| Some((n.weather.as_ref()?, &n.frame.group)));
+                    self.weather
+                        .draw(&mut pass, &self.entity_group, native_weather);
+                }
                 pass.set_bind_group(0, &self.group, &[]);
             }
             // LevelRenderer: the world border after translucent terrain and weather.
@@ -9639,6 +9656,19 @@ impl Renderer {
                     .rays
                     .as_ref()
                     .map(|rays| (&self.group, rays, &native.frame.albedo_view)),
+                native
+                    .weather
+                    .as_ref()
+                    .zip(native.weather_after)
+                    .filter(|_| !pack_draws_weather && !oit_on)
+                    .map(|(pipeline, after)| native_post::PostWeather {
+                        after,
+                        weather: &self.weather,
+                        pipeline,
+                        frame: &native.frame.group,
+                        entities: &self.entity_group,
+                        indices: &self.indices,
+                    }),
             );
             if packed.is_some() {
                 self.world_post.finish(

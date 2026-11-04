@@ -408,7 +408,7 @@ const MATERIAL_RESOURCES: [Resource; 12] = [
         binding: 9,
         name: "block_light_colors",
         ty: "var block_light_colors: texture_3d<f32>",
-        doc: "The colour of the block light around the camera, from the `[[lights]]` of the light sources nearby: rgb their colours averaged by how near each is, divided by 4 (a `[[lights]]` colour goes up to 4), a how strongly they reach the cell, 0 to 1. Read it through the prelude's `block_light_color`.",
+        doc: "The colour of the block light around the camera, from the `[[lights]]` of the light sources nearby: rgb their colours averaged by how near each is, divided by 4 (a `[[lights]]` colour goes up to 4), a the block light reaching the cell over 15 (spread round from each source, a step to an edge or corner neighbour costing its length, stopped by the blocks that stop light), 0 to 1. Read it through the prelude's `block_light_color`.",
     },
     Resource {
         binding: 10,
@@ -427,8 +427,9 @@ const MATERIAL_RESOURCES: [Resource; 12] = [
 /// Functions the material prelude gives packs.
 const MATERIAL_HELPERS: &str =
     "// The colour of the block light at the camera-relative `position` (rgb, from the `[[lights]]`
-// of the sources nearby) and how strongly they reach it (a, 0 where none does). Block light
-// keeps its own brightness (`input.light.x`): this is its colour only.
+// of the sources nearby) and the block light reaching it (a, 0 to 1 for levels 0 to 15),
+// spread round from each source and stopped by walls: a smooth stand-in for `input.light.x`
+// near the camera.
 fn block_light_color(position: vec3<f32>) -> vec4<f32> {
     let size = vec3<f32>(textureDimensions(block_light_colors));
     let uvw = (position - block_light_grid.xyz) / (block_light_grid.w * size);

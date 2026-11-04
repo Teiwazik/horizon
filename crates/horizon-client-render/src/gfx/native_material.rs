@@ -701,19 +701,23 @@ fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 }
 // Which word of the source grid starts the list for this place, past the end if none. Not
 // dithered: a pack looking up a source it kept must find it, from every pixel of the place.
+// The list of the cell at `position`, its edge dithered by up to 3 blocks (the same for a
+// pixel's calls in a frame): where a crowd of sources overflows the lists, neighbouring cells
+// keep different ones, and read at the exact edge their light changed there in a straight line.
 fn horizon_ray_light_cell(position: vec3<f32>) -> u32 {
-    let cell = vec3<i32>(floor((position - horizon_ray_sources[0].position.yzw) / 8.0));
+    let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 6.0;
+    let cell = vec3<i32>(floor((position + dither - horizon_ray_sources[0].position.yzw) / 8.0));
     if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
         return 0xffffffffu;
     }
-    return u32((cell.z * 20 + cell.y) * 20 + cell.x) * 16u;
+    return u32((cell.z * 20 + cell.y) * 20 + cell.x) * 32u;
 }
 fn horizon_ray_light_count(position: vec3<f32>) -> u32 {
     let first = horizon_ray_light_cell(position);
     if first == 0xffffffffu {
         return 0u;
     }
-    return min(horizon_ray_light_cells[first] & 0xffffu, 31u);
+    return min(horizon_ray_light_cells[first] & 0xffffu, 63u);
 }
 fn horizon_ray_light_id(position: vec3<f32>, index: u32) -> u32 {
     let n = index + 1u;
@@ -752,13 +756,11 @@ fn horizon_ray_light_seen(id: u32, position: vec3<f32>, normal: vec3<f32>, salt:
 }
 fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32) -> vec3<f32> {
     // The sources reaching this place. The cell's edge is dithered, so two cells' lists blend.
-    let dither = (vec3<f32>(horizon_ray_noise(31.0), horizon_ray_noise(47.0), horizon_ray_noise(59.0)) - 0.5) * 4.0;
-    let cell = vec3<i32>(floor((position + dither - horizon_ray_sources[0].position.yzw) / 8.0));
-    if any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(20)) {
+    let first = horizon_ray_light_cell(position);
+    if first == 0xffffffffu {
         return vec3<f32>(0.0);
     }
-    let first = u32((cell.z * 20 + cell.y) * 20 + cell.x) * 16u;
-    let count = min(horizon_ray_light_cells[first] & 0xffffu, 31u);
+    let count = min(horizon_ray_light_cells[first] & 0xffffu, 63u);
     // How strong each is here, not at the cell's middle: the budget goes to the strongest at
     // this very point, so what gets a shadow doesn't jump along a surface.
     var strengths: array<f32, 16>;

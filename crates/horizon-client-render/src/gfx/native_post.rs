@@ -11,7 +11,7 @@ use horizon_shader_api::{Frame as FrameInputs, check::CheckedStage, stages::GROU
 
 use super::Frame;
 
-const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub(super) const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The world's colour, depth and surface views a set of bind groups was made for.
 type WorldViews = (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView);
@@ -1452,6 +1452,7 @@ impl NativePost {
             &super::native_rt::RayScene,
             &wgpu::TextureView,
         )>,
+        weather: Option<PostWeather<'_>>,
     ) {
         self.prepare(device, world, size, history_reset, rays);
         // Copies made last frame: write them before this frame's copies ask for more.
@@ -1507,6 +1508,32 @@ impl NativePost {
             pass.set_bind_group(GROUP, group, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
+            // The rain and snow over this pass's picture, behind what the world's depth has
+            // nearer (it is not written).
+            if let Some(w) = weather.as_ref().filter(|w| w.after == i)
+                && matches!(self.plan[i].writes, Writes::Chain(_))
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Weather (after the pack's pass)"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: world.1,
+                        depth_ops: None,
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pass.set_index_buffer(w.indices.slice(..), wgpu::IndexFormat::Uint32);
+                w.weather.draw(&mut pass, w.entities, Some((w.pipeline, w.frame)));
+            }
             if dump_now {
                 let clean = |label: &str| label.replace(['/', '\\', ':'], "_");
                 let name = if i + 1 < self.passes.len() {
@@ -1533,6 +1560,17 @@ impl NativePost {
             self.history_valid = true;
         }
     }
+}
+
+/// The rain and snow to draw after one of the passes (`[weather] after`): its index, then what
+/// the weather draws with.
+pub struct PostWeather<'a> {
+    pub after: usize,
+    pub weather: &'a super::weather::Weather,
+    pub pipeline: &'a wgpu::RenderPipeline,
+    pub frame: &'a wgpu::BindGroup,
+    pub entities: &'a wgpu::BindGroup,
+    pub indices: &'a wgpu::Buffer,
 }
 
 /// A pass target of `size`: half-float colour, readable and copyable.
