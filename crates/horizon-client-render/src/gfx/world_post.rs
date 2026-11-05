@@ -65,6 +65,11 @@ pub struct Post {
     sampler: wgpu::Sampler,
     copy: wgpu::RenderPipeline,
     fxaa: wgpu::RenderPipeline,
+    /// The same `fs_copy` onto a `Rgba8Unorm` target, for DLSS-G's input: the
+    /// feature takes RGBA8 (the bridge's verified path) and not the swapchain's
+    /// BGRA of the screens this `Post` normally writes.
+    #[cfg(feature = "dlss")]
+    dlss_copy: wgpu::RenderPipeline,
     /// Contrast-adaptive sharpening of TAA's upscaled picture: the jittered frames are
     /// spread over more output pixels, and the blend softens edges.
     sharpen: wgpu::RenderPipeline,
@@ -278,11 +283,15 @@ impl Post {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        #[cfg(feature = "dlss")]
+        let dlss_copy = pipeline("fs_copy", &pipeline_layout, wgpu::TextureFormat::Rgba8Unorm);
         Self {
             shader: shader.clone(),
             pipeline_layout: pipeline_layout.clone(),
             copy: pipeline("fs_copy", &pipeline_layout, format),
             fxaa: pipeline("fs_fxaa", &pipeline_layout, format),
+            #[cfg(feature = "dlss")]
+            dlss_copy,
             sharpen: sharpen_pipeline(device, &shader, &pipeline_layout, format, 0.85),
             sharpness: 0.85,
             layout,
@@ -557,7 +566,12 @@ impl Post {
         })
     }
 
-    /// Use DLSS in place of TAA's resolve from now on, when NGX started on this device.
+    /// Release SR before the process SDK and Vulkan device.
+    #[cfg(feature = "dlss")]
+    pub(super) fn shutdown_dlss(&mut self) {
+        self.dlss = None;
+    }
+
     #[cfg(feature = "dlss")]
     pub fn enable_dlss(&mut self, device: &wgpu::Device, adapter: &wgpu::Adapter) {
         if self.dlss.is_none() {
@@ -671,7 +685,10 @@ impl Post {
                 entry(2, wgpu::BindingResource::TextureView(&taa.history[1 - i])),
                 entry(3, wgpu::BindingResource::TextureView(&taa.depth)),
                 entry(4, res.uniform.as_entire_binding()),
-                entry(5, wgpu::BindingResource::TextureView(motion.unwrap_or(&res.no_motion))),
+                entry(
+                    5,
+                    wgpu::BindingResource::TextureView(motion.unwrap_or(&res.no_motion)),
+                ),
             ],
         });
         pass.set_pipeline(&res.pipeline);
@@ -700,6 +717,19 @@ impl Post {
             &self.copy
         };
         self.draw_onto(encoder, screen, group, pipeline, timing);
+    }
+
+    /// FS copies what `group` binds onto a `Rgba8Unorm` target: DLSS-G's input, whose
+    /// format is a plain RGBA8 and not the frame's own (`finish_with`'s).
+    #[cfg(feature = "dlss")]
+    pub(super) fn copy_onto_dlss(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::TextureView,
+        group: &wgpu::BindGroup,
+        timing: Option<&mut super::pack_timing::PassTiming>,
+    ) {
+        self.draw_onto(encoder, input, group, &self.dlss_copy, timing);
     }
 
     /// Draw what `group` binds onto `screen` through `pipeline`.

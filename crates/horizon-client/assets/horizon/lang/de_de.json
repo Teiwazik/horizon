@@ -382,5 +382,13 @@
   "horizon.tempban.success": "%1$s für %2$s, bis %3$s",
   "horizon.tempban.list.empty": "Es gibt keine befristeten Sperren",
   "horizon.tempban.list.count": "Es gibt %s befristete Sperre(n):",
-  "horizon.tempban.list.entry": "%1$s wurde von %2$s gesperrt, %3$s (bis %4$s)"
+  "horizon.tempban.list.entry": "%1$s wurde von %2$s gesperrt, %3$s (bis %4$s)",
+  "Frame Generation Multiplier": "Multiplikator der Frame-Generierung",
+  "Total displayed frames per real frame. DLSS-G supports 2x, 3x and 4x; FSR uses 2x.": "Angezeigte Bilder pro echtem Bild. DLSS-G unterstützt 2x, 3x und 4x; FSR verwendet 2x.",
+  "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.": "Angezeigte Bilder pro echtem Bild: DLSS-G 2x/3x/4x, FSR 2x.",
+  "Upscaler": "Upscaler",
+  "DLSS": "DLSS",
+  "FSR": "FSR",
+  "DLSS-G": "DLSS-G",
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Rekonstruiert das Bild mit FSR (TAA) oder NVIDIA DLSS."
 }

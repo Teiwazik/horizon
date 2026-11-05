@@ -95,6 +95,7 @@ pub enum H {
     Upscaler,
     ScreenshotQuality,
     FrameGeneration,
+    FrameGenerationMultiplier,
     Hdr,
     HdrBlackLevel,
     /// Binds `Graphics::hdr_key`.
@@ -350,6 +351,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             H::FrameGeneration,
                             Medium,
                             "Shows a made-up frame between each two real ones: smoother, a little more lag.",
+                        ),
+                        h(
+                            H::FrameGenerationMultiplier,
+                            High,
+                            "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.",
                         ),
                     ],
                 ),
@@ -849,6 +855,10 @@ impl H {
             H::ScreenshotQuality => {
                 labelled("Screenshot Quality", format!("{}x", g.screenshot_quality))
             }
+            H::FrameGenerationMultiplier => labelled(
+                "Frame Generation Multiplier",
+                format!("{}x", g.frame_generation_multiplier),
+            ),
             H::FrameGeneration => labelled("Frame Generation", g.frame_generation.label()),
             H::Upscaler => labelled("Upscaler", if g.dlss { "DLSS" } else { "FSR" }),
             H::Hdr => labelled("HDR", on_off(g.hdr)),
@@ -1001,6 +1011,10 @@ impl H {
                 )
             }
             H::Upscaler => g.dlss = !g.dlss,
+            H::FrameGenerationMultiplier => {
+                g.frame_generation_multiplier =
+                    step(&[2, 3, 4], g.frame_generation_multiplier, back)
+            }
             H::FrameGeneration => {
                 g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
             }
@@ -1189,6 +1203,7 @@ impl Item {
                     | H::PresentMode
                     | H::Workers
                     | H::FrameGeneration
+                    | H::FrameGenerationMultiplier
                     | H::Upscaler
                     | H::BatteryMode
                     | H::ShadowCache
@@ -1388,6 +1403,8 @@ impl Columns {
 /// its sharpness only while it upscales.
 fn shown(item: Item, s: &Settings) -> bool {
     (item != Item::Horizon(H::Upscaling) || s.horizon.taa)
+        && (item != Item::Horizon(H::FrameGenerationMultiplier)
+            || s.horizon.frame_generation == FrameGeneration::Dlss)
         && (item != Item::Horizon(H::Upscaler) || s.horizon.taa)
         && (item != Item::Horizon(H::UpscalingSharpness)
             || s.horizon.upscaling != Upscaling::Native)
@@ -2559,6 +2576,8 @@ mod tests {
                     *p == page
                         && *i != Item::Horizon(H::Upscaling)
                         && *i != Item::Horizon(H::UpscalingSharpness)
+                        && *i != Item::Horizon(H::Upscaler)
+                        && *i != Item::Horizon(H::FrameGenerationMultiplier)
                 })
                 .collect()
         };
@@ -3642,7 +3661,9 @@ mod tests {
         let missed: Vec<_> = missed
             .into_iter()
             .filter(|m| !m.starts_with(|c: char| c.is_ascii_digit()) && !m.starts_with("Auto ("))
-            .filter(|m| !["An", "Aus", "FSR 3.1", "key.keyboard.unknown"].contains(&m.as_str()))
+            .filter(|m| {
+                !["An", "Aus", "FSR 3.1", "DLSS-G", "key.keyboard.unknown"].contains(&m.as_str())
+            })
             .collect();
         assert_eq!(missed, Vec::<String>::new());
     }

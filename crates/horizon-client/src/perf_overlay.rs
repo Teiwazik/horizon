@@ -11,10 +11,14 @@ const HISTORY: usize = 160;
 
 #[derive(Default)]
 pub struct FrameGraph {
+    backend: String,
     /// Frame, CPU and GPU milliseconds of recent frames, oldest first.
     frames: VecDeque<(f32, f32, f32)>,
 }
 impl FrameGraph {
+    pub fn set_generation_backend(&mut self, label: String) {
+        self.backend = label;
+    }
     pub fn record(&mut self, frame_ms: f32, cpu_ms: f32, gpu_ms: Option<f32>) {
         let gpu = gpu_ms.unwrap_or_else(|| self.frames.back().map_or(0.0, |f| f.2));
         if self.frames.len() == HISTORY {
@@ -46,7 +50,11 @@ impl FrameGraph {
                 match generated {
                     // As F3 shows it: the real frames, then all that reach the screen.
                     Some(share) => {
-                        format!("{fps:.0} fps ({:.0} FSR 3.1){up}", fps * (1.0 + share))
+                        format!(
+                            "{fps:.0} fps ({:.0} {}){up}",
+                            fps * (1.0 + share),
+                            self.backend
+                        )
                     }
                     None => format!("{fps:.0} fps{up}"),
                 }

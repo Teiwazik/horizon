@@ -228,5 +228,13 @@
   "Results for \"%s\"": "Результаты для «%s»",
   "No settings match.": "Нет подходящих настроек.",
   "Upscaling Sharpness": "Резкость апскейла",
-  "Sharpens the upscaled picture. Higher: crisper edges, more shimmer.": "Повышает резкость картинки после апскейла. Выше: чётче края, больше мерцания."
+  "Sharpens the upscaled picture. Higher: crisper edges, more shimmer.": "Повышает резкость картинки после апскейла. Выше: чётче края, больше мерцания.",
+  "Frame Generation Multiplier": "Множитель генерации кадров",
+  "Total displayed frames per real frame. DLSS-G supports 2x, 3x and 4x; FSR uses 2x.": "Число отображаемых кадров на один настоящий. DLSS-G: 2x, 3x и 4x; FSR: 2x.",
+  "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.": "Кадры на один настоящий: DLSS-G 2x/3x/4x, FSR 2x.",
+  "Upscaler": "Апскейлер",
+  "DLSS": "DLSS",
+  "FSR": "FSR",
+  "DLSS-G": "DLSS-G",
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Восстановление изображения: FSR (TAA) или NVIDIA DLSS."
 }

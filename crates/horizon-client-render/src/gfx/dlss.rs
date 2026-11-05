@@ -48,10 +48,7 @@ pub struct Dlss {
     sdk: Arc<Mutex<DlssSdk>>,
     context: Option<(DlssSuperResolution, [u32; 2], DlssPerfQualityMode)>,
     output: Option<([u32; 2], wgpu::TextureView)>,
-    motion: Option<([u32; 2], wgpu::TextureView)>,
-    motion_pipeline: wgpu::RenderPipeline,
-    motion_layout: wgpu::BindGroupLayout,
-    motion_uniform: wgpu::Buffer,
+    vectors: MotionVectors,
     /// The context failed for this size and mode: TAA keeps it.
     failed: Option<([u32; 2], DlssPerfQualityMode)>,
 }
@@ -60,86 +57,12 @@ impl Dlss {
     /// DLSS when NGX started on this device.
     pub fn new(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Option<Self> {
         let sdk = horizon_hdr::dlss::sdk()?;
-        let shader = &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Horizon DLSS motion"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../dlss_motion.wgsl").into()),
-        });
-        let motion_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Horizon DLSS motion"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Horizon DLSS motion"),
-            bind_group_layouts: &[Some(&motion_layout)],
-            immediate_size: 0,
-        });
-        let motion_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Horizon DLSS motion"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs_dlss_motion"),
-                compilation_options: Default::default(),
-                targets: &[Some(MOTION_FORMAT.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let motion_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Horizon DLSS motion"),
-            size: std::mem::size_of::<MotionUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         Some(Dlss {
             adapter: adapter.clone(),
             sdk,
             context: None,
             output: None,
-            motion: None,
-            motion_pipeline,
-            motion_layout,
-            motion_uniform,
+            vectors: MotionVectors::new(device),
             failed: None,
         })
     }
@@ -252,20 +175,152 @@ impl Dlss {
                 ),
             ));
         }
-        if self.motion.as_ref().is_none_or(|(s, _)| *s != render) {
-            self.motion = Some((
-                render,
-                Self::texture(
+        let (_, output) = self.output.as_ref()?;
+        let vectors = self
+            .vectors
+            .draw(device, queue, encoder, depth, own_motion, render, motion);
+        let parameters = DlssSuperResolutionRenderParameters {
+            color,
+            depth,
+            motion_vectors: &vectors,
+            exposure: DlssSuperResolutionExposure::Automatic,
+            bias: None,
+            dlss_output: output,
+            reset,
+            jitter_offset: jitter_pixels,
+            partial_texture_size: Some(render),
+            motion_vector_scale: None,
+        };
+        match context.render(parameters, encoder, &self.adapter) {
+            Ok(dlss) => {
+                let before = std::mem::replace(
+                    encoder,
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Horizon frame after DLSS"),
+                    }),
+                );
+                queue.submit([before.finish(), dlss]);
+                Some(output.clone())
+            }
+            Err(e) => {
+                log::warn!("Horizon: DLSS frame: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Camera and object motion in render pixels, shared with the experimental FG path.
+pub struct MotionVectors {
+    motion_pipeline: wgpu::RenderPipeline,
+    motion_layout: wgpu::BindGroupLayout,
+    motion_uniform: wgpu::Buffer,
+    target: Option<([u32; 2], wgpu::TextureView)>,
+}
+impl MotionVectors {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let shader = &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Horizon DLSS motion"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../dlss_motion.wgsl").into()),
+        });
+        let motion_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Horizon DLSS motion"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Horizon DLSS motion"),
+            bind_group_layouts: &[Some(&motion_layout)],
+            immediate_size: 0,
+        });
+        let motion_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Horizon DLSS motion"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_dlss_motion"),
+                compilation_options: Default::default(),
+                targets: &[Some(MOTION_FORMAT.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let motion_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Horizon DLSS motion"),
+            size: std::mem::size_of::<MotionUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            motion_pipeline,
+            motion_layout,
+            motion_uniform,
+            target: None,
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        own_motion: &wgpu::TextureView,
+        size: [u32; 2],
+        motion: MotionUniform,
+    ) -> wgpu::TextureView {
+        if self.target.as_ref().is_none_or(|(s, _)| *s != size) {
+            self.target = Some((
+                size,
+                Dlss::texture(
                     device,
-                    "DLSS motion vectors",
-                    render,
+                    "DLSS-G motion",
+                    size,
                     MOTION_FORMAT,
                     wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 ),
             ));
         }
-        let (_, output) = self.output.as_ref()?;
-        let (_, vectors) = self.motion.as_ref()?;
+        let vectors = &self.target.as_ref().expect("created above").1;
         queue.write_buffer(&self.motion_uniform, 0, bytemuck::bytes_of(&motion));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Horizon DLSS motion"),
@@ -304,33 +359,6 @@ impl Dlss {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        let parameters = DlssSuperResolutionRenderParameters {
-            color,
-            depth,
-            motion_vectors: vectors,
-            exposure: DlssSuperResolutionExposure::Automatic,
-            bias: None,
-            dlss_output: output,
-            reset,
-            jitter_offset: jitter_pixels,
-            partial_texture_size: Some(render),
-            motion_vector_scale: None,
-        };
-        match context.render(parameters, encoder, &self.adapter) {
-            Ok(dlss) => {
-                let before = std::mem::replace(
-                    encoder,
-                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Horizon frame after DLSS"),
-                    }),
-                );
-                queue.submit([before.finish(), dlss]);
-                Some(output.clone())
-            }
-            Err(e) => {
-                log::warn!("Horizon: DLSS frame: {e}");
-                None
-            }
-        }
+        vectors.clone()
     }
 }

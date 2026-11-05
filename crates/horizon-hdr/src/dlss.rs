@@ -13,7 +13,7 @@ pub fn asked() -> bool {
 }
 
 /// The SDK, once the device is opened with DLSS's extensions and NGX starts on it.
-static SDK: OnceLock<Option<Arc<Mutex<DlssSdk>>>> = OnceLock::new();
+static SDK: OnceLock<Mutex<Option<Arc<Mutex<DlssSdk>>>>> = OnceLock::new();
 
 /// A Vulkan instance with the extensions DLSS needs, when it was asked for; `None` leaves
 /// creating it to wgpu.
@@ -40,11 +40,8 @@ pub fn create_instance(
                 display,
             },
             Some(Box::new(|mut args| {
-                result = dlss_wgpu::register_instance_extensions(
-                    PROJECT_ID,
-                    &mut args,
-                    &mut support,
-                );
+                result =
+                    dlss_wgpu::register_instance_extensions(PROJECT_ID, &mut args, &mut support);
             })),
         )
     };
@@ -85,8 +82,10 @@ pub fn open_device(
         let hal = unsafe { adapter.as_hal::<Vulkan>() }?;
         let instance = hal.shared_instance().raw_instance();
         // Safety: the adapter's own physical device on its own instance.
-        let hdr = unsafe { instance.enumerate_device_extension_properties(hal.raw_physical_device()) }
-            .ok()?
+        let offered =
+            unsafe { instance.enumerate_device_extension_properties(hal.raw_physical_device()) }
+                .ok()?;
+        let hdr = offered
             .iter()
             .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::hdr_metadata::NAME));
         let mut result = Ok(());
@@ -96,17 +95,31 @@ pub fn open_device(
                 desc.required_features,
                 &desc.required_limits,
                 &desc.memory_hints,
-                Some(Box::new(|mut args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
-                    if hdr {
-                        args.extensions.push(ash::ext::hdr_metadata::NAME);
-                    }
-                    result = dlss_wgpu::register_device_extensions(
-                        PROJECT_ID,
-                        &mut args,
-                        &hal,
-                        &mut support,
-                    );
-                })),
+                Some(Box::new(
+                    |mut args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
+                        if hdr {
+                            args.extensions.push(ash::ext::hdr_metadata::NAME);
+                        }
+                        // The tested native FG path uses CUDA's Vulkan binary/image imports.
+                        if std::env::var("HORIZON_DLSS_FG").as_deref() == Ok("1") {
+                            for name in [c"VK_NVX_binary_import", c"VK_NVX_image_view_handle"] {
+                                if offered
+                                    .iter()
+                                    .any(|e| e.extension_name_as_c_str() == Ok(name))
+                                    && !args.extensions.contains(&name)
+                                {
+                                    args.extensions.push(name);
+                                }
+                            }
+                        }
+                        result = dlss_wgpu::register_device_extensions(
+                            PROJECT_ID,
+                            &mut args,
+                            &hal,
+                            &mut support,
+                        );
+                    },
+                )),
             )
         };
         if let Err(e) = &result {
@@ -128,13 +141,22 @@ pub fn open_device(
         if sdk.is_some() {
             log::info!("Horizon: DLSS Super Resolution ready");
         }
-        let _ = SDK.set(sdk);
+        *SDK.get_or_init(|| Mutex::new(None)).lock().unwrap() = sdk;
     }
     Some(opened)
 }
 
-
 /// The SDK, when NGX started on the device `open_device` opened.
 pub fn sdk() -> Option<Arc<Mutex<DlssSdk>>> {
-    SDK.get()?.clone()
+    SDK.get()?.lock().ok()?.clone()
+}
+
+/// Release the process SDK after all renderer-owned SR/FG features have stopped.
+/// Keeping this Arc in OnceLock until process exit skips NGX shutdown and leaves
+/// NVIDIA compiler workers racing the driver's library finalizers.
+pub fn shutdown() {
+    if let Some(slot) = SDK.get() {
+        let sdk = slot.lock().unwrap().take();
+        drop(sdk);
+    }
 }

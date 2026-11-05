@@ -375,8 +375,12 @@ impl Game<'_> {
             .and_then(|r| r.frame_generation_share())
             .map_or(String::new(), |share| {
                 format!(
-                    " ({} fps FSR 3.1)",
-                    (self.fps * (1.0 + share)).round() as i32
+                    " ({} fps {})",
+                    (self.fps * (1.0 + share)).round() as i32,
+                    self.renderer
+                        .as_ref()
+                        .map(|r| r.frame_generation_label())
+                        .unwrap_or_default()
                 )
             });
         let upscaler = self

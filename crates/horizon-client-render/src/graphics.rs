@@ -341,19 +341,26 @@ pub enum FrameGeneration {
     Off,
     /// AMD FidelityFX Super Resolution 3.1's frame interpolation, ported to WGSL.
     Fsr31,
+    Dlss,
 }
 impl FrameGeneration {
-    pub const ALL: [FrameGeneration; 2] = [FrameGeneration::Off, FrameGeneration::Fsr31];
+    pub const ALL: [FrameGeneration; 3] = [
+        FrameGeneration::Off,
+        FrameGeneration::Fsr31,
+        FrameGeneration::Dlss,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             FrameGeneration::Off => "off",
             FrameGeneration::Fsr31 => "fsr3.1",
+            FrameGeneration::Dlss => "dlss",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             FrameGeneration::Off => "Off",
             FrameGeneration::Fsr31 => "FSR 3.1",
+            FrameGeneration::Dlss => "DLSS-G",
         }
     }
     fn parse(s: &str) -> Self {
@@ -732,6 +739,8 @@ pub struct Graphics {
     pub screenshot_quality: u32,
     /// Frame generation (Horizon setting), off by default.
     pub frame_generation: FrameGeneration,
+    /// Total displayed frames per real frame for DLSS-G (2..=4). FSR uses 2.
+    pub frame_generation_multiplier: u32,
     /// Upscaler: DLSS in place of TAA's own (FSR-style) resolve, where DLSS runs.
     pub dlss: bool,
     /// HDR output (HDR10, or scRGB), where the display path offers it.
@@ -821,6 +830,7 @@ impl Default for Graphics {
             upscaling_sharpness: 85,
             screenshot_quality: 1,
             frame_generation: FrameGeneration::Off,
+            frame_generation_multiplier: 2,
             dlss: true,
             hdr: false,
             hdr_paper_white: 0,
@@ -950,6 +960,9 @@ impl Graphics {
                         .filter(|q| SCREENSHOT_QUALITIES.contains(q))
                         .unwrap_or(1)
                 }
+                "frameGenerationMultiplier" => {
+                    g.frame_generation_multiplier = number(2).clamp(2, 4)
+                }
                 "frameGeneration" => g.frame_generation = FrameGeneration::parse(value),
                 "upscaler" => g.dlss = value == "dlss",
                 "hdr" => g.hdr = flag(g.hdr),
@@ -991,7 +1004,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nframeGenerationMultiplier:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1033,6 +1046,7 @@ impl Graphics {
             self.upscaling_sharpness,
             self.screenshot_quality,
             self.frame_generation.name(),
+            self.frame_generation_multiplier,
             if self.dlss { "dlss" } else { "fsr" },
             bool_text(self.hdr),
             self.hdr_paper_white,
@@ -1217,6 +1231,7 @@ mod tests {
             upscaling_sharpness: 40,
             screenshot_quality: 4,
             frame_generation: FrameGeneration::Fsr31,
+            frame_generation_multiplier: 4,
             dlss: true,
             hdr: true,
             hdr_paper_white: 240,

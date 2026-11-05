@@ -3,10 +3,12 @@
 //! without it a compositor may clip or tone-map everything above 1.0 (80 nits)
 //! of an scRGB swapchain.
 
-#[cfg(target_os = "linux")]
-pub mod wayland;
 #[cfg(feature = "dlss")]
 pub mod dlss;
+#[cfg(all(feature = "dlss", target_os = "linux"))]
+pub mod dlss_fg;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 
 /// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
 /// it, so [`set_metadata`] can tell the compositor the real peak brightness.

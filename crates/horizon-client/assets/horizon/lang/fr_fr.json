@@ -478,5 +478,13 @@
   "horizon.options.scroll_speed": "Vitesse de défilement des menus",
   "horizon.options.repeat_delay": "Délai de répétition de navigation",
   "horizon.options.repeat_interval": "Intervalle de répétition de navigation",
-  "horizon.options.milliseconds": "%s ms"
+  "horizon.options.milliseconds": "%s ms",
+  "Frame Generation Multiplier": "Multiplicateur de génération d’images",
+  "Total displayed frames per real frame. DLSS-G supports 2x, 3x and 4x; FSR uses 2x.": "Images affichées par image réelle. DLSS-G prend en charge 2x, 3x et 4x ; FSR utilise 2x.",
+  "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.": "Images affichées par image réelle : DLSS-G 2x/3x/4x, FSR 2x.",
+  "Upscaler": "Mise à l’échelle",
+  "DLSS": "DLSS",
+  "FSR": "FSR",
+  "DLSS-G": "DLSS-G",
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Reconstruit l’image avec FSR (TAA) ou NVIDIA DLSS."
 }

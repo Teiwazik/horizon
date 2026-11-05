@@ -6492,6 +6492,16 @@ impl Renderer {
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
+    pub fn frame_generation_label(&self) -> String {
+        self.frame_gen.label()
+    }
+    pub fn configure_frame_generation(
+        &mut self,
+        backend: crate::graphics::FrameGeneration,
+        multiplier: u32,
+    ) {
+        self.frame_gen.configure(backend, multiplier);
+    }
     /// The Upscaler setting: DLSS where it runs, else TAA's own resolve.
     pub fn set_dlss(&mut self, on: bool) {
         self.world_post.use_dlss = on;
@@ -10988,6 +10998,7 @@ impl Renderer {
         // Frame generation: the real frame from its world, and the made one between.
         if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
             let camera = frame_gen::Camera {
+                projection: views.primary().projection,
                 jittered,
                 view_proj,
                 depth: depth.clone(),
@@ -11002,6 +11013,11 @@ impl Renderer {
                 format: Some(self.config.format.remove_srgb_suffix()),
                 ..Default::default()
             });
+            #[cfg(all(feature = "dlss", target_os = "linux"))]
+            {
+                self.uploads.finish(&encoder);
+                self.section_uploads.finish(&encoder);
+            }
             fg_made = self.frame_gen.generate(
                 &self.device,
                 &self.queue,
@@ -11026,6 +11042,13 @@ impl Renderer {
                     hand_view_proj,
                 };
                 self.draw_overlay(&mut encoder, frame, &generated_view, generated, &overlay);
+                for extra in self.frame_gen.extra_generated() {
+                    let view = extra.create_view(&wgpu::TextureViewDescriptor {
+                        format: Some(self.config.format.remove_srgb_suffix()),
+                        ..Default::default()
+                    });
+                    self.draw_overlay(&mut encoder, frame, &view, &extra, &overlay);
+                }
                 if let Some(t) = &mut self.own_timing {
                     t.span(
                         &self.device,
@@ -13988,5 +14011,17 @@ mod shadow_caster_tests {
             drawn(&|out| sections.visible(camera, 4, &view, |_| true, |_, _| false, out))
                 .is_empty()
         );
+    }
+}
+
+#[cfg(feature = "dlss")]
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        self.queue.wait();
+        self.frame_gen.stop();
+        self.world_post.shutdown_dlss();
+        #[cfg(target_os = "linux")]
+        self.frame_gen.shutdown_native();
+        horizon_hdr::dlss::shutdown();
     }
 }

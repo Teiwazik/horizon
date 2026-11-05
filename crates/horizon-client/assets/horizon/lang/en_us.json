@@ -729,5 +729,13 @@
   "horizon.pvp.chat_search": "Chat search",
   "horizon.pvp.chat_search.tooltip": "Ctrl+F in the open chat: what you type shows only the messages holding it. Enter or Ctrl+F again stops.",
   "horizon.pvp.preset": "PvP preset",
-  "horizon.pvp.preset.tooltip": "Turns on the custom crosshair, the armour and effects widgets, toggle sprint and sneak, lower fire, and the FPS counter and keystrokes mods if installed. Your settings for each stay."
+  "horizon.pvp.preset.tooltip": "Turns on the custom crosshair, the armour and effects widgets, toggle sprint and sneak, lower fire, and the FPS counter and keystrokes mods if installed. Your settings for each stay.",
+  "Frame Generation Multiplier": "Frame Generation Multiplier",
+  "Total displayed frames per real frame. DLSS-G supports 2x, 3x and 4x; FSR uses 2x.": "Total displayed frames per real frame. DLSS-G supports 2x, 3x and 4x; FSR uses 2x.",
+  "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.": "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.",
+  "Upscaler": "Upscaler",
+  "DLSS": "DLSS",
+  "FSR": "FSR",
+  "DLSS-G": "DLSS-G",
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS."
 }

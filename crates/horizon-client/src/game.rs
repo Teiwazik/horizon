@@ -8684,6 +8684,11 @@ impl Game<'_> {
             .as_ref()
             .and_then(|r| r.frame_generation_share());
         let upscaler = self.renderer.as_ref().and_then(|r| r.upscaler_label());
+        self.frame_graph.set_generation_backend(
+            self.renderer
+                .as_ref()
+                .map_or(String::new(), |r| r.frame_generation_label()),
+        );
         self.frame_graph.draw(
             self.settings.horizon.overlay,
             generated,
