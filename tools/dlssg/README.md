@@ -24,3 +24,8 @@ an extra completed group waiting in a CPU channel. For controlled comparisons,
 measurement of mouse-to-display latency. `HORIZON_SHADER_PACK_TIMING=1` enables
 GPU pass timings, including a separate DLSS SR span; `horizon-ctl bench` includes
 both `gpu_passes` and `shader_gpu_passes` while timing is enabled.
+
+DLSS SR uses the SDK texture-detail mip bias, `-log2(upscale) - 1`, while it is
+actually running. `HORIZON_DLSS_TEXTURE_DETAIL_BIAS=0` restores the previous
+conservative correction for comparisons; the default extra bias is -1. This
+changes texture sampling, not the frame-generation model or the sharpening slider.

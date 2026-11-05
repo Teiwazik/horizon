@@ -7580,9 +7580,10 @@ impl Renderer {
                     0.0
                 },
                 if self.world_post.taa_on && self.world_post.dlss_ran {
-                    // Keep the texture footprint at output resolution. A conservative
-                    // bias preserves block detail without an extra sharpening bias.
-                    -self.world_post.upscale.max(1.0).log2()
+                    // DLSS reconstructs subpixel texture samples across frames. Bias
+                    // beyond the output-resolution footprint, as the SDK recommends;
+                    // using only -log2(upscale) still discards those samples too early.
+                    -self.world_post.upscale.max(1.0).log2() + dlss_texture_detail_bias()
                 } else {
                     0.0
                 },
@@ -13790,6 +13791,20 @@ fn flush_display_log() {
         (log.last, log.at) = (line, Some(now));
     }
 }
+/// Additional DLSS texture-detail bias. Zero reproduces the earlier conservative
+/// setting for controlled image comparisons; non-finite inputs keep the SDK default.
+fn dlss_texture_detail_bias() -> f32 {
+    static BIAS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *BIAS.get_or_init(|| {
+        std::env::var("HORIZON_DLSS_TEXTURE_DETAIL_BIAS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(-1.0)
+            .clamp(-1.0, 0.0)
+    })
+}
+
 /// A reported black level, within the setting's range. Rounded down: OLEDs report a figure
 /// just above 0, like KWin's 0.005, which isn't worth lifting the shadows for.
 fn hundredths_of_a_nit(nits: f32) -> u32 {
