@@ -19,7 +19,7 @@ const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// DLSS's output format (written as a storage image).
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-pub use horizon_hdr::dlss::{asked, create_instance, open_device};
+pub use horizon_hdr::dlss::{create_instance, open_device};
 
 /// DLSS's quality mode for TAA's upscale ratio (Native: DLAA).
 fn mode(upscale: f32) -> DlssPerfQualityMode {
@@ -159,10 +159,14 @@ impl Dlss {
         if self.failed == Some((output, mode)) {
             return false;
         }
-        if self.context.as_ref().is_none_or(|(_, o, m)| *o != output || *m != mode) {
+        if self
+            .context
+            .as_ref()
+            .is_none_or(|(_, o, m)| *o != output || *m != mode)
+        {
             self.context = None;
-            let mut flags = DlssFeatureFlags::LowResolutionMotionVectors
-                | DlssFeatureFlags::InvertedDepth;
+            let mut flags =
+                DlssFeatureFlags::LowResolutionMotionVectors | DlssFeatureFlags::InvertedDepth;
             if hdr {
                 flags |= DlssFeatureFlags::HighDynamicRange | DlssFeatureFlags::AutoExposure;
             }

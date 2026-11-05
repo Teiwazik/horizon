@@ -338,7 +338,9 @@ impl NativeFrame {
         ];
         entries.extend(pack_texture_entries(textures.len()));
         // Not while the pack's `[rays] option` is off: no scene, and `ray_tracing()` false.
-        let rays = rays.then(|| super::native_rt::RayScene::new(device)).flatten();
+        let rays = rays
+            .then(|| super::native_rt::RayScene::new(device))
+            .flatten();
         let mut entries = entries.to_vec();
         if rays.is_some() {
             entries.push(wgpu::BindGroupLayoutEntry {
@@ -1082,67 +1084,68 @@ impl NativePost {
         // Each pass parses, validates and compiles alone: build them on a few threads at once,
         // which takes the wait for options to apply from the sum of the passes to about a
         // fraction of it (wgpu's device takes calls from any thread).
-        let build = |i: usize, stage: CheckedStage| -> Result<(String, wgpu::RenderPipeline), String> {
-            let traced = rays
-                .map(|_| {
-                    let text = format!(
-                        "enable wgpu_ray_query;\n{}{POST_RAY_SPRITES}{}{}",
-                        stage.source,
-                        super::native_material::RAYS,
-                        horizon_shader_api::stages::POST_ENTRY_POINTS,
-                    );
-                    naga::front::wgsl::parse_str(&text)
-                        .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
-                })
-                .transpose()?;
-            let ir = traced.unwrap_or(stage.module);
-            let mut present = present_constants(&ir, constants);
-            if let Some((_, sprites)) = rays {
-                present.push(("horizon_terrain_SPRITE_SPLIT", sprites[1]));
-            }
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&stage.label),
-                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(ir)),
-            });
-            let options = wgpu::PipelineCompilationOptions {
-                constants: &present,
-                ..Default::default()
+        let build =
+            |i: usize, stage: CheckedStage| -> Result<(String, wgpu::RenderPipeline), String> {
+                let traced = rays
+                    .map(|_| {
+                        let text = format!(
+                            "enable wgpu_ray_query;\n{}{POST_RAY_SPRITES}{}{}",
+                            stage.source,
+                            super::native_material::RAYS,
+                            horizon_shader_api::stages::POST_ENTRY_POINTS,
+                        );
+                        naga::front::wgsl::parse_str(&text)
+                            .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
+                    })
+                    .transpose()?;
+                let ir = traced.unwrap_or(stage.module);
+                let mut present = present_constants(&ir, constants);
+                if let Some((_, sprites)) = rays {
+                    present.push(("horizon_terrain_SPRITE_SPLIT", sprites[1]));
+                }
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(&stage.label),
+                    source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(ir)),
+                });
+                let options = wgpu::PipelineCompilationOptions {
+                    constants: &present,
+                    ..Default::default()
+                };
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(&stage.label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("horizon_vs_post"),
+                        compilation_options: options.clone(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("horizon_fs_post"),
+                        compilation_options: options,
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: if plan[i].writes == Writes::Screen {
+                                format
+                            } else {
+                                INTERMEDIATE
+                            },
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                if let Some(e) = pollster::block_on(scope.pop()) {
+                    return Err(format!("{}: {e}", stage.file));
+                }
+                Ok((stage.label, pipeline))
             };
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&stage.label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("horizon_vs_post"),
-                    compilation_options: options.clone(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("horizon_fs_post"),
-                    compilation_options: options,
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: if plan[i].writes == Writes::Screen {
-                            format
-                        } else {
-                            INTERMEDIATE
-                        },
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            if let Some(e) = pollster::block_on(scope.pop()) {
-                return Err(format!("{}: {e}", stage.file));
-            }
-            Ok((stage.label, pipeline))
-        };
         let threads = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .clamp(1, 8);
@@ -1532,7 +1535,8 @@ impl NativePost {
                     ..Default::default()
                 });
                 pass.set_index_buffer(w.indices.slice(..), wgpu::IndexFormat::Uint32);
-                w.weather.draw(&mut pass, w.entities, Some((w.pipeline, w.frame)));
+                w.weather
+                    .draw(&mut pass, w.entities, Some((w.pipeline, w.frame)));
             }
             if dump_now {
                 let clean = |label: &str| label.replace(['/', '\\', ':'], "_");
@@ -1991,7 +1995,15 @@ mod tests {
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None, true);
+        let frame = NativeFrame::new(
+            &device,
+            None,
+            &[],
+            Vec::new(),
+            Default::default(),
+            None,
+            true,
+        );
         queue.write_buffer(
             &frame.buffer,
             0,
@@ -2056,6 +2068,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -2114,7 +2127,15 @@ file = \"b.wgsl\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new(&device, None, &[], Vec::new(), Default::default(), None, true);
+        let frame = NativeFrame::new(
+            &device,
+            None,
+            &[],
+            Vec::new(),
+            Default::default(),
+            None,
+            true,
+        );
         let mut post = NativePost::new(
             &device,
             report.stages,
@@ -2164,6 +2185,7 @@ file = \"b.wgsl\"
                 &view,
                 [4, 4],
                 history_reset,
+                None,
                 None,
                 None,
             );

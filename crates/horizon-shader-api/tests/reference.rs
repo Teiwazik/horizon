@@ -38,12 +38,6 @@ fn vanilla(kind: StageKind) -> &'static str {
             "fn weather(input: WeatherInput) -> vec4<f32> { return input.color; }\n"
         }
         StageKind::Post => "fn post(input: PostInput) -> vec4<f32> { return input.color; }\n",
-        StageKind::Vertex => {
-            "fn vertex(input: VertexInput) -> vec3<f32> { return input.position; }\n"
-        }
-        StageKind::Weather => {
-            "fn weather(input: WeatherInput) -> vec4<f32> { return input.color; }\n"
-        }
     }
 }
 

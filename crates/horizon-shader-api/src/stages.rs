@@ -261,7 +261,8 @@ fn surface_at(texel: vec2<i32>) -> SurfaceData {
     let size = vec2<i32>(textureDimensions(scene_surface));
     let t = clamp(texel, vec2<i32>(0), size - 1);
     let s = textureLoad(scene_surface, t, 0);
-    let depth = textureLoad(scene_depth, t, 0);
+    let depth_size = vec2<i32>(textureDimensions(scene_depth));
+    let depth = textureLoad(scene_depth, clamp(texel, vec2<i32>(0), depth_size - 1), 0);
     // The terrain's own depth is stored with it: anything drawn nearer since hides it.
     let present = s.w > 0.0 && abs(s.w - depth) <= s.w * 1e-5;
     let e = unpack2x16snorm(bitcast<u32>(s.x));
@@ -943,4 +944,10 @@ pub fn compose(pack: &Pack, kind: StageKind, file: &str) -> Composed {
         push("<entries>", kind.entries());
     }
     composed
+}
+
+/// Whether the material explicitly stores a surface in addition to the prelude's helper.
+pub fn calls_set_surface(source: &str) -> bool {
+    let call = "set_surface(";
+    source.matches(call).count() > MATERIAL_HELPERS.matches(call).count()
 }

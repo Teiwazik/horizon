@@ -70,3 +70,7 @@ default = "Soft"
 
 [budget]
 gpu_ms = 1.5
+
+[[tags]]
+id = "glass"
+sprites = ["block/glass", "block/*_stained_glass"]

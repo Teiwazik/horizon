@@ -807,6 +807,8 @@ impl NativeShadow {
             // along the sun's azimuth while the sun is low.
             distance: None,
             unculled: None,
+            every_face: false,
+            view_casters: false,
         }
     }
 }

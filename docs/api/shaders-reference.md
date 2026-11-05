@@ -42,13 +42,13 @@ Resources (bind group 3):
 
 ### `VertexInput`
 
-One corner of a block's surface, for `fn vertex(input: VertexInput) -> vec3<f32>`, which returns where it is drawn (camera-relative, in blocks; `input.position` leaves it).
+One corner of a block's surface, for `fn vertex(input: VertexInput) -> vec3<f32>`, which returns where it is drawn (camera-relative, in blocks; `input.position` where it stays).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `position` | `vec3<f32>` | The corner, camera-relative, in blocks (`+ frame.camera_position` for the world's). |
-| `uv` | `vec2<f32>` | The texture coordinate inside the block atlas. |
-| `material` | `u32` | The `[[materials]]` id of the block texture (0 when none matches). |
+| `uv` | `vec2<f32>` | The texture coordinate inside the block's sprite. |
+| `material` | `u32` | The `[[materials]]` id of the block's sprite (0 when none matches). |
 | `light` | `vec2<f32>` | Block and sky light, 0..1. |
 | `tint` | `vec4<f32>` | The vertex colour (biome tint, face shade, ambient occlusion); alpha 1. |
 | `face` | `u32` | For a fluid, the face of the block the corner is on (as `MaterialInput.face`), else 0. |
@@ -102,11 +102,7 @@ What `material` returns. Vanilla's own is `albedo * tint * vec4(lightmap, 1.0)`;
 | --- | --- | --- |
 | `color` | `vec4<f32>` | The lit colour, 0..1, with its alpha. |
 
-Under `[displacement]` the stage also defines
-                    `fn displacement(input: DisplacementInput) -> f32`, called for each corner of the grid the
-                    faces near the camera are cut into; the corner moves along the face's normal by the depth it
-                    gives at the point's height less the depth at the texture's mean height, pinned at the face's
-                    edges and easing out over the last quarter of the distance.
+Under `[displacement]` the stage also defines `fn displacement(input: DisplacementInput) -> f32`, called for each corner of the grid the faces near the camera are cut into; the corner moves along the face's normal by the depth it gives at the point's height less the depth at the texture's mean height, pinned at the face's edges and easing out over the last quarter of the distance.
 
 ### `DisplacementInput`
 
@@ -287,6 +283,20 @@ The frame, as `frame` in every stage. Positions and directions are in world axes
 | `in_water` | `f32` | 600 | 1 while the camera is in water (`eye_in` 1), eased with a half-life of a quarter second in and out. |
 | `in_lava` | `f32` | 604 | The same for lava (`eye_in` 2). |
 | `engine_taa` | `vec4<f32>` | 608 | The renderer's own TAA after the post stage (an upscaling mode is on): z 1 while it runs, and then a pack's own TAA should pass its input through; xy this frame's sub-pixel jitter in clip space, already in `projection`; w output pixels per rendered pixel. All 0 without it. |
+
+## Anti-aliasing
+
+While a pack's `[[post]]` chain draws the frame, the player's anti-aliasing settings do not run: `taa`, `fxaa`
+and `upscaling` in `horizon-graphics.txt` have no effect, and the frame's projection is never jittered, because the
+last post pass draws the picture itself and Horizon's own resolve, which does TAA, FXAA and TAA upscaling, is the
+step it replaces. The world is still rendered at `resolutionScale` before the pack reads it.
+
+A pack that wants smooth edges draws them itself, in a post pass: a spatial filter (FXAA, SMAA and the like) works on
+`previous` as it is. A temporal pass cannot do what TAA does here, even though `history` and
+`frame.previous_view_projection` give it the last frame: nothing moves the camera by a fraction of a texel from one
+frame to the next, so a still camera gives it the same picture twice and there is no sub-pixel detail to gather.
+
+Without a pack the settings apply as the player set them.
 
 ## Options
 

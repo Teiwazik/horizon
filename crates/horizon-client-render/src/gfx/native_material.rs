@@ -181,7 +181,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     let tangent = horizon_material_tangent(in.base, in.uv, normal);
     // No sprite tags on this branch: its materials come from `material_ids`.
     return material(MaterialInput(albedo, in.tint, light, in.lightmap, in.position, in.uv,
-        translucent, 0u, material_id, screen, in.face, fluid, in.emission, normal, tangent,
+        translucent, horizon_sprite_tags(in.layer & 0x7fffu), material_id, screen, in.face, fluid, in.emission, normal, tangent,
         horizon_terrain_native_colored_light(in.position), in.displaced)).color;
 }
 var<private> horizon_material_normal: vec3<f32>;
@@ -293,6 +293,7 @@ pub struct TerrainShape<'a> {
     pub flat: Option<&'a wgpu::BindGroupLayout>,
     /// terrain.wgsl's `SPRITE_ARRAYS` and `SPRITE_SPLIT`.
     pub sprites: [f64; 2],
+    pub sprite_tags: &'a [(u32, u32)],
     /// The world target's colour format.
     pub format: wgpu::TextureFormat,
     /// The entities' group 0 (their atlas), for the shadow pass's entity draw.
@@ -881,6 +882,21 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
 
 /// The terrain shader for the pack's material stage `source` (with its vertex stage's
 /// file, when `vertex`, and `[displacement]`'s grid when `displaced`).
+pub(super) fn layer_table(name: &str, table: &[(u32, u32)]) -> String {
+    let mut out = format!("fn {name}(layer: u32) -> u32 {{\n    switch layer {{\n");
+    let mut table = table.to_vec();
+    table.sort_unstable_by_key(|&(layer, value)| (value, layer));
+    for group in table.chunk_by(|a, b| a.1 == b.1) {
+        let layers: Vec<String> = group.iter().map(|(layer, _)| format!("{layer}u")).collect();
+        out += &format!(
+            "        case {}: {{ return {}u; }}\n",
+            layers.join(", "),
+            group[0].1
+        );
+    }
+    out + "        default: { return 0u; }\n    }\n}\n"
+}
+
 fn shader_source(source: &str, vertex: bool, displaced: bool, rays: bool) -> String {
     format!(
         "{}{source}\n// Horizon's terrain (terrain.wgsl)\n{}{}{ENTRIES}{}{}{}",
@@ -897,7 +913,7 @@ fn shader_source(source: &str, vertex: bool, displaced: bool, rays: bool) -> Str
         } else {
             String::new()
         },
-        if rays { RAYS } else { NO_RAYS },
+        (if rays { RAYS } else { NO_RAYS }).to_owned() + &layer_table("horizon_sprite_tags", &[]),
     )
 }
 
@@ -926,7 +942,12 @@ impl NativeMaterial {
         displaced: Option<&DisplacedShape<'_>>,
     ) -> Result<Self, String> {
         let rays = frame.rays.is_some();
-        let module = module(stage, vertex, displaced.is_some(), rays)?;
+        let text = shader_source(&stage.source, vertex, displaced.is_some(), rays).replace(
+            &layer_table("horizon_sprite_tags", &[]),
+            &layer_table("horizon_sprite_tags", shape.sprite_tags),
+        );
+        let module = naga::front::wgsl::parse_str(&text)
+            .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [
             "horizon_terrain_SPRITE_ARRAYS",
@@ -1061,16 +1082,37 @@ impl NativeMaterial {
             }
         };
         let instanced_in = |fragment: &str, blend, pass| {
-            pipeline_in(&instanced, "horizon_material_vs", &buffers, fragment, blend, pass)
+            pipeline_in(
+                &instanced,
+                "horizon_material_vs",
+                &buffers,
+                fragment,
+                blend,
+                pass,
+            )
         };
         let flat_in = |fragment: &str, blend, pass| {
             flat_layout.as_ref().map(|layout| {
-                pipeline_in(layout, "horizon_material_vs_flat", &flat_vertices, fragment, blend, pass)
+                pipeline_in(
+                    layout,
+                    "horizon_material_vs_flat",
+                    &flat_vertices,
+                    fragment,
+                    blend,
+                    pass,
+                )
             })
         };
         let grid_in = |fragment: &str, pass| {
             displaced_layout.as_ref().map(|layout| {
-                pipeline_in(layout, "horizon_material_vs_displaced", &[], fragment, None, pass)
+                pipeline_in(
+                    layout,
+                    "horizon_material_vs_displaced",
+                    &[],
+                    fragment,
+                    None,
+                    pass,
+                )
             })
         };
         type Built = Result<wgpu::RenderPipeline, String>;
@@ -1084,40 +1126,60 @@ impl NativeMaterial {
                 None => Ok(pipeline),
             }
         };
-        let (solid, translucent, flat_solid, flat_translucent, displaced, grid_depth, grid_after, depth, depth_flat, after, after_flat) =
-            std::thread::scope(|s| {
-                let solid = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::Shaded)));
-                let translucent = s.spawn(|| {
-                    one(&|| instanced_in("horizon_material_fs_translucent", blend, Pass::Shaded))
-                });
-                let flat_solid = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::Shaded)));
-                let flat_translucent = s.spawn(|| {
-                    maybe(&|| flat_in("horizon_material_fs_translucent", blend, Pass::Shaded))
-                });
-                let displaced = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::Shaded)));
-                let grid_depth = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_grid_depth", Pass::Depth)));
-                let grid_after = s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::After)));
-                let depth = s.spawn(|| one(&|| instanced_in("horizon_material_fs_depth", None, Pass::Depth)));
-                let depth_flat = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_depth", None, Pass::Depth)));
-                let after = s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::After)));
-                let after_flat = s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::After)));
-                fn stopped<T>() -> Result<T, String> {
-                    Err("a material pipeline's build stopped".to_owned())
-                }
-                (
-                    solid.join().unwrap_or_else(|_| stopped()),
-                    translucent.join().unwrap_or_else(|_| stopped()),
-                    flat_solid.join().unwrap_or_else(|_| stopped()),
-                    flat_translucent.join().unwrap_or_else(|_| stopped()),
-                    displaced.join().unwrap_or_else(|_| stopped()),
-                    grid_depth.join().unwrap_or_else(|_| stopped()),
-                    grid_after.join().unwrap_or_else(|_| stopped()),
-                    depth.join().unwrap_or_else(|_| stopped()),
-                    depth_flat.join().unwrap_or_else(|_| stopped()),
-                    after.join().unwrap_or_else(|_| stopped()),
-                    after_flat.join().unwrap_or_else(|_| stopped()),
-                )
+        let (
+            solid,
+            translucent,
+            flat_solid,
+            flat_translucent,
+            displaced,
+            grid_depth,
+            grid_after,
+            depth,
+            depth_flat,
+            after,
+            after_flat,
+        ) = std::thread::scope(|s| {
+            let solid =
+                s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::Shaded)));
+            let translucent = s.spawn(|| {
+                one(&|| instanced_in("horizon_material_fs_translucent", blend, Pass::Shaded))
             });
+            let flat_solid =
+                s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::Shaded)));
+            let flat_translucent = s.spawn(|| {
+                maybe(&|| flat_in("horizon_material_fs_translucent", blend, Pass::Shaded))
+            });
+            let displaced =
+                s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::Shaded)));
+            let grid_depth =
+                s.spawn(|| maybe(&|| grid_in("horizon_material_fs_grid_depth", Pass::Depth)));
+            let grid_after =
+                s.spawn(|| maybe(&|| grid_in("horizon_material_fs_displaced", Pass::After)));
+            let depth =
+                s.spawn(|| one(&|| instanced_in("horizon_material_fs_depth", None, Pass::Depth)));
+            let depth_flat =
+                s.spawn(|| maybe(&|| flat_in("horizon_material_fs_depth", None, Pass::Depth)));
+            let after =
+                s.spawn(|| one(&|| instanced_in("horizon_material_fs_solid", None, Pass::After)));
+            let after_flat =
+                s.spawn(|| maybe(&|| flat_in("horizon_material_fs_solid", None, Pass::After)));
+            fn stopped<T>() -> Result<T, String> {
+                Err("a material pipeline's build stopped".to_owned())
+            }
+            (
+                solid.join().unwrap_or_else(|_| stopped()),
+                translucent.join().unwrap_or_else(|_| stopped()),
+                flat_solid.join().unwrap_or_else(|_| stopped()),
+                flat_translucent.join().unwrap_or_else(|_| stopped()),
+                displaced.join().unwrap_or_else(|_| stopped()),
+                grid_depth.join().unwrap_or_else(|_| stopped()),
+                grid_after.join().unwrap_or_else(|_| stopped()),
+                depth.join().unwrap_or_else(|_| stopped()),
+                depth_flat.join().unwrap_or_else(|_| stopped()),
+                after.join().unwrap_or_else(|_| stopped()),
+                after_flat.join().unwrap_or_else(|_| stopped()),
+            )
+        });
         let flat = match (flat_solid?, flat_translucent?) {
             (Some(solid), Some(translucent)) => Some((solid, translucent)),
             _ => None,

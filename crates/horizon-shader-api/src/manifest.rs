@@ -58,6 +58,7 @@ pub struct Manifest {
     pub rays: Option<Rays>,
     /// Material ids by sprite, in order: the first entry whose pattern matches wins.
     pub materials: Vec<Material>,
+    pub tags: Vec<SpriteTag>,
     /// Images every stage reads, in order (`TEXTURE_BINDING` + their index).
     pub textures: Vec<PackTexture>,
     /// The colour of block light by the block giving it off, in order: the first entry whose
@@ -113,6 +114,36 @@ pub struct PackTexture {
 pub const MAX_TEXTURES: usize = 8;
 pub const MAX_TEXTURE_SIZE: u32 = 2048;
 
+/// A set of block sprites the material stage can tell apart: its bit in
+/// `MaterialInput.tags` is its index in the manifest.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteTag {
+    /// A WGSL identifier, for the pack's own reading and its errors.
+    pub id: String,
+    /// Sprite names such as `minecraft:block/glass` (the namespace defaults to
+    /// `minecraft`), each with at most one `*` matching any run of characters.
+    pub sprites: Vec<String>,
+}
+
+impl SpriteTag {
+    /// Whether the sprite `name` (`namespace:path`) is one of the tag's.
+    pub fn matches(&self, name: &str) -> bool {
+        self.sprites.iter().any(|p| {
+            glob(
+                &if p.contains(':') {
+                    p.clone()
+                } else {
+                    format!("minecraft:{p}")
+                },
+                name,
+            )
+        })
+    }
+}
+
+pub const MAX_TAGS: usize = 32;
+
 /// `[[materials]]`: an id the material stage reads (`input.material`) on the blocks whose
 /// texture matches one of `sprites`, like Iris packs' block.properties.
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +167,59 @@ pub struct Material {
 pub const MAX_MATERIALS: usize = 1024;
 
 impl Manifest {
+    pub fn sprite_tags<'a>(
+        &self,
+        sprites: impl IntoIterator<Item = (&'a str, u32)>,
+    ) -> Vec<(u32, u32)> {
+        // Identical stills share one layer under several names: their tags are or-ed
+        // together, so each layer is one case of the shader's `switch`.
+        let mut layers = std::collections::BTreeMap::<u32, u32>::new();
+        for (name, layer) in sprites {
+            let bits = self
+                .tags
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.matches(name))
+                .fold(0, |bits, (i, _)| bits | 1 << i);
+            if bits != 0 {
+                *layers.entry(layer).or_default() |= bits;
+            }
+        }
+        layers.into_iter().collect()
+    }
+
+    /// The material id of each block sprite `(name, layer)` that has one, as `(layer, id)` in
+    /// layer order: what the material stage's `MaterialInput.material` reads.
+    pub fn sprite_materials<'a>(
+        &self,
+        sprites: impl IntoIterator<Item = (&'a str, u32)>,
+    ) -> Vec<(u32, u32)> {
+        // Identical stills share one layer under several names: the earliest entry any of
+        // them matches decides, whatever order the names come in.
+        let mut layers = std::collections::BTreeMap::<u32, usize>::new();
+        for (name, layer) in sprites {
+            if let Some(entry) = self.materials.iter().position(|m| {
+                m.sprites.iter().any(|p| {
+                    glob(
+                        &if p.contains(':') {
+                            p.clone()
+                        } else {
+                            format!("minecraft:{p}")
+                        },
+                        name,
+                    )
+                })
+            }) {
+                let best = layers.entry(layer).or_insert(entry);
+                *best = entry.min(*best);
+            }
+        }
+        layers
+            .into_iter()
+            .map(|(layer, entry)| (layer, self.materials[entry].id))
+            .collect()
+    }
+
     /// The id of the sprite `name` (`namespace:path`, or a path in `minecraft`): the first
     /// `[[materials]]` entry with a matching pattern, else 0.
     pub fn material_of(&self, name: &str) -> u32 {
@@ -225,6 +309,22 @@ pub struct Shadow {
     /// `[[materials]]` ids drawn into the map whole, their cutouts ignored: leaves cast
     /// solid shadows rather than ones dotted with light.
     pub solid_materials: Vec<u32>,
+    pub option: Option<String>,
+    pub resolution_option: Option<String>,
+    pub distance_option: Option<String>,
+}
+
+impl Default for Shadow {
+    fn default() -> Self {
+        Self {
+            resolution: default_shadow_resolution(),
+            distance: default_shadow_distance(),
+            solid_materials: Vec::new(),
+            option: None,
+            resolution_option: None,
+            distance_option: None,
+        }
+    }
 }
 
 /// `[displacement]`: within `distance` of the camera, the faces of solid terrain whose
@@ -402,6 +502,8 @@ pub struct Budget {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    tags: Vec<SpriteTag>,
     schema: u32,
     id: String,
     name: String,
@@ -496,6 +598,9 @@ struct RawShadow {
     distance: f32,
     #[serde(default)]
     solid_materials: Vec<u32>,
+    option: Option<String>,
+    resolution_option: Option<String>,
+    distance_option: Option<String>,
 }
 
 /// `[[post]] scale` and `output`: scales from `POST_SCALES`, below 1 only with an output,
@@ -603,7 +708,10 @@ pub const MAX_PRESETS: usize = 8;
 /// `[[presets]]` checked against the options: each value of its option's type and in range.
 fn check_presets(raw: Vec<RawPreset>, options: &[PackOption]) -> Result<Vec<Preset>, String> {
     if raw.len() > MAX_PRESETS {
-        return Err(format!("{} presets; a pack may declare {MAX_PRESETS}", raw.len()));
+        return Err(format!(
+            "{} presets; a pack may declare {MAX_PRESETS}",
+            raw.len()
+        ));
     }
     raw.into_iter()
         .map(|p| {
@@ -613,7 +721,9 @@ fn check_presets(raw: Vec<RawPreset>, options: &[PackOption]) -> Result<Vec<Pres
                 let Some(i) = options.iter().position(|o| o.id == *id) else {
                     return Err(fail(format!("no option {id:?}")));
                 };
-                let number = value.as_float().or_else(|| value.as_integer().map(|v| v as f64));
+                let number = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|v| v as f64));
                 let constant = match &options[i].kind {
                     OptionKind::Bool { .. } => value.as_bool().map(|b| f64::from(u8::from(b))),
                     OptionKind::Float { min, max, .. } => {
@@ -707,7 +817,7 @@ impl Manifest {
                 raw.schema
             )));
         }
-        if raw.api != API {
+        if raw.api != API && raw.api != "0.1" {
             return Err(err(format!(
                 "written for shader API {}; this Horizon serves {API}",
                 raw.api
@@ -728,6 +838,9 @@ impl Manifest {
             return Err(err(
                 "no stage: give it a [sky], a [material] or a [[post]]".into()
             ));
+        }
+        if raw.shadow.is_some() && raw.material.is_none() && raw.post.is_empty() {
+            return Err(err("[shadow] needs [material] or [[post]]".into()));
         }
         if raw.post.len() > MAX_POST_PASSES {
             return Err(err(format!(
@@ -804,7 +917,9 @@ impl Manifest {
             let at = raw.post.iter().position(|p| &p.file == after);
             match at {
                 None => {
-                    return Err(err(format!("weather.after: no [[post]] pass has file {after:?}")));
+                    return Err(err(format!(
+                        "weather.after: no [[post]] pass has file {after:?}"
+                    )));
                 }
                 Some(i)
                     if i + 1 == raw.post.len()
@@ -816,6 +931,32 @@ impl Manifest {
                     )));
                 }
                 Some(_) => {}
+            }
+        }
+        if !raw.tags.is_empty() && raw.material.is_none() {
+            return Err(err(
+                "tags are read by the material stage: give it a [material]".into(),
+            ));
+        }
+        if raw.tags.len() > MAX_TAGS {
+            return Err(err(format!(
+                "{} tags; a pack may declare {MAX_TAGS}",
+                raw.tags.len()
+            )));
+        }
+        for (i, tag) in raw.tags.iter().enumerate() {
+            let id = &tag.id;
+            if !pack_identifier(id) {
+                return Err(err(format!("tag {id:?}: the id must be a WGSL identifier")));
+            }
+            if raw.tags[..i].iter().any(|t| &t.id == id) {
+                return Err(err(format!("tag {id:?} is declared twice")));
+            }
+            let sprite_ok = |p: &String| !p.is_empty() && p.matches('*').count() <= 1;
+            if tag.sprites.is_empty() || !tag.sprites.iter().all(sprite_ok) {
+                return Err(err(format!(
+                    "tag {id:?}: needs sprites, each a name with at most one *"
+                )));
             }
         }
         check_post_targets(&raw.post, &raw.textures).map_err(err)?;
@@ -846,6 +987,9 @@ impl Manifest {
                     resolution: s.resolution,
                     distance: s.distance,
                     solid_materials: s.solid_materials,
+                    option: s.option,
+                    resolution_option: s.resolution_option,
+                    distance_option: s.distance_option,
                 })
             }
             None => None,
@@ -858,6 +1002,29 @@ impl Manifest {
         }
         if let Some(m) = raw.materials.iter().find(|m| !(1..=65535).contains(&m.id)) {
             return Err(err(format!("material id {} is not in 1..=65535", m.id)));
+        }
+        for m in &raw.materials {
+            if m.sprites.is_empty() && m.blocks.is_empty()
+                || m.sprites.iter().chain(&m.blocks).any(String::is_empty)
+            {
+                return Err(err(format!("material {}: needs sprites or blocks", m.id)));
+            }
+            if let Some(block) = m.blocks.iter().find(|b| b.contains(char::is_whitespace)) {
+                return Err(err(format!(
+                    "material {}: the block {block:?} has a space in it",
+                    m.id
+                )));
+            }
+        }
+        if !raw.materials.is_empty()
+            && raw.material.is_none()
+            && !shadow
+                .as_ref()
+                .is_some_and(|s| !s.solid_materials.is_empty())
+        {
+            return Err(err(
+                "materials are read by the material stage and shadow.solid_materials".into(),
+            ));
         }
         if raw.textures.len() > MAX_TEXTURES {
             return Err(err(format!(
@@ -1000,6 +1167,29 @@ impl Manifest {
             }
             options.push(option);
         }
+        if let Some(s) = &shadow {
+            if let Some(id) = &s.option
+                && !options.iter().any(|o| &o.id == id)
+            {
+                return Err(err(format!("shadow.option: `{id}` is no option")));
+            }
+            if let Some(id) = &s.resolution_option
+                && !numbers_in(&options, id, |v| {
+                    v.fract() == 0.0 && SHADOW_RESOLUTIONS.contains(&(v as u32))
+                })
+            {
+                return Err(err(format!(
+                    "shadow.resolution_option: `{id}` is no int or choice of resolutions"
+                )));
+            }
+            if let Some(id) = &s.distance_option
+                && !numbers_in(&options, id, |v| SHADOW_DISTANCES.contains(&(v as f32)))
+            {
+                return Err(err(format!(
+                    "shadow.distance_option: `{id}` is no int or choice of distances"
+                )));
+            }
+        }
         let pages = check_pages(raw.pages, &options).map_err(err)?;
         let presets = check_presets(raw.presets, &options).map_err(err)?;
         let gpu_ms = match raw.budget.gpu_ms {
@@ -1116,6 +1306,7 @@ impl Manifest {
             reflection,
             rays,
             materials,
+            tags: raw.tags,
             textures,
             lights,
             particle_lights,
@@ -1157,6 +1348,23 @@ impl Manifest {
         }
         files
     }
+}
+
+/// Whether `id` is an `int` option or a `choice` whose every value stands for a number
+/// (`OptionKind::number`) that `valid` takes.
+fn numbers_in(options: &[PackOption], id: &str, valid: impl Fn(f64) -> bool) -> bool {
+    options.iter().any(|o| {
+        o.id == id
+            && match &o.kind {
+                OptionKind::Int { min, max, .. } => {
+                    valid(f64::from(*min)) && valid(f64::from(*max))
+                }
+                OptionKind::Choice { values, .. } => {
+                    (0..values.len()).all(|i| o.kind.number(i as f64).is_some_and(&valid))
+                }
+                _ => false,
+            }
+    })
 }
 
 /// A WGSL identifier the renderer leaves to packs: ASCII, not starting
@@ -1394,6 +1602,16 @@ impl OptionKind {
             OptionKind::Float { .. } => "f32",
             OptionKind::Int { .. } => "i32",
             OptionKind::Choice { .. } => "u32",
+        }
+    }
+
+    /// The number the pipeline constant `value` stands for: an `int`'s own, the value a
+    /// `choice` picks read as a number; none for other kinds, or a choice that is no number.
+    pub fn number(&self, value: f64) -> Option<f64> {
+        match self {
+            OptionKind::Int { .. } => Some(value),
+            OptionKind::Choice { values, .. } => values.get(value as usize)?.parse().ok(),
+            _ => None,
         }
     }
 

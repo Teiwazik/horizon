@@ -242,32 +242,8 @@ pub const MATERIAL_INPUT: Struct = Struct {
 };
 
 /// The input of the material stage's `displacement`, under `[displacement]`.
-pub const DISPLACEMENT_INPUT: Struct = Struct {
-    name: "DisplacementInput",
-    doc: "One corner of the grid a block face near the camera is cut into, for `fn displacement(input: DisplacementInput) -> f32` (`[displacement]`), which returns how deep below the face, in blocks, the surface lies at `height`.",
-    fields: fields! {
-        position: "vec3<f32>" = "The corner on the flat face, camera-relative, in blocks.",
-        normal: "vec3<f32>" = "The face's normal, a unit vector in world axes.",
-        uv: "vec2<f32>" = "The texture coordinate inside the block's sprite (as `MaterialInput.uv`).",
-        material: "u32" = "The `[[materials]]` id of the block texture (0 when none matches).",
-        height: "f32" = "A LabPBR height, 0..1 (1 the top of the relief): the normal map's alpha here, or the texture's average height (what the face's edges are pinned to).",
-    },
-};
 
 /// The vertex stage's input: one corner of a block's surface.
-pub const VERTEX_INPUT: Struct = Struct {
-    name: "VertexInput",
-    doc: "One corner of a block's surface, for `fn vertex(input: VertexInput) -> vec3<f32>`, which returns where it is drawn (camera-relative, in blocks; `input.position` leaves it).",
-    fields: fields! {
-        position: "vec3<f32>" = "The corner, camera-relative, in blocks (`+ frame.camera_position` for the world's).",
-        uv: "vec2<f32>" = "The texture coordinate inside the block atlas.",
-        material: "u32" = "The `[[materials]]` id of the block texture (0 when none matches).",
-        light: "vec2<f32>" = "Block and sky light, 0..1.",
-        tint: "vec4<f32>" = "The vertex colour (biome tint, face shade, ambient occlusion); alpha 1.",
-        face: "u32" = "For a fluid, the face of the block the corner is on (as `MaterialInput.face`), else 0.",
-        fluid: "u32" = "1 on a fluid's surface (water or lava), else 0.",
-    },
-};
 
 /// What the material stage returns.
 pub const SURFACE: Struct = Struct {
@@ -287,6 +263,34 @@ pub const SKY_INPUT: Struct = Struct {
     fields: fields! {
         direction: "vec3<f32>" = "Unit view ray, camera-relative world axes.",
         color: "vec4<f32>" = "Vanilla's sky colour along the ray (sky, fog and sunrise).",
+    },
+};
+
+/// The input of the material stage's `displacement`, under `[displacement]`.
+pub const DISPLACEMENT_INPUT: Struct = Struct {
+    name: "DisplacementInput",
+    doc: "One corner of the grid a block face near the camera is cut into, for `fn displacement(input: DisplacementInput) -> f32` (`[displacement]`), which returns how deep below the face, in blocks, the surface lies at `height`.",
+    fields: fields! {
+        position: "vec3<f32>" = "The corner on the flat face, camera-relative, in blocks.",
+        normal: "vec3<f32>" = "The face's normal, a unit vector in world axes.",
+        uv: "vec2<f32>" = "The texture coordinate inside the block's sprite (as `MaterialInput.uv`).",
+        material: "u32" = "The `[[materials]]` id of the block texture (0 when none matches).",
+        height: "f32" = "A LabPBR height, 0..1 (1 the top of the relief): the normal map's alpha here, or the texture's average height (what the face's edges are pinned to).",
+    },
+};
+
+/// The vertex stage's input: one corner of a block's surface.
+pub const VERTEX_INPUT: Struct = Struct {
+    name: "VertexInput",
+    doc: "One corner of a block's surface, for `fn vertex(input: VertexInput) -> vec3<f32>`, which returns where it is drawn (camera-relative, in blocks; `input.position` where it stays).",
+    fields: fields! {
+        position: "vec3<f32>" = "The corner, camera-relative, in blocks (`+ frame.camera_position` for the world's).",
+        uv: "vec2<f32>" = "The texture coordinate inside the block's sprite.",
+        material: "u32" = "The `[[materials]]` id of the block's sprite (0 when none matches).",
+        light: "vec2<f32>" = "Block and sky light, 0..1.",
+        tint: "vec4<f32>" = "The vertex colour (biome tint, face shade, ambient occlusion); alpha 1.",
+        face: "u32" = "For a fluid, the face of the block the corner is on (as `MaterialInput.face`), else 0.",
+        fluid: "u32" = "1 on a fluid's surface (water or lava), else 0.",
     },
 };
 

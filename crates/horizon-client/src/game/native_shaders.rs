@@ -59,13 +59,19 @@ impl Game<'_> {
             let read_ms = now.elapsed().as_millis();
             let report = check(&pack)
                 .map_err(|p| p.iter().map(ToString::to_string).collect::<Vec<String>>())?;
-            log::info!("shader pack read in {read_ms} ms, checked by {} ms", now.elapsed().as_millis());
+            log::info!(
+                "shader pack read in {read_ms} ms, checked by {} ms",
+                now.elapsed().as_millis()
+            );
             // The player's values (Shader Pack Settings), else the defaults.
             let options = &pack.manifest.options;
             let values = horizon_client::shader_pack_list::load_values(path, options);
             let constants = options.iter().map(|o| o.id.clone()).zip(values).collect();
             // Each sprite layer's `[[materials]]` id, by the layer's texture name.
             let names = &self.pack.render.sprite_layers;
+            let tags = report
+                .manifest
+                .sprite_tags(names.iter().map(|(n, &l)| (n.as_str(), u32::from(l))));
             let layers = names.values().max().map_or(0, |&l| l as usize + 1);
             let mut materials = vec![0u32; layers];
             for (name, &layer) in names.iter() {
@@ -125,7 +131,7 @@ impl Game<'_> {
                 .map(|id| translucent_ids.contains(id))
                 .collect();
             let labels = renderer
-                .set_native_shader_pack(Some((report, constants)), &materials, lights)
+                .set_native_shader_pack(Some((report, constants)), &materials, &tags, lights)
                 .map_err(|e| vec![e])?;
             Ok((pack.manifest, labels, translucent))
         });
