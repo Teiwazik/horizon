@@ -46,7 +46,7 @@ fn debug() -> Option<&'static str> {
 /// submissions because textures come back as soon as their copies are queued.
 pub(super) fn low_latency() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("HORIZON_FRAMEGEN_LOW_LATENCY").as_deref() == Some("1"))
+    *ENABLED.get_or_init(|| std::env::var("HORIZON_FRAMEGEN_LOW_LATENCY").as_deref() == Ok("1"))
 }
 
 pub struct FrameGen {
