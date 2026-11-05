@@ -13800,7 +13800,7 @@ fn dlss_texture_detail_bias() -> f32 {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite())
-            .unwrap_or(-1.0)
+            .unwrap_or(0.0)
             .clamp(-1.0, 0.0)
     })
 }
@@ -14054,6 +14054,5 @@ impl Drop for Renderer {
         self.world_post.shutdown_dlss();
         #[cfg(target_os = "linux")]
         self.frame_gen.shutdown_native();
-        horizon_hdr::dlss::shutdown();
     }
 }
