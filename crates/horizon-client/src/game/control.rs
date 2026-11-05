@@ -165,6 +165,17 @@ impl Game<'_> {
                     .collect(),
             );
         }
+        if let Some(renderer) = &self.renderer {
+            let passes = renderer.shader_pass_times();
+            if !passes.is_empty() {
+                summary["shader_gpu_passes"] = Value::Object(
+                    passes
+                        .into_iter()
+                        .map(|(name, ms)| (name, json!(ms)))
+                        .collect(),
+                );
+            }
+        }
         self.add_async_occlusion_stats(&mut summary);
         summary
     }

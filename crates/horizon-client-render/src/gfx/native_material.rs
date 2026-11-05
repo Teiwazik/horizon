@@ -157,7 +157,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     horizon_material_albedo = albedo.rgb * in.tint.rgb;
     let texels = in.uv * horizon_block_size();
     let footprint = max(dot(dpdx(texels), dpdx(texels)), dot(dpdy(texels), dpdy(texels)));
-    horizon_block_lod = max(0.5 * log2(max(footprint, 1e-8)), 0.0);
+    horizon_block_lod = max(0.5 * log2(max(footprint, 1e-8)) + horizon_terrain_globals.filtering.w, 0.0);
     // Water draws translucent and lava solid, so the pass resolves the fluid kind.
     let fluid = select(0u, select(2u, 1u, translucent), in.fluid_quad != 0u);
     let screen = in.clip.xy / frame.resolution;

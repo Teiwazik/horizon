@@ -33,7 +33,7 @@ struct Globals {
     sunrise_fan: array<vec4<f32>, 32>,
     // x: Options.textureFiltering (0 none, 1 RGSS, 2 anisotropic), y: the sprite arrays' width
     // in texels (vanilla's TextureSize), z: the mip level at which a sprite is one texel when
-    // the views reach it, else 0 (`rotated_grid`).
+    // the views reach it, else 0 (`rotated_grid`); w: temporal upscaling's mip bias.
     filtering: vec4<f32>,
     // HDR output's tier windows (hdr.rs `Hdr::windows`): x..w low to very bright,
     // [0] where the lift starts, [1] where it is full.
@@ -176,7 +176,8 @@ fn tile_uv(uv: vec2<f32>) -> vec2<f32> {
 }
 fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
     // The gradients come from the unwrapped UV, so the mip level holds across block seams.
-    return sprite_at(tiled, layer, dpdx(tiled), dpdy(tiled));
+    let scale = exp2(globals.filtering.w);
+    return sprite_at(tiled, layer, dpdx(tiled) * scale, dpdy(tiled) * scale);
 }
 // `sprite` with the unwrapped UV's screen gradients given: the visibility buffer's resolve
 // (visbuffer.wgsl) works them out from the quad, as its neighbours may be other quads.

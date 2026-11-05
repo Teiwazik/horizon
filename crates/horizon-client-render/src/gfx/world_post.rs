@@ -637,17 +637,28 @@ impl Post {
     ) {
         self.dlss_ran = false;
         #[cfg(feature = "dlss")]
-        if self.taa_on
-            && let Some(group) = self.dlss(device, queue, encoder, motion)
-        {
-            let pipeline = if self.upscale > 1.0 {
-                &self.sharpen
-            } else {
-                &self.copy
-            };
-            self.draw_onto(encoder, screen, &group, pipeline, timing);
-            self.dlss_ran = true;
-            return;
+        if self.taa_on {
+            if let Some(t) = timing.as_deref_mut() {
+                t.mark(device, encoder, (screen, self.format));
+            }
+            if let Some(group) = self.dlss(device, queue, encoder, motion) {
+                if let Some(t) = timing.as_deref_mut() {
+                    t.span(
+                        device,
+                        encoder,
+                        (screen, self.format),
+                        "DLSS Super Resolution",
+                    );
+                }
+                let pipeline = if self.upscale > 1.0 {
+                    &self.sharpen
+                } else {
+                    &self.copy
+                };
+                self.draw_onto(encoder, screen, &group, pipeline, timing);
+                self.dlss_ran = true;
+                return;
+            }
         }
         let Some(target) = &self.target else { return };
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {

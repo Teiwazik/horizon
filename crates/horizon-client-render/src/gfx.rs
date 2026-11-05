@@ -7579,7 +7579,13 @@ impl Renderer {
                 } else {
                     0.0
                 },
-                0.0,
+                if self.world_post.taa_on && self.world_post.dlss_ran {
+                    // Keep the texture footprint at output resolution. A conservative
+                    // bias preserves block detail without an extra sharpening bias.
+                    -self.world_post.upscale.max(1.0).log2()
+                } else {
+                    0.0
+                },
             ],
             hdr_windows: self.hdr.as_ref().map_or([[0.0; 4]; 2], hdr::Hdr::windows),
             hdr_light: [
@@ -11299,6 +11305,17 @@ impl Renderer {
             }
         } else if let Some((real, generated)) = fg_frames {
             self.frame_gen.present(real, generated, fg_made);
+            if frame_gen::low_latency() {
+                // FG bypasses swapchain acquisition on the render thread. Without
+                // a fence, multiple complete real frames can accumulate on the GPU.
+                self.in_flight.push_back(submission.clone());
+                while self.in_flight.len() > 1 {
+                    let _ = self.device.poll(wgpu::PollType::Wait {
+                        submission_index: self.in_flight.pop_front(),
+                        timeout: Some(std::time::Duration::from_secs(5)),
+                    });
+                }
+            }
         }
         if self.surface.is_none() {
             // No swapchain paces offscreen frames: keep two on the GPU at most.

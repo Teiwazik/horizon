@@ -42,6 +42,13 @@ fn debug() -> Option<&'static str> {
         .as_deref()
 }
 
+/// Bound both CPU presentation and GPU work; a texture pool alone does not bound
+/// submissions because textures come back as soon as their copies are queued.
+pub(super) fn low_latency() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HORIZON_FRAMEGEN_LOW_LATENCY").as_deref() != Ok("0"))
+}
+
 pub struct FrameGen {
     pub on: bool,
     backend: crate::graphics::FrameGeneration,
@@ -716,6 +723,7 @@ impl FrameGen {
             frames,
             spare,
             interval: self.interval,
+            queued_at: Instant::now(),
         };
         let _ = send.send(pair);
     }
@@ -748,6 +756,7 @@ struct Pair {
     frames: Vec<wgpu::Texture>,
     spare: Vec<wgpu::Texture>,
     interval: Duration,
+    queued_at: Instant,
 }
 
 /// The thread that copies frames to the swapchain and presents them on time.
@@ -770,9 +779,10 @@ impl Presenter {
         frames_per_group: usize,
     ) -> Self {
         // One pair waiting at most: the renderer then waits as for a swapchain image.
-        let (send, receive) = mpsc::sync_channel::<Pair>(1);
+        let low_latency = low_latency();
+        let (send, receive) = mpsc::sync_channel::<Pair>(usize::from(!low_latency));
         let (give, free) = mpsc::channel();
-        for _ in 0..3 * frames_per_group {
+        for _ in 0..if low_latency { 2 } else { 3 } * frames_per_group {
             let _ = give.send(frame(device, config));
         }
         let (device, queue) = (device.clone(), queue.clone());
@@ -812,7 +822,19 @@ impl Presenter {
                     }
                     queue.present(target);
                 };
+                let trace = std::env::var_os("HORIZON_FRAMEGEN_LATENCY_LOG").is_some();
+                let mut sampled = Instant::now();
+                let (mut groups, mut queued_ms, mut oldest_ms) = (0u32, 0.0f64, 0.0f64);
                 while let Ok(pair) = receive.recv() {
+                    let age = pair.queued_at.elapsed().as_secs_f64() * 1000.0;
+                    groups += 1;
+                    queued_ms += age;
+                    oldest_ms = oldest_ms.max(age);
+                    if trace && sampled.elapsed() >= Duration::from_secs(1) {
+                        log::info!("FG CPU presentation queue: avg {:.2} ms, max {:.2} ms, low_latency={low_latency}", queued_ms / f64::from(groups), oldest_ms);
+                        sampled = Instant::now();
+                        (groups, queued_ms, oldest_ms) = (0, 0.0, 0.0);
+                    }
                     let step = pair.interval / (pair.frames.len() as u32);
                     let start = Instant::now();
                     for (i, texture) in pair.frames.into_iter().enumerate() {
