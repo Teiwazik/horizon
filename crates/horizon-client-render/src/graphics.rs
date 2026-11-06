@@ -789,7 +789,42 @@ pub struct Graphics {
     /// not `shaderPack`, which versions before the clean-room rewrite saved and which stays
     /// ignored.
     pub shader_pack: String,
+    /// NVIDIA Reflex (VK_NV_low_latency2): reduces latency by pacing GPU work. Off by default.
+    pub reflex: Reflex,
 }
+
+/// NVIDIA Reflex low-latency mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Reflex {
+    #[default]
+    Off,
+    On,
+    OnBoost,
+}
+impl Reflex {
+    pub const ALL: [Reflex; 3] = [Reflex::Off, Reflex::On, Reflex::OnBoost];
+    pub fn name(self) -> &'static str {
+        match self {
+            Reflex::Off => "off",
+            Reflex::On => "on",
+            Reflex::OnBoost => "boost",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Reflex::Off => "Off",
+            Reflex::On => "On",
+            Reflex::OnBoost => "On + Boost",
+        }
+    }
+    pub(crate) fn parse(s: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.name() == s)
+            .unwrap_or_default()
+    }
+}
+
 impl Default for Graphics {
     fn default() -> Self {
         Self {
@@ -845,6 +880,7 @@ impl Default for Graphics {
             translucent_batching: true,
             hdr_smooth_gradients: true,
             shader_pack: String::new(),
+            reflex: Reflex::Off,
         }
     }
 }
@@ -990,6 +1026,7 @@ impl Graphics {
                 "hdrSmoothGradients" => g.hdr_smooth_gradients = flag(g.hdr_smooth_gradients),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
+                "nvidiaReflex" => g.reflex = Reflex::parse(value),
                 "overlay" => {
                     g.overlay = match value {
                         "fps" => Overlay::Fps,
@@ -1004,7 +1041,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nframeGenerationMultiplier:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nframeGenerationMultiplier:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\nnvidiaReflex:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1062,6 +1099,7 @@ impl Graphics {
             bool_text(self.translucent_batching),
             bool_text(self.hdr_smooth_gradients),
             bool_text(self.gpu_culling),
+            self.reflex.name(),
         );
         text += &self.blue_map.serialize();
         text

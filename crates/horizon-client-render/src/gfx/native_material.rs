@@ -835,6 +835,63 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
     return sum / (1.0 + max(sum.r, max(sum.g, sum.b)) * 0.5);
 }
 ";
+// Material-only query: uses this stage's sprite -> material table.
+// Ordinary rays, including plant shadows on the ground, are unchanged.
+const FILTERED_MATERIAL_RAYS: &str = "
+fn horizon_ray_material_excluded(hit: RayIntersection, excluded: vec2<u32>) -> bool {
+    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu { return false; }
+    let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
+    let layer = horizon_ray_vertices[first * 6u + 4u] & 0x7fffu;
+    let material = material_ids[min(layer, arrayLength(&material_ids) - 1u)];
+    return material == excluded.x || material == excluded.y;
+}
+fn horizon_ray_contact_visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    excluded: vec2<u32>) -> f32 {
+    var query: ray_query;
+    // Opaque/cutout geometry only: water must not become an ambient blocker.
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x00u, 0x01u, 0.001, distance, origin, direction));
+    while rayQueryProceed(&query) {
+        let hit = rayQueryGetCandidateIntersection(&query);
+        if horizon_ray_material_excluded(hit, excluded) { continue; }
+        var tint = vec3<f32>(1.0);
+        if horizon_ray_texel(hit, &tint).a >= 0.5 { rayQueryConfirmIntersection(&query); }
+    }
+    let hit = rayQueryGetCommittedIntersection(&query);
+    if hit.kind == RAY_QUERY_INTERSECTION_NONE { return 1.0; }
+    return smoothstep(0.05, distance, hit.t);
+}
+fn horizon_ray_light_excluding_materials(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    radius: f32, excluded: vec2<u32>) -> vec3<f32> {
+    var query: ray_query;
+    let dir = horizon_ray_jitter(direction, radius, 0.0);
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x03u, 0.0, distance, origin, dir));
+    var light = vec3<f32>(1.0);
+    var steps = 0u;
+    while rayQueryProceed(&query) {
+        let hit = rayQueryGetCandidateIntersection(&query);
+        if horizon_ray_material_excluded(hit, excluded) { continue; }
+        // Ignored blades must not exhaust the actual occluder budget.
+        steps += 1u;
+        if steps > 32u { return vec3<f32>(0.0); }
+        var tint = vec3<f32>(1.0);
+        let texel = horizon_ray_texel(hit, &tint);
+        if (hit.instance_custom_data & 0x800000u) != 0u {
+            if horizon_ray_is_water(hit) {
+                light *= mix(vec3<f32>(1.0), texel.rgb * tint, texel.a);
+            } else {
+                light *= horizon_ray_pane(texel, tint);
+            }
+        } else if texel.a >= 0.5 {
+            rayQueryConfirmIntersection(&query);
+        }
+    }
+    if rayQueryGetCommittedIntersection(&query).kind != RAY_QUERY_INTERSECTION_NONE {
+        return vec3<f32>(0.0);
+    }
+    return light;
+}
+";
+
 const NO_RAYS: &str = "
 fn horizon_ray_available() -> bool {
     return false;
@@ -843,6 +900,12 @@ fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) 
     return false;
 }
 fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+fn horizon_ray_contact_visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    excluded: vec2<u32>) -> f32 { return 1.0; }
+fn horizon_ray_light_excluding_materials(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    radius: f32, excluded: vec2<u32>) -> vec3<f32> {
     return vec3<f32>(1.0);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
@@ -913,7 +976,11 @@ fn shader_source(source: &str, vertex: bool, displaced: bool, rays: bool) -> Str
         } else {
             String::new()
         },
-        (if rays { RAYS } else { NO_RAYS }).to_owned() + &layer_table("horizon_sprite_tags", &[]),
+        (if rays {
+            RAYS.to_owned() + FILTERED_MATERIAL_RAYS
+        } else {
+            NO_RAYS.to_owned()
+        }) + &layer_table("horizon_sprite_tags", &[]),
     )
 }
 

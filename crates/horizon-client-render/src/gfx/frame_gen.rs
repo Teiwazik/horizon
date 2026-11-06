@@ -677,7 +677,13 @@ impl FrameGen {
 
     /// Hand this frame's pair to the present thread, after the frame's submission: the
     /// made frame (when `made`) goes first.
-    pub fn present(&mut self, real: wgpu::Texture, generated: wgpu::Texture, made: bool) {
+    pub fn present(
+        &mut self,
+        real: wgpu::Texture,
+        generated: wgpu::Texture,
+        made: bool,
+        reflex_id: Option<u64>,
+    ) {
         let now = Instant::now();
         if let Some(last) = self.last {
             // A real frame's time, smoothed: the made frame shows for half of it.
@@ -723,6 +729,7 @@ impl FrameGen {
             frames,
             spare,
             interval: self.interval,
+            reflex_id,
             queued_at: Instant::now(),
         };
         let _ = send.send(pair);
@@ -753,6 +760,7 @@ fn frame(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Te
 /// One real frame's frames for the present thread: `first` (the made frame) now,
 /// `second` (the real one) half an `interval` later; `spare` goes straight back.
 struct Pair {
+    reflex_id: Option<u64>,
     frames: Vec<wgpu::Texture>,
     spare: Vec<wgpu::Texture>,
     interval: Duration,
@@ -792,7 +800,7 @@ impl Presenter {
         let thread = thread::Builder::new()
             .name("Frame generation present".into())
             .spawn(move || {
-                let show = |texture: &wgpu::Texture| {
+                let show = |texture: &wgpu::Texture, reflex_id: Option<u64>| {
                     if failed_here.load(Ordering::Relaxed) {
                         return;
                     }
@@ -820,7 +828,17 @@ impl Presenter {
                     if vsync {
                         window.pre_present_notify();
                     }
+                    // A generated group belongs to one application frame. Keep its
+                    // ID for every actual present, including the real image.
+                    if let Some(id) = reflex_id {
+                        horizon_hdr::reflex::set_marker(&device, &surface,
+                            horizon_hdr::reflex::LatencyMarker::OutOfBandPresentStart, id);
+                    }
                     queue.present(target);
+                    if let Some(id) = reflex_id {
+                        horizon_hdr::reflex::set_marker(&device, &surface,
+                            horizon_hdr::reflex::LatencyMarker::OutOfBandPresentEnd, id);
+                    }
                 };
                 let trace = std::env::var_os("HORIZON_FRAMEGEN_LATENCY_LOG").is_some();
                 let mut sampled = Instant::now();
@@ -842,7 +860,7 @@ impl Presenter {
                         if let Some(wait) = due.checked_duration_since(Instant::now()) {
                             thread::sleep(wait);
                         }
-                        show(&texture);
+                        show(&texture, pair.reflex_id);
                         let _ = give.send(texture);
                     }
                     for spare in pair.spare {

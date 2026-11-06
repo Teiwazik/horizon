@@ -7,12 +7,12 @@
 pub mod dlss;
 #[cfg(all(feature = "dlss", target_os = "linux"))]
 pub mod dlss_fg;
+pub mod reflex;
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
-/// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
-/// it, so [`set_metadata`] can tell the compositor the real peak brightness.
-/// `None` leaves opening to wgpu.
+/// Opens a Vulkan device with `VK_EXT_hdr_metadata` and `VK_NV_low_latency2`
+/// when the GPU offers them. `None` leaves opening to wgpu.
 #[cfg(not(target_os = "macos"))]
 pub fn open_vulkan_device(
     adapter: &wgpu::Adapter,
@@ -24,15 +24,19 @@ pub fn open_vulkan_device(
         let hal = unsafe { adapter.as_hal::<Vulkan>() }?;
         let instance = hal.shared_instance().raw_instance();
         // Safety: the adapter's own physical device on its own instance.
-        let offered =
+        let properties =
             unsafe { instance.enumerate_device_extension_properties(hal.raw_physical_device()) }
-                .ok()?
-                .iter()
-                .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::hdr_metadata::NAME));
-        if !offered {
+                .ok()?;
+        let hdr = properties
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::hdr_metadata::NAME));
+        let reflex = properties
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(ash::nv::low_latency2::NAME));
+        if !hdr && !reflex {
             return None;
         }
-        // Safety: what wgpu's own request_device does, with one more extension.
+        // Safety: what wgpu's own request_device does, with added extensions.
         unsafe {
             hal.open_with_callback(
                 desc.required_features,
@@ -40,7 +44,12 @@ pub fn open_vulkan_device(
                 &desc.memory_hints,
                 Some(Box::new(
                     |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
-                        args.extensions.push(ash::ext::hdr_metadata::NAME);
+                        if hdr {
+                            args.extensions.push(ash::ext::hdr_metadata::NAME);
+                        }
+                        if reflex {
+                            args.extensions.push(ash::nv::low_latency2::NAME);
+                        }
                     },
                 )),
             )

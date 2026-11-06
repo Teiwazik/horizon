@@ -88,6 +88,20 @@ pub fn open_device(
         let hdr = offered
             .iter()
             .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::hdr_metadata::NAME));
+        // Low latency 2 depends on KHR present IDs. Query the feature as well
+        // as the extension name before opting any swapchain into latency mode.
+        let has_present_id = offered
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(ash::khr::present_id::NAME));
+        let mut present_id = ash::vk::PhysicalDevicePresentIdFeaturesKHR::default();
+        if has_present_id {
+            let mut features =
+                ash::vk::PhysicalDeviceFeatures2::default().push_next(&mut present_id);
+            unsafe {
+                instance.get_physical_device_features2(hal.raw_physical_device(), &mut features);
+            }
+        }
+        let enable_reflex = present_id.present_id != 0;
         let mut result = Ok(());
         // Safety: what wgpu's own request_device does, with more extensions.
         let open = unsafe {
@@ -99,6 +113,18 @@ pub fn open_device(
                     |mut args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
                         if hdr {
                             args.extensions.push(ash::ext::hdr_metadata::NAME);
+                        }
+                        if enable_reflex
+                            && offered.iter().any(|e| {
+                                e.extension_name_as_c_str() == Ok(ash::nv::low_latency2::NAME)
+                            })
+                            && !args.extensions.contains(&ash::nv::low_latency2::NAME)
+                        {
+                            args.extensions.push(ash::nv::low_latency2::NAME);
+                            if !args.extensions.contains(&ash::khr::present_id::NAME) {
+                                args.extensions.push(ash::khr::present_id::NAME);
+                            }
+                            *args.create_info = (*args.create_info).push_next(&mut present_id);
                         }
                         // The tested native FG path uses CUDA's Vulkan binary/image imports.
                         if std::env::var("HORIZON_DLSS_FG").as_deref() == Ok("1") {

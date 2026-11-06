@@ -1383,6 +1383,9 @@ pub struct Renderer {
     world_post: world_post::Post,
     /// Frame generation (Horizon setting).
     frame_gen: frame_gen::FrameGen,
+    /// NVIDIA Reflex (VK_NV_low_latency2) setting.
+    pub reflex: crate::graphics::Reflex,
+    reflex_frame_id: std::sync::atomic::AtomicU64,
     /// The entities' texture atlas (`entity_group`'s), for frame generation's motion.
     entity_atlas: wgpu::TextureView,
     /// HDR output (Horizon setting): `Some` while the swapchain is HDR.
@@ -4827,6 +4830,8 @@ impl Renderer {
             layout: crate::chunk::ColumnLayout::VANILLA,
             world_post,
             frame_gen: frame_gen::FrameGen::new(),
+            reflex: crate::graphics::Reflex::Off,
+            reflex_frame_id: std::sync::atomic::AtomicU64::new(1),
             entity_atlas: atlas_view.clone(),
             hdr: None,
             hdr_lighting_setting: true,
@@ -6303,6 +6308,9 @@ impl Renderer {
         {
             log::warn!("Horizon renderer: the window surface did not configure ({e})");
         }
+        if let Some(surface) = &self.surface {
+            horizon_hdr::reflex::set_latency_sleep_mode(&self.device, surface, self.reflex_mode());
+        }
     }
     /// HDR calibration's test picture (`crate::hdr_calibration`) while it runs, else None.
     pub fn set_hdr_calibration(&mut self, calibration: Option<HdrCalibration>) {
@@ -6537,6 +6545,61 @@ impl Renderer {
             self.frame_gen.stop();
         }
         self.frame_gen.on = on;
+    }
+    /// Sets the NVIDIA Reflex mode (Off, On, On + Boost).
+    pub fn set_reflex(&mut self, mode: crate::graphics::Reflex) {
+        if self.reflex != mode {
+            self.reflex = mode;
+            if let Some(surface) = &self.surface {
+                horizon_hdr::reflex::set_latency_sleep_mode(
+                    &self.device,
+                    surface,
+                    self.reflex_mode(),
+                );
+            }
+        }
+    }
+    /// Whether NVIDIA Reflex (VK_NV_low_latency2) is supported on this device.
+    pub fn reflex_supported(&self) -> bool {
+        horizon_hdr::reflex::is_supported(&self.device)
+    }
+    fn reflex_mode(&self) -> horizon_hdr::reflex::ReflexMode {
+        match self.reflex {
+            crate::graphics::Reflex::Off => horizon_hdr::reflex::ReflexMode::Off,
+            crate::graphics::Reflex::On => horizon_hdr::reflex::ReflexMode::On,
+            crate::graphics::Reflex::OnBoost => horizon_hdr::reflex::ReflexMode::OnBoost,
+        }
+    }
+    /// Dynamically sleeps the CPU thread until the GPU is ready to reduce input latency.
+    pub fn latency_sleep(&self) {
+        if self.reflex != crate::graphics::Reflex::Off {
+            if let Some(surface) = &self.surface {
+                self.reflex_frame_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                horizon_hdr::reflex::latency_sleep(&self.device, surface);
+                self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::InputSample);
+                horizon_hdr::reflex::set_marker(
+                    &self.device,
+                    surface,
+                    horizon_hdr::reflex::LatencyMarker::SimulationStart,
+                    self.reflex_frame_id
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+            }
+        }
+    }
+    fn set_latency_marker(&self, marker: horizon_hdr::reflex::LatencyMarker) {
+        if self.reflex != crate::graphics::Reflex::Off {
+            if let Some(surface) = &self.surface {
+                horizon_hdr::reflex::set_marker(
+                    &self.device,
+                    surface,
+                    marker,
+                    self.reflex_frame_id
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+            }
+        }
     }
     /// `upscale`: output pixels per rendered pixel, for TAA to rebuild (1: native).
     /// `sharpness`: how much TAA's upscaled picture is sharpened, 0..=1.
@@ -7101,6 +7164,8 @@ impl Renderer {
         }
     }
     pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+        self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::SimulationEnd);
+        self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::RendersubmitStart);
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
@@ -11182,6 +11247,7 @@ impl Renderer {
         // Frame generation presents its own frames (`frame_gen.present` below).
         let (encoder, surface_frame, after) = if readback.is_none()
             && fg_frames.is_none()
+            && self.reflex == crate::graphics::Reflex::Off
             && hdr_readback.is_none()
             && checks.is_none()
             && !first_frame
@@ -11234,6 +11300,7 @@ impl Renderer {
             self.first_frame = FirstFrame::Drawn;
         }
         let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::RendersubmitEnd);
         if let Some(read) = after.or_else(|| self.after_submit()) {
             read();
         }
@@ -11294,7 +11361,9 @@ impl Renderer {
             if first_frame {
                 startup_step(format_args!("presenting the first frame"));
             }
+            self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::PresentStart);
             self.queue.present(surface_frame);
+            self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::PresentEnd);
             if self.hdr.is_some()
                 && let Some(marker) = self.hdr_marker.take()
             {
@@ -11305,7 +11374,17 @@ impl Renderer {
                 self.configure_surface();
             }
         } else if let Some((real, generated)) = fg_frames {
-            self.frame_gen.present(real, generated, fg_made);
+            self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::PresentStart);
+            self.frame_gen.present(
+                real,
+                generated,
+                fg_made,
+                (self.reflex != crate::graphics::Reflex::Off).then(|| {
+                    self.reflex_frame_id
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                }),
+            );
+            self.set_latency_marker(horizon_hdr::reflex::LatencyMarker::PresentEnd);
             if frame_gen::low_latency() {
                 // FG bypasses swapchain acquisition on the render thread. Without
                 // a fence, multiple complete real frames can accumulate on the GPU.
@@ -14051,6 +14130,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         self.queue.wait();
         self.frame_gen.stop();
+        horizon_hdr::reflex::shutdown(&self.device);
         self.world_post.shutdown_dlss();
         #[cfg(target_os = "linux")]
         self.frame_gen.shutdown_native();

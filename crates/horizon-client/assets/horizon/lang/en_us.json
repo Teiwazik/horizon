@@ -737,5 +737,8 @@
   "DLSS": "DLSS",
   "FSR": "FSR",
   "DLSS-G": "DLSS-G",
-  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS."
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.",
+  "NVIDIA Reflex": "NVIDIA Reflex",
+  "On + Boost": "On + Boost",
+  "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.": "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock."
 }

@@ -7,12 +7,11 @@ use ash::{khr, vk};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::vulkan::{
-    conv, map_host_device_oom_and_lost_err,
+    DeviceShared, InstanceShared, conv, map_host_device_oom_and_lost_err,
     semaphore_list::SemaphoreType,
     swapchain::{
         Surface, SurfaceTextureMetadata, Swapchain, SwapchainSubmissionSemaphoreGuard, WindowHandle,
     },
-    DeviceShared, InstanceShared,
 };
 
 pub(crate) struct NativeSurface {
@@ -233,6 +232,15 @@ impl Surface for NativeSurface {
             info = info.push_next(&mut format_list_info);
         }
 
+        // Enabling the extension on the device alone does not opt a swapchain
+        // into low latency mode (VK_NV_low_latency2).
+        let mut latency = vk::SwapchainLatencyCreateInfoNV::default().latency_mode_enable(true);
+        if device
+            .enabled_device_extensions()
+            .contains(&ash::nv::low_latency2::NAME)
+        {
+            info = info.push_next(&mut latency);
+        }
         let result = {
             profiling::scope!("vkCreateSwapchainKHR");
             unsafe { functor.create_swapchain(&info, None) }

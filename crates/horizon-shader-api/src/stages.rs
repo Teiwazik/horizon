@@ -514,6 +514,18 @@ var<private> horizon_ray_pixel: vec2<f32>;
 fn ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
     return horizon_ray_light(origin, direction, distance, radius);
 }
+// Material stage only: smooth near-field ambient visibility from solid geometry.
+// Excludes two material IDs and transparent water/glass; 1 is unobstructed.
+fn ray_contact_visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    excluded: vec2<u32>) -> f32 {
+    return horizon_ray_contact_visibility(origin, direction, distance, excluded);
+}
+// Material stage only: skip two terrain material IDs when shading an animated receiver.
+// Other terrain, entities and translucent tint still apply.
+fn ray_light_excluding_materials(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    radius: f32, excluded: vec2<u32>) -> vec3<f32> {
+    return horizon_ray_light_excluding_materials(origin, direction, distance, radius, excluded);
+}
 // The direct light of the block and dynamic lights near `position`, on a surface facing
 // `normal`, each shadowed and tinted by the rays to it, added in linear space.
 fn ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
@@ -589,6 +601,12 @@ fn horizon_ray_occluded(origin: vec3<f32>, direction: vec3<f32>, distance: f32) 
     return false;
 }
 fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, distance: f32, radius: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+fn horizon_ray_contact_visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    excluded: vec2<u32>) -> f32 { return 1.0; }
+fn horizon_ray_light_excluding_materials(origin: vec3<f32>, direction: vec3<f32>, distance: f32,
+    radius: f32, excluded: vec2<u32>) -> vec3<f32> {
     return vec3<f32>(1.0);
 }
 fn horizon_ray_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {

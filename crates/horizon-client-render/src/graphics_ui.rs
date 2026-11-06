@@ -7,7 +7,7 @@
 use crate::{
     graphics::{
         EntityCullingMode, FarDetail, FrameGeneration, GraphicsApi, LeafCullingMode, Overlay,
-        Pacing, ParticleCullingMode, PresentMode, Preset, Upscaling,
+        Pacing, ParticleCullingMode, PresentMode, Preset, Reflex, Upscaling,
     },
     graphics_style::{self as style, Cost},
     hud::{HudAtlas, HudBatch},
@@ -111,6 +111,7 @@ pub enum H {
     GraphicsApi,
     TranslucentBatching,
     HdrSmoothGradients,
+    Reflex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +357,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             H::FrameGenerationMultiplier,
                             High,
                             "Displayed frames per real frame: DLSS-G 2x/3x/4x, FSR 2x.",
+                        ),
+                        h(
+                            H::Reflex,
+                            None,
+                            "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.",
                         ),
                     ],
                 ),
@@ -860,6 +866,7 @@ impl H {
                 format!("{}x", g.frame_generation_multiplier),
             ),
             H::FrameGeneration => labelled("Frame Generation", g.frame_generation.label()),
+            H::Reflex => labelled("NVIDIA Reflex", g.reflex.label()),
             H::Upscaler => labelled("Upscaler", if g.dlss { "DLSS" } else { "FSR" }),
             H::Hdr => labelled("HDR", on_off(g.hdr)),
             H::HdrCalibrate => Text::literal(lang::get(match setup(s) {
@@ -1018,6 +1025,7 @@ impl H {
             H::FrameGeneration => {
                 g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
             }
+            H::Reflex => g.reflex = step(&Reflex::ALL, g.reflex, back),
             H::Hdr => g.hdr = !g.hdr,
             H::HdrLighting => g.hdr_lighting = !g.hdr_lighting,
             H::BatteryMode => g.battery = !g.battery,
@@ -1211,6 +1219,7 @@ impl Item {
                     | H::TranslucentBatching
                     | H::HdrSmoothGradients
                     | H::GpuCulling
+                    | H::Reflex
             ) | Item::Vanilla(
                 Opt::GuiScale
                     | Opt::Fullscreen

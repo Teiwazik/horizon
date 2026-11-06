@@ -236,5 +236,8 @@
   "DLSS": "DLSS",
   "FSR": "FSR",
   "DLSS-G": "DLSS-G",
-  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Восстановление изображения: FSR (TAA) или NVIDIA DLSS."
+  "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Восстановление изображения: FSR (TAA) или NVIDIA DLSS.",
+  "NVIDIA Reflex": "NVIDIA Reflex",
+  "On + Boost": "Вкл. + Boost",
+  "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.": "NVIDIA Reflex: снижает задержку ввода, оптимизируя очередь кадров GPU. Режим On + Boost удерживает повышенные частоты GPU."
 }
