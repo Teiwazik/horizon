@@ -8678,13 +8678,13 @@ impl Renderer {
                 .map(|t| u64::from(t.drawn().solid))
                 .sum();
             let state = format!(
-                "window {}x{}, world scale {:.2}, upscale ratio {:.2}, taa {}, upscaler {}, dlss requested {}, frame generation {} ({}), antialias {}, lod tiles resident {} / in view {}, mirror {}, underwater {}, fov {:.0}, present {:?}",
+                "window {}x{}, world scale {:.2}, upscale ratio {:.2}, taa {}, dlss ran {}, dlss requested {}, frame generation {} ({}), antialias {}, lod tiles resident {} / in view {}, mirror {}, underwater {}, fov {:.0}, present {:?}",
                 self.config.width,
                 self.config.height,
                 self.world_post.scale,
                 self.world_post.upscale,
                 self.world_post.taa,
-                self.upscaler_label().unwrap_or_else(|| "off".into()),
+                self.world_post.dlss_ran,
                 self.world_post.use_dlss,
                 if self.frame_gen.on { "on" } else { "off" },
                 self.frame_gen.label(),
