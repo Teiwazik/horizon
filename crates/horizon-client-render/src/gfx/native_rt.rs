@@ -108,6 +108,10 @@ pub struct RayScene {
     pub entity_data: wgpu::Buffer,
     pub entity_atlas: wgpu::TextureView,
     light_grid: Vec<u32>,
+    /// `update_lights`' working lists, kept so a frame allocates nothing.
+    light_scratch: Vec<(f32, [i32; 3], Light)>,
+    light_cell_lists: Vec<Vec<(f32, u16)>>,
+    light_out: Vec<Light>,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Free ranges of `data`, in vertices, in order.
     free: Vec<(u64, u64)>,
@@ -117,6 +121,8 @@ pub struct RayScene {
     /// Since the last log: entity structures made, and the last frame's visible sections and
     /// light count (`HORIZON_SHADER_PACK_TIMING`'s once-a-second line).
     entity_builds: usize,
+    /// The entities' structures (all, shadow-only): structure, quads it holds, geometry flags.
+    entity_blas: [Option<(wgpu::Blas, u32, wgpu::AccelerationStructureGeometryFlags)>; 2],
     visible: usize,
     lights_used: usize,
 }
@@ -311,12 +317,16 @@ impl RayScene {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            light_scratch: Vec::new(),
+            light_cell_lists: Vec::new(),
+            light_out: Vec::new(),
             built: Default::default(),
             free: vec![(0, DATA_VERTICES)],
             used: 0,
             logged: std::time::Instant::now(),
             builds: 0,
             entity_builds: 0,
+            entity_blas: [None, None],
             visible: 0,
             lights_used: 0,
         })
@@ -367,7 +377,9 @@ impl RayScene {
         particles: &[crate::dynamic_light::ParticleSource],
     ) {
         // Sources by how much they matter to the camera, with a stable order among equals.
-        let mut lights: Vec<(f32, [i32; 3], Light)> = Vec::new();
+        // Kept between frames: these were allocated anew every frame, one list per grid cell.
+        let mut lights = std::mem::take(&mut self.light_scratch);
+        lights.clear();
         let mut add =
             |at: [f32; 3], key: [i32; 3], reach: f32, color: [f32; 3], size: f32, bright: f32| {
                 let d2 = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
@@ -423,16 +435,24 @@ impl RayScene {
             let bright = p.color[0].max(p.color[1]).max(p.color[2]);
             add(p.at, [i32::MAX; 3], p.reach, p.color, p.size, bright);
         }
-        lights.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        lights.truncate(MAX_LIGHTS);
+        let order = |a: &(f32, [i32; 3], Light), b: &(f32, [i32; 3], Light)| {
+            a.0.total_cmp(&b.0).then(a.1.cmp(&b.1))
+        };
+        // Only the strongest `MAX_LIGHTS` are sorted: every loaded source used to be.
+        if lights.len() > MAX_LIGHTS {
+            lights.select_nth_unstable_by(MAX_LIGHTS, order);
+            lights.truncate(MAX_LIGHTS);
+        }
+        lights.sort_unstable_by(order);
         // The grid sits on the world's cells, so a list doesn't change as the camera moves
         // within one, and a far pile of sources takes nothing from the ones here.
         let snap = (camera / f64::from(LIGHT_CELL)).floor() * f64::from(LIGHT_CELL);
         let half = (LIGHT_GRID / 2) as f32 * LIGHT_CELL;
         let origin = (snap - camera).as_vec3() - half;
         self.light_grid.fill(0);
-        let mut cells =
-            vec![Vec::<(f32, u16)>::new(); (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize];
+        let mut cells = std::mem::take(&mut self.light_cell_lists);
+        cells.resize_with((LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize, Vec::new);
+        cells.iter_mut().for_each(Vec::clear);
         for (i, (_, _, light)) in lights.iter().enumerate() {
             let [x, y, z, reach] = light.position;
             let cell = |v: f32, o: f32| ((v - o) / LIGHT_CELL).floor() as i32;
@@ -471,13 +491,18 @@ impl RayScene {
                 words[(j + 1) / 2] |= u32::from(*id) << (((j + 1) % 2) * 16);
             }
         }
-        let mut out = vec![Light {
+        self.light_cell_lists = cells;
+        let mut out = std::mem::take(&mut self.light_out);
+        out.clear();
+        out.push(Light {
             position: [lights.len() as f32, origin.x, origin.y, origin.z],
             color: [0.0; 4],
-        }];
+        });
         self.lights_used = lights.len();
-        out.extend(lights.into_iter().map(|l| l.2));
+        out.extend(lights.iter().map(|l| l.2));
+        self.light_scratch = lights;
         queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&out));
+        self.light_out = out;
         queue.write_buffer(&self.light_cells, 0, bytemuck::cast_slice(&self.light_grid));
     }
 
@@ -631,17 +656,35 @@ impl RayScene {
                 v
             })
             .unwrap_or_default();
-        let entity_blases: Vec<_> = entity_parts
+        // Kept from frame to frame and rebuilt in place: a structure made anew every frame
+        // churned the driver's memory over a long session. One is remade only when the
+        // entities outgrow it or its opacity changes.
+        let entity_blases: Vec<wgpu::Blas> = entity_parts
             .iter()
-            .map(|(size, _, _)| {
-                blas(
-                    device,
-                    vec![size.clone()],
-                    wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
-                )
+            .map(|(size, _, mask)| {
+                let slot = usize::from(*mask == MASK_SHADOW_ONLY);
+                let quads = size.vertex_count / 4;
+                match &self.entity_blas[slot] {
+                    Some((b, capacity, flags)) if quads <= *capacity && *flags == size.flags => {
+                        b.clone()
+                    }
+                    _ => {
+                        let capacity = quads.next_power_of_two().max(1024);
+                        let mut grown = size.clone();
+                        grown.vertex_count = capacity * 4;
+                        grown.index_count = Some(capacity * 6);
+                        let b = blas(
+                            device,
+                            vec![grown],
+                            wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
+                        );
+                        self.entity_builds += 1;
+                        self.entity_blas[slot] = Some((b.clone(), capacity, size.flags));
+                        b
+                    }
+                }
             })
             .collect();
-        self.entity_builds += entity_blases.len();
         if let Some(e) = &entities
             && e.shadow_only.1 > 0
             && u64::from(e.shadow_only.1) * 4 <= ENTITY_DATA_VERTICES
