@@ -1029,9 +1029,10 @@ impl NativeFrame {
         for (value, (target, half_life)) in self.eye.iter_mut().zip(targets) {
             *value = eased(*value, target, half_life, dt);
         }
-        let [block, sky, water, lava] = self.eye;
+        let [block, sky, _water, lava] = self.eye;
         inputs.eye_light_smooth = [block, sky];
-        inputs.in_water = water;
+        // rt5: `in_water` carries the waterline (`PackInputs::water_line`) as it is: easing
+        // it toward the eye's fluid flag hid the waterline everywhere but mid-transition.
         inputs.in_lava = lava;
         let targets = [
             inputs.wetness,

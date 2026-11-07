@@ -480,15 +480,17 @@ impl Game<'_> {
     /// whole-screen under-water look applies.
     pub(super) fn pack_waterline(&self, eye: glam::DVec3) -> bool {
         let w = self.eye_water_line(eye);
+        // The pack's split view reaches 0.6 blocks under the surface (`eye_water_line`'s
+        // scale is 1.5 blocks per unit).
         w > 0.5
-            && w < 0.8
+            && w < 0.9
             && self
                 .renderer
                 .as_ref()
                 .is_some_and(|r| r.wants_water_plane())
     }
-    /// The waterline at the eye, for packs: `0.5 + surface - eye` (0..1) when the water's
-    /// surface in the camera's own column lies within half a block of the eye, else 0.
+    /// The waterline at the eye, for packs: `0.5 + (surface - eye) / 1.5` (0..1) when the
+    /// water's surface in the camera's own column lies within 0.75 blocks of the eye, else 0.
     /// Read from the column itself, never the remembered mirror plane.
     pub(super) fn eye_water_line(&self, eye: glam::DVec3) -> f32 {
         let (x, y, z) = (
@@ -503,8 +505,8 @@ impl Game<'_> {
                     return 0.0;
                 }
                 let rel = f64::from(by) + f64::from(h) - eye.y;
-                return if rel.abs() < 0.5 {
-                    (0.5 + rel).clamp(0.001, 0.999) as f32
+                return if rel.abs() < 0.75 {
+                    (0.5 + rel / 1.5).clamp(0.001, 0.999) as f32
                 } else {
                     0.0
                 };
