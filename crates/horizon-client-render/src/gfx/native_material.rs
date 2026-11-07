@@ -446,7 +446,7 @@ fn horizon_ray_pane(texel: vec4<f32>, tint: vec3<f32>) -> vec3<f32> {
 // The light left of 1 after the ray: 0 past anything solid, tinted by translucent terrain.
 fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> {
     var query: ray_query;
-    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x03u, 0.0, distance, origin, direction));
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x07u, 0.0, distance, origin, direction));
     var light = vec3<f32>(1.0);
     var steps = 0u;
     while rayQueryProceed(&query) {
@@ -880,7 +880,7 @@ fn horizon_ray_light_excluding_materials(origin: vec3<f32>, direction: vec3<f32>
     radius: f32, excluded: vec2<u32>) -> vec3<f32> {
     var query: ray_query;
     let dir = horizon_ray_jitter(direction, radius, 0.0);
-    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x03u, 0.0, distance, origin, dir));
+    rayQueryInitialize(&query, horizon_scene, RayDesc(0x04u, 0x07u, 0.0, distance, origin, dir));
     var light = vec3<f32>(1.0);
     var steps = 0u;
     while rayQueryProceed(&query) {

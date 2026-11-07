@@ -38,6 +38,7 @@ const ENTITY: u32 = (1 << 23) - 1;
 /// Instance masks: what `ray_light` and `ray_occluded` ask for.
 const MASK_SOLID: u8 = 1;
 const MASK_TRANSLUCENT: u8 = 2;
+const MASK_SHADOW_ONLY: u8 = 4;
 
 /// The usage a buffer needs for structures to be built from it.
 pub fn input_usage(device: &wgpu::Device) -> wgpu::BufferUsages {
@@ -576,37 +577,41 @@ impl RayScene {
             })
             .collect();
         // The entities, every frame: they move and animate.
-        let entity_sizes = entities
+        // Two structures: the entities, and the first-person body, which only casts shadows
+        // (its own mask, so reflection and bounce rays do not see it).
+        let entity_parts: Vec<(wgpu::BlasTriangleGeometrySizeDescriptor, u32, u8)> = entities
             .as_ref()
-            .map(|e| [sizes(e.quads, true), sizes(e.shadow_only.1, true)]);
-        let entity_blas = entities
-            .as_ref()
-            .zip(entity_sizes.as_ref())
-            .and_then(|(e, s)| {
-                let descriptors: Vec<_> =
-                    s.iter().filter(|d| d.vertex_count > 0).cloned().collect();
-                (!descriptors.is_empty()).then(|| {
-                    let _ = e;
-                    blas(
-                        device,
-                        descriptors,
-                        wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
-                    )
-                })
-            });
-        self.entity_builds += usize::from(entity_blas.is_some());
-        if let (Some(e), Some(s), Some(b)) = (&entities, &entity_sizes, &entity_blas) {
-            let mut geometry = Vec::new();
-            if e.quads > 0 {
-                geometry.push(triangles(&s[0], e.vertices, 0, e.stride));
+            .map(|e| {
+                let mut v = Vec::new();
+                if e.quads > 0 {
+                    v.push((sizes(e.quads, true), 0, MASK_SOLID));
+                }
+                if e.shadow_only.1 > 0 {
+                    v.push((sizes(e.shadow_only.1, true), e.shadow_only.0, MASK_SHADOW_ONLY));
+                }
+                v
+            })
+            .unwrap_or_default();
+        let entity_blases: Vec<_> = entity_parts
+            .iter()
+            .map(|(size, _, _)| {
+                blas(
+                    device,
+                    vec![size.clone()],
+                    wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
+                )
+            })
+            .collect();
+        self.entity_builds += entity_blases.len();
+        if let Some(e) = &entities {
+            for ((size, first, _), b) in entity_parts.iter().zip(&entity_blases) {
+                entries.push(wgpu::BlasBuildEntry {
+                    blas: b,
+                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![triangles(
+                        size, e.vertices, *first, e.stride,
+                    )]),
+                });
             }
-            if e.shadow_only.1 > 0 {
-                geometry.push(triangles(&s[1], e.vertices, e.shadow_only.0, e.stride));
-            }
-            entries.push(wgpu::BlasBuildEntry {
-                blas: b,
-                geometry: wgpu::BlasGeometries::TriangleGeometries(geometry),
-            });
         }
         // The instances, camera-relative.
         let mut instances: Vec<wgpu::TlasInstance> = Vec::new();
@@ -638,9 +643,9 @@ impl RayScene {
                 ));
             }
         }
-        if let Some(b) = &entity_blas {
+        for ((_, _, mask), b) in entity_parts.iter().zip(&entity_blases) {
             let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-            instances.push(wgpu::TlasInstance::new(b, identity, ENTITY, MASK_SOLID));
+            instances.push(wgpu::TlasInstance::new(b, identity, ENTITY, *mask));
         }
         let count = instances.len();
         let slots = self
