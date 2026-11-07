@@ -8678,7 +8678,7 @@ impl Renderer {
                 .map(|t| u64::from(t.drawn().solid))
                 .sum();
             let state = format!(
-                "window {}x{}, world scale {:.2}, upscale ratio {:.2}, taa {}, dlss ran {}, dlss requested {}, frame generation {} ({}), antialias {}, lod tiles resident {} / in view {}, mirror {}, underwater {}, fov {:.0}, present {:?}",
+                "window {}x{}, world scale {:.2}, upscale ratio {:.2}, taa {}, dlss ran {}, dlss requested {}, frame generation {} ({}), antialias {}, lod tiles resident {} / in view {}, mirror {}, underwater {}, fov {:.0}, present {:?}, in world {}",
                 self.config.width,
                 self.config.height,
                 self.world_post.scale,
@@ -8695,6 +8695,7 @@ impl Renderer {
                 frame.underwater,
                 frame.fov_degrees,
                 self.config.present_mode,
+                !self.lods.is_empty() || !frame.title,
             );
             // Log a change at once; resident/in-view counts alone don't count as one.
             let key = state.split(", lod tiles").next().unwrap_or("").to_owned()

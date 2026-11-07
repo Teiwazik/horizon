@@ -285,6 +285,15 @@ impl PassTiming {
             }
             window.push_back(ms);
         }
+        // A pass that no longer runs (frame generation switched off, say) ages out of the
+        // medians instead of keeping its last numbers forever.
+        let names = &self.names;
+        self.samples.retain_mut(|(name, window)| {
+            if !names.iter().any(|n| n == name) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
         self.reports += 1;
         if self.log && self.reports.is_multiple_of(REPORT) {
             let medians = self.medians();
