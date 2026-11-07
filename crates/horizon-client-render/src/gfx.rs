@@ -8512,8 +8512,6 @@ impl Renderer {
                     && !frame.title
                     && !pack_terrain
                     && self.multi_draw
-                    // Occlusion is found from the camera, not the mirror's eye.
-                    && mirror.is_none()
                     // It tests the CPU's lists, which leave out GPU culling's sections.
                     && !gpu_frame
                     && visible.len() >= c.min_sections
@@ -8536,6 +8534,11 @@ impl Renderer {
             }
         };
         let (mut opaque_draws, mut phase2_opaque) = (0, 0);
+        // Occlusion is found from the camera, not the mirror's eye: under a water mirror
+        // sections all draw in phase 1 (the mirror sees ones the camera does not), and
+        // only distant tiles are tested. The mirror draws phase 1 alone; a tile hidden
+        // from the camera is hidden from the lower mirrored eye as well.
+        let cull_sections = mirror.is_none();
         debug_assert!(
             !(split_solid && gpu_frame),
             "GPU culling is never offered on Metal"
@@ -8559,7 +8562,7 @@ impl Renderer {
                 gpu_solid += 1;
                 continue;
             }
-            let first_phase = cull.as_ref().is_none_or(|c| c.first(v.slot));
+            let first_phase = !cull_sections || cull.as_ref().is_none_or(|c| c.first(v.slot));
             let (draws, pages) = if first_phase {
                 (&mut self.draws, &mut self.draw_pages)
             } else {
@@ -8589,7 +8592,7 @@ impl Renderer {
                     self.solid_runs
                         .push_in(group, v.distance, s.page, start, len, [0; 3]);
                 }
-                if let Some(c) = &mut cull {
+                if cull_sections && let Some(c) = &mut cull {
                     c.drawn(i, v.slot, indices, cull::SECTION_BOX);
                 }
             } else if let Some(c) = &mut cull {
@@ -8712,8 +8715,6 @@ impl Renderer {
                     "on"
                 } else if gpu_frame {
                     "off (GPU-culled frame)"
-                } else if mirror.is_some() {
-                    "off (mirror)"
                 } else {
                     "off"
                 },
@@ -10114,17 +10115,24 @@ impl Renderer {
                     pass.set_pipeline(&self.sky);
                     pass.draw(0..3, 0..1);
                 }
-                // The solid terrain: occlusion culling is off with a mirror, so every draw
-                // is phase 1's.
+                // The solid terrain: every section draws in phase 1 with a mirror; phase 2
+                // holds only distant tiles hidden from the camera last frame, whose
+                // instance counts the test has not set yet: the mirror draws phase 1.
                 if flat_frame && let Some(flat) = &self.flat {
                     pass.set_pipeline(&flat.solid_mirror);
                     let vertices = flat_vertices(&self.arena, self.translucent_arena.as_ref());
-                    flat.draw(&mut pass, &flat.calls[..flat.solid_calls], vertices);
+                    let calls = if culling {
+                        flat.phase1_calls
+                    } else {
+                        flat.solid_calls
+                    };
+                    flat.draw(&mut pass, &flat.calls[..calls], vertices);
                 } else {
                     pass.set_pipeline(&self.solid_mirror);
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.set_vertex_buffer(1, self.instances.slice(..));
-                    self.draw_solid_sections(&mut pass, &self.indirect, 0, 0, solid_draws);
+                    let draws = if culling { phase1_draws } else { solid_draws };
+                    self.draw_solid_sections(&mut pass, &self.indirect, 0, 0, draws);
                 }
                 drop(pass);
                 reflection = Some(mirror.color.clone());
