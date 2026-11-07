@@ -8953,11 +8953,7 @@ impl Game<'_> {
         // the sleep overlay, debug screen and open screens still draw.
         let spectator = self.spectator();
         let (wi, hi) = (w as i32, h as i32);
-        let show_hud =
-            !self.ui.hide_gui && !(self.screen == Screen::Options && self.ui.options.preview);
-        // max(Hud.leftHeight, Hud.rightHeight) after the bars: the item name and
-        // the action bar sit above it.
-        let mut bar_height = 39;
+        let show_hud = !self.ui.hide_gui && !(self.screen == Screen::Options && self.ui.options.preview);
         if show_hud {
             self.draw_spyglass(&mut batch);
             // Hud.extractCrosshair / extractItemHotbar / extractPlayerHealth /
@@ -9056,8 +9052,6 @@ impl Game<'_> {
             } else {
                 self.draw_mount_hud(&mut batch, wi, hi)
             };
-            // Without the survival bars only the mount's hearts raise it.
-            bar_height = 39 + 10 * ((vehicle_hearts + 9) / 10);
             // The one bar above the hotbar: the mount's jump bar, the locator
             // bar (with its background) or the experience bar, with the level
             // number that a survival player always has.
@@ -9150,10 +9144,6 @@ impl Game<'_> {
                 self.gui_layer("minecraft:player_health", &mut batch, |g, batch| {
                     hud_layout::paint(batch, &g.gui.atlas, &draws);
                 });
-                bar_height = self
-                    .health_hud
-                    .left_height
-                    .max(self.health_hud.right_height);
                 // Hud.playAirBubblePoppedSound: Player.playSound (PLAYERS), heard
                 // by this client only.
                 if let Some((volume, pitch)) = self.health_hud.bubble_pop_sound.take() {
@@ -9169,7 +9159,7 @@ impl Game<'_> {
             }
             if !spectator {
                 self.gui_layer("minecraft:selected_item_name", &mut batch, |g, batch| {
-                    g.draw_selected_name(batch, bar_height, !g.creative);
+                    g.draw_selected_name(batch, !g.creative);
                 });
             }
         }
@@ -9180,7 +9170,7 @@ impl Game<'_> {
         });
         if show_hud {
             self.gui_layer("minecraft:overlay_message", &mut batch, |g, batch| {
-                g.draw_overlay_message(batch, bar_height);
+                g.draw_overlay_message(batch);
             });
             self.gui_layer("minecraft:title", &mut batch, |g, batch| {
                 g.draw_title(batch);
