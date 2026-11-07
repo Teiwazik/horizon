@@ -73,6 +73,10 @@ pub struct Post {
     sharpen: wgpu::RenderPipeline,
     /// The strength `sharpen` was built with (`set_sharpness`), and what rebuilding it takes.
     sharpness: f32,
+    /// `sharpen` for DLSS's picture, at `DLSS_SHARPEN_SHARE` of the setting: DLSS
+    /// already sharpens its own output, and the full strength doubled that (halos).
+    #[cfg(feature = "dlss")]
+    sharpen_dlss: wgpu::RenderPipeline,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
@@ -291,6 +295,14 @@ impl Post {
             dlss_copy,
             sharpen: sharpen_pipeline(device, &shader, &pipeline_layout, format, 0.85),
             sharpness: 0.85,
+            #[cfg(feature = "dlss")]
+            sharpen_dlss: sharpen_pipeline(
+                device,
+                &shader,
+                &pipeline_layout,
+                format,
+                0.85 * DLSS_SHARPEN_SHARE,
+            ),
             layout,
             sampler,
             format,
@@ -523,6 +535,16 @@ impl Post {
                 self.format,
                 sharpness,
             );
+            #[cfg(feature = "dlss")]
+            {
+                self.sharpen_dlss = sharpen_pipeline(
+                    device,
+                    &self.shader,
+                    &self.pipeline_layout,
+                    self.format,
+                    sharpness * DLSS_SHARPEN_SHARE,
+                );
+            }
             self.sharpness = sharpness;
         }
     }
@@ -648,7 +670,7 @@ impl Post {
                     );
                 }
                 let pipeline = if self.upscale > 1.0 {
-                    &self.sharpen
+                    &self.sharpen_dlss
                 } else {
                     &self.copy
                 };
@@ -769,6 +791,10 @@ impl Post {
         pass.draw(0..3, 0..1);
     }
 }
+
+/// The share of the Upscaling Sharpness setting applied after DLSS (85% -> 0.3).
+#[cfg(feature = "dlss")]
+const DLSS_SHARPEN_SHARE: f32 = 0.35;
 
 /// `fs_sharpen` at `sharpness` (its override), drawing onto `format`.
 fn sharpen_pipeline(
