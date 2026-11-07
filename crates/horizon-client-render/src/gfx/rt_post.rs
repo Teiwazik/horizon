@@ -1469,7 +1469,7 @@ mod tests {
         let frame = NativeFrame::new_rt(
             &device,
             None,
-            &[],
+            Vec::new(),
             Vec::new(),
             Default::default(),
             None,
@@ -1601,7 +1601,7 @@ file = \"b.wgsl\"
         let frame = NativeFrame::new_rt(
             &device,
             None,
-            &[],
+            Vec::new(),
             Vec::new(),
             Default::default(),
             None,
@@ -1722,7 +1722,7 @@ file = \"b.wgsl\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new_rt(&device, None, Vec::new(), Default::default(), None);
+        let frame = NativeFrame::new_rt(&device, None, Vec::new(), Vec::new(), Default::default(), None, false);
         let mut post = NativePost::new(
             &device,
             report.stages,
@@ -1730,6 +1730,7 @@ file = \"b.wgsl\"
             &[],
             format,
             &frame,
+            None,
         )
         .unwrap();
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
@@ -1835,6 +1836,8 @@ file = \"b.wgsl\"
                 &view,
                 [4, 4],
                 true,
+                None,
+                None,
                 None,
             );
             encoder.copy_texture_to_buffer(

@@ -1237,6 +1237,7 @@ mod tests {
                 // In their own file (`bluemap::SERVERS_FILE`).
                 servers: Vec::new(),
             },
+            reflex: Reflex::Off,
             cave_culling: false,
             gpu_culling: true,
             entity_culling: EntityCullingMode::Synchronous,

@@ -118,7 +118,7 @@ impl NativePack {
         let settings = chosen.as_ref().map(|v| super::native_shadow::fitted(device, v));
         let api = report.manifest.api;
         let rays = report.manifest.rays.is_some() && option_on(constants, report.manifest.rays.as_ref().and_then(|r|r.option.as_ref()));
-        let mut frame = NativeFrame::with_rt(device, settings.as_ref(), materials, textures, lights, terrain.pbr, api, rays,
+        let mut frame = NativeFrame::with_rt(device, settings.as_ref(), materials.to_vec(), textures, lights, terrain.pbr, api, rays,
         );
         // `[displacement]`, unless its option is off; nothing to displace without heights.
         let displacement = report

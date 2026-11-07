@@ -1727,8 +1727,10 @@ pub fn pack_textures(
     report: &horizon_shader_api::Report,
 ) -> Vec<(wgpu::TextureView, wgpu::Sampler)> {
     report
+        .manifest
         .textures
         .iter()
+        .zip(&report.textures)
         .map(|(t, image)| {
             let texture = wgpu::util::DeviceExt::create_texture_with_data(
                 device,

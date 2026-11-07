@@ -1136,6 +1136,7 @@ mod tests {
             options: Vec::new(),
             values: Vec::new(),
             pages: Vec::new(),
+            presets: Vec::new(),
         }
     }
 

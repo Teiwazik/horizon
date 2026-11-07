@@ -10056,7 +10056,7 @@ impl Renderer {
                 let color = scaled.as_ref().map(|(c, _)| c.texture());
                 native
                     .frame
-                    .fit_opaque_depth(&self.device, &world_depth.texture(), color);
+                    .fit_opaque(&self.device, &world_depth.texture(), color);
             }
         }
         // The pack's timer, out of the pack while the world's passes borrow it: the solid
@@ -11465,7 +11465,7 @@ impl Renderer {
                     .world(&self.device, &self.world_post, &self.config)
             });
             let shown = fg_world.as_ref().unwrap_or(&view_target);
-            post.run(
+            post.run_with_rt(
                 &self.device,
                 &mut encoder,
                 (color, depth, &native.frame.surface_view),

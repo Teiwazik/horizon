@@ -173,7 +173,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
         vec3(sign(n.x), 0.0, 0.0), a.x == m);
     let flat_n = select(select(n, axis, m > 0.998), in.normal, dot(in.normal, in.normal) > 0.5);
     let normal = select(flat_n, -flat_n, dot(flat_n, in.base) > 0.0);
-    horizon_material_normal = normal;
+    horizon_material_face_normal = normal;
     horizon_surface = vec4(0.0);
     // Dynamic lights (a dropped torch) per pixel: a quad's corners can lie far from one.
     let dynamic = horizon_terrain_dynamic_block_light(in.position) / 240.0;
@@ -187,7 +187,7 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
         horizon_line_in(horizon_terrain_native_colored_light(in.position)), in.displaced)).color;
     return vec4(horizon_line_out(out.rgb), out.a);
 }
-var<private> horizon_material_normal: vec3<f32>;
+var<private> horizon_material_face_normal: vec3<f32>;
 var<private> horizon_material_albedo: vec3<f32>;
 struct HorizonMaterialSolid {
     @location(0) color: vec4<f32>,
@@ -225,7 +225,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
     if horizon_surface.w == 0.0 {
-        set_surface(horizon_material_normal, 0.0, 0.0);
+        set_surface(horizon_material_face_normal, 0.0, 0.0);
     }
     var out: HorizonMaterialSolid;
     let mark = horizon_material_mark(in, texel);
@@ -1021,7 +1021,7 @@ impl NativeMaterial {
     ) -> Result<Self, String> {
         let rays = frame.rays.is_some();
         let writes_surface = horizon_shader_api::stages::calls_set_surface(&stage.source);
-        let module = module_with_rays(stage, shape.sprite_tags, shape.sprite_materials,
+        let module = module_with_rays(stage, shape.sprite_tags, &[],
             vertex, displaced.is_some(), frame.api, rays)?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [

@@ -7,6 +7,7 @@ rust-version = "1.85"
 description = "HDR metadata for the swapchain: the Vulkan calls the crates that forbid unsafe code can't make"
 
 [dependencies]
+log = "0.4"
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
@@ -26,7 +27,6 @@ workspace = true
 dlss_wgpu = { version = "6", optional = true }
 uuid = { version = "1", optional = true }
 winit = { version = "0.30.13", optional = true }
-log = { version = "0.4", optional = true }
 
 [features]
-dlss = ["dep:dlss_wgpu", "dep:uuid", "dep:winit", "dep:log"]
+dlss = ["dep:dlss_wgpu", "dep:uuid", "dep:winit"]
