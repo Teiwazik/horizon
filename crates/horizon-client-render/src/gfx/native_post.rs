@@ -1790,7 +1790,7 @@ pub fn frame_inputs(
         in_water: f32::from(u8::from(pack.eye_in as u32 == 1)),
         in_lava: f32::from(u8::from(pack.eye_in as u32 == 2)),
         water_plane: frame.water_plane.unwrap_or(0.0),
-        has_reflection: u32::from(frame.water_plane.is_some()),
+        has_reflection: u32::from(frame.water_plane.is_some() && !frame.underwater),
         reflection_resolution: reflection_size(size).map(|s| s as f32),
         mods: pack.mod_params,
         light_direction: match shadow {

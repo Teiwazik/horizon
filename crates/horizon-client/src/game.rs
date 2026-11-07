@@ -16879,7 +16879,18 @@ impl Game<'_> {
                 let s =
                     self.world
                         .block(c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32);
-                (c, self.res.facts().get(s).fluid == Fluid::Water, yaw, pitch)
+                // Below the water's surface, not merely inside its block: the top block of a
+                // lake is 8/9 full, and an eye above that is still in the air (the mirror and
+                // the above-water look stay on at the water's edge).
+                let (bx, by, bz) = (c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32);
+                let in_water = self.res.facts().get(s).fluid == Fluid::Water
+                    && (self
+                        .fluid_height_of(bx, by + 1, bz, Some(Fluid::Water))
+                        .is_some()
+                        || self
+                            .fluid_height_of(bx, by, bz, Some(Fluid::Water))
+                            .is_some_and(|(h, _)| c.y < f64::from(by) + f64::from(h)));
+                (c, in_water, yaw, pitch)
             }
             None => (
                 glam::DVec3::new(0.5, 100.0, 0.5),
@@ -17322,8 +17333,9 @@ impl Game<'_> {
             detail_distance: (self.streaming.radius * 16) as f32,
             depth_far,
             underwater,
+            // Kept while under water too: a pack draws the waterline from it (the renderer
+            // leaves the mirror off there).
             water_plane: if title
-                || underwater
                 || !self
                     .renderer
                     .as_ref()
