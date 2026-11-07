@@ -35,6 +35,13 @@ const TRANSLUCENT: u32 = 1 << 23;
 /// `instance_custom_data` of the entities, whose vertices aren't in the scene's buffer: the
 /// vertex buffer never fills to its very last vertex.
 const ENTITY: u32 = (1 << 23) - 1;
+/// `instance_custom_data` of the first-person body and held item: its vertices are copied to
+/// `entity_data`, so the shader cuts their texture's transparent texels out of the shadow.
+const SHADOW_ONLY: u32 = (1 << 23) - 2;
+/// Shadow-only vertices `entity_data` holds; past it they cast solid shadows as before.
+const ENTITY_DATA_VERTICES: u64 = 1 << 16;
+/// `mesher::Vertex`'s size, which `horizon_ray_entity_texel` reads in words.
+const ENTITY_VERTEX_BYTES: u64 = 44;
 /// Instance masks: what `ray_light` and `ray_occluded` ask for.
 const MASK_SOLID: u8 = 1;
 const MASK_TRANSLUCENT: u8 = 2;
@@ -46,7 +53,7 @@ pub fn input_usage(device: &wgpu::Device) -> wgpu::BufferUsages {
         .features()
         .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
     {
-        wgpu::BufferUsages::BLAS_INPUT
+        wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_SRC
     } else {
         wgpu::BufferUsages::empty()
     }
@@ -97,6 +104,9 @@ pub struct RayScene {
     pub light_cells: wgpu::Buffer,
     /// A 64x64 tile of blue noise, two channels of 16 bits in each word (`blue_noise`).
     pub blue_noise: wgpu::Buffer,
+    /// The shadow-only entity vertices of this frame, and the entity atlas their UVs point into.
+    pub entity_data: wgpu::Buffer,
+    pub entity_atlas: wgpu::TextureView,
     light_grid: Vec<u32>,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Free ranges of `data`, in vertices, in order.
@@ -272,6 +282,28 @@ impl RayScene {
                     },
                 )
             },
+            entity_data: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Ray traced shadow-only entity vertices"),
+                size: ENTITY_DATA_VERTICES * ENTITY_VERTEX_BYTES,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            entity_atlas: device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Ray entity atlas placeholder"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default()),
             light_grid: vec![0; (LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize * LIGHT_CELL_WORDS],
             lights: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Ray traced lights"),
@@ -587,7 +619,14 @@ impl RayScene {
                     v.push((sizes(e.quads, true), 0, MASK_SOLID));
                 }
                 if e.shadow_only.1 > 0 {
-                    v.push((sizes(e.shadow_only.1, true), e.shadow_only.0, MASK_SHADOW_ONLY));
+                    // Cut out by its texture where its vertices fit `entity_data`.
+                    let cut = u64::from(e.shadow_only.1) * 4 <= ENTITY_DATA_VERTICES
+                        && e.stride == ENTITY_VERTEX_BYTES;
+                    v.push((
+                        sizes(e.shadow_only.1, !cut),
+                        e.shadow_only.0,
+                        MASK_SHADOW_ONLY,
+                    ));
                 }
                 v
             })
@@ -603,6 +642,19 @@ impl RayScene {
             })
             .collect();
         self.entity_builds += entity_blases.len();
+        if let Some(e) = &entities
+            && e.shadow_only.1 > 0
+            && u64::from(e.shadow_only.1) * 4 <= ENTITY_DATA_VERTICES
+            && e.stride == ENTITY_VERTEX_BYTES
+        {
+            encoder.copy_buffer_to_buffer(
+                e.vertices,
+                u64::from(e.shadow_only.0) * e.stride,
+                &self.entity_data,
+                0,
+                u64::from(e.shadow_only.1) * 4 * e.stride,
+            );
+        }
         if let Some(e) = &entities {
             for ((size, first, _), b) in entity_parts.iter().zip(&entity_blases) {
                 entries.push(wgpu::BlasBuildEntry {
@@ -645,7 +697,12 @@ impl RayScene {
         }
         for ((_, _, mask), b) in entity_parts.iter().zip(&entity_blases) {
             let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-            instances.push(wgpu::TlasInstance::new(b, identity, ENTITY, *mask));
+            let data = if *mask == MASK_SHADOW_ONLY {
+                SHADOW_ONLY
+            } else {
+                ENTITY
+            };
+            instances.push(wgpu::TlasInstance::new(b, identity, data, *mask));
         }
         let count = instances.len();
         let slots = self

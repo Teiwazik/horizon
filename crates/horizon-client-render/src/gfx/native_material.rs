@@ -404,13 +404,33 @@ struct HorizonRayLight {
 @group(3) @binding(60) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
 @group(3) @binding(61) var<storage, read> horizon_ray_light_cells: array<u32>;
 @group(3) @binding(62) var<storage, read> horizon_ray_blue_tile: array<u32>;
+// The first-person body and held item (`SHADOW_ONLY` in native_rt.rs), as `mesher::Vertex`
+// (44 bytes, 11 words), and the entity atlas their UVs point into.
+@group(3) @binding(63) var<storage, read> horizon_ray_entity_vertices: array<u32>;
+@group(3) @binding(64) var horizon_ray_entity_atlas: texture_2d<f32>;
 fn horizon_ray_available() -> bool {
     return true;
 }
 // A candidate's texel: its section's vertices, as `TerrainVertex` (24 bytes, 6 words).
 fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> vec4<f32> {
+    // The first-person body and held item: cut out by their texture's alpha.
+    if (hit.instance_custom_data & 0x7fffffu) == 0x7ffffeu {
+        let first = (hit.primitive_index / 2u) * 4u;
+        let second = 1u + (hit.primitive_index & 1u);
+        let a = first * 11u;
+        let b = (first + second) * 11u;
+        let c = (first + second + 1u) * 11u;
+        let w = 1.0 - hit.barycentrics.x - hit.barycentrics.y;
+        let uv = vec2<f32>(bitcast<f32>(horizon_ray_entity_vertices[a + 3u]), bitcast<f32>(horizon_ray_entity_vertices[a + 4u])) * w
+            + vec2<f32>(bitcast<f32>(horizon_ray_entity_vertices[b + 3u]), bitcast<f32>(horizon_ray_entity_vertices[b + 4u])) * hit.barycentrics.x
+            + vec2<f32>(bitcast<f32>(horizon_ray_entity_vertices[c + 3u]), bitcast<f32>(horizon_ray_entity_vertices[c + 4u])) * hit.barycentrics.y;
+        let size = vec2<i32>(textureDimensions(horizon_ray_entity_atlas));
+        let texel = clamp(vec2<i32>(floor(fract(uv) * vec2<f32>(size))), vec2<i32>(0), size - 1);
+        let alpha = f32(horizon_ray_entity_vertices[a + 6u] >> 24u) / 255.0;
+        return vec4<f32>(1.0, 1.0, 1.0, textureLoad(horizon_ray_entity_atlas, texel, 0).a * alpha);
+    }
     // Entities: another vertex format, drawn solid.
-    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu {
         return vec4<f32>(1.0);
     }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
@@ -478,7 +498,7 @@ fn horizon_ray_trace(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> 
 }
 // A translucent quad the mesher marked as a fluid's (`fluid_face`).
 fn horizon_ray_is_water(hit: RayIntersection) -> bool {
-    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu {
         return false;
     }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
@@ -643,7 +663,7 @@ fn horizon_ray_hit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> Ra
     if hit.kind == RAY_QUERY_INTERSECTION_NONE {
         return RayHit(false, distance, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0, true);
     }
-    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu {
+    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu {
         return RayHit(true, hit.t, vec3<f32>(0.4), -direction, 0.5, 0.0, true);
     }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
@@ -855,7 +875,7 @@ fn horizon_ray_lights_budget(position: vec3<f32>, normal: vec3<f32>, budget: u32
 // Ordinary rays, including plant shadows on the ground, are unchanged.
 const FILTERED_MATERIAL_RAYS: &str = "
 fn horizon_ray_material_excluded(hit: RayIntersection, excluded: vec2<u32>) -> bool {
-    if (hit.instance_custom_data & 0x7fffffu) == 0x7fffffu { return false; }
+    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu { return false; }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
     let layer = horizon_ray_vertices[first * 6u + 4u] & 0x7fffu;
     let material = material_ids[min(layer, arrayLength(&material_ids) - 1u)];

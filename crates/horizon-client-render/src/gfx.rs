@@ -9718,6 +9718,7 @@ impl Renderer {
                     shadow_only_quads,
                 ),
             });
+            rt.entity_atlas = self.entity_atlas.clone();
             rt.update(&self.device, &mut encoder, list, entities, &self.indices);
             laps.lap("r_rt_scene");
         }

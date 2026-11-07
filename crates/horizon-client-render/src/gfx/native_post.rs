@@ -557,7 +557,7 @@ impl NativeFrame {
                 },
                 count: None,
             });
-            for binding in [15, 60, 61, 62] {
+            for binding in [15, 60, 61, 62, 63] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -569,6 +569,16 @@ impl NativeFrame {
                     count: None,
                 });
             }
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 64,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack frame"),
@@ -783,6 +793,14 @@ impl NativeFrame {
             entries.push(wgpu::BindGroupEntry {
                 binding: 62,
                 resource: rays.blue_noise.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 63,
+                resource: rays.entity_data.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 64,
+                resource: wgpu::BindingResource::TextureView(&rays.entity_atlas),
             });
         }
         entries.extend(pack_texture_group_entries(textures));

@@ -333,7 +333,7 @@ impl NativePost {
                 },
                 count: None,
             });
-            for binding in [15, 60, 61, 62] {
+            for binding in [15, 60, 61, 62, 63] {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -345,6 +345,16 @@ impl NativePost {
                     count: None,
                 });
             }
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 64,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
         }
         entries
             .extend((0..targets.len() as u32).map(|j| {
@@ -691,6 +701,14 @@ impl NativePost {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 62,
                         resource: rays.1.blue_noise.as_entire_binding(),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 63,
+                        resource: rays.1.entity_data.as_entire_binding(),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 64,
+                        resource: wgpu::BindingResource::TextureView(&rays.1.entity_atlas),
                     });
                 }
                 // The pack's targets, a blank one in place of the one this pass writes.
