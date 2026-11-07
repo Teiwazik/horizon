@@ -9055,7 +9055,6 @@ impl Renderer {
             frame.shadow_only,
             oit_on,
         );
-        self.entity_batch.append_shadow_only(frame.shadow_only);
         // The posed models' vertices come first: the ordinary entities' draw takes them in.
         let posed = if pack_skin {
             0
@@ -9151,6 +9150,10 @@ impl Renderer {
         let additive_quads = (frame.additive.len() / 4) as u32 - self.entity_batch.moved_additive;
         let see_through_quads = (frame.see_through.len() / 4) as u32;
         let shadow_only_quads = (frame.shadow_only.len() / 4) as u32;
+        // The first-person body ends the batch before frame generation's halfway hand and the
+        // outlined silhouettes: counting back from `entity_vertices` took the viewmodel hand
+        // (or the outlines) for it whenever either was there.
+        let shadow_only_first = made_hand_vertex as u32 - shadow_only_quads * 4;
         // Glowing entities' silhouettes posed on the GPU go last, past every
         // material (the outline pass draws them from there).
         let outline_base = posed + all_entities.len() as u32;
@@ -9714,7 +9717,7 @@ impl Renderer {
                 stride: std::mem::size_of::<Vertex>() as u64,
                 quads: entity_quads,
                 shadow_only: (
-                    entity_vertices as u32 - shadow_only_quads * 4,
+                    shadow_only_first,
                     shadow_only_quads,
                 ),
             });
@@ -9916,7 +9919,7 @@ impl Renderer {
                 entity_quads,
                 // The batch ends with them (EntityBatch::update).
                 (
-                    entity_vertices as u32 - shadow_only_quads * 4,
+                    shadow_only_first,
                     shadow_only_quads,
                 ),
             );
