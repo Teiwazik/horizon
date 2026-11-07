@@ -73,12 +73,20 @@ fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color
 fn horizon_material_cylindrical(in: HorizonMaterialOut) -> f32 {
     return max(length(in.position.xz), abs(in.position.y));
 }
-// terrain.wgsl's `faded`: whether a fading tile or section leaves this pixel out. The
-// derivatives are taken before any discard.
+// Whether a fading tile or section leaves this pixel out (terrain.wgsl's `fade_shown`): the
+// newer one is drawn over the old, whole, behind it, and leaves out a share of pixels by a noise
+// that turns every frame, so a pack's TAA (or the engine's) sees a smooth crossfade, not
+// vanilla's fixed hole pattern, through which the old terrain lit by the pack showed. The
+// depth pre-pass and the material reach the same answer: pixel and frame alone.
 fn horizon_material_crossfaded(in: HorizonMaterialOut) -> bool {
-    let dx = dpdx(in.local);
-    let dy = dpdy(in.local);
-    return horizon_terrain_faded((in.hdr_code >> 4u) & 4095u, in.local, dx, dy);
+    let code = (in.hdr_code >> 4u) & 4095u;
+    if code == 0u { return false; }
+    return horizon_crossfade_noise(in.clip.xy) >= horizon_terrain_fade_shown(code);
+}
+// Interleaved gradient noise at a pixel, moved each frame along the R2 sequence.
+fn horizon_crossfade_noise(pixel: vec2<f32>) -> f32 {
+    let p = floor(pixel) + 5.588238 * f32(frame.frame_index % 64u);
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 // terrain.wgsl's fade-in: toward the fog colour, alpha kept.
 fn horizon_material_faded(in: HorizonMaterialOut, color: vec4<f32>) -> vec4<f32> {
