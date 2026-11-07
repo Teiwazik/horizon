@@ -219,12 +219,15 @@ mod native_block_sprites;
 mod native_chunk_snapshot;
 mod native_chunk_tickets;
 mod native_claimed_items;
+mod native_client_entities;
 pub mod native_client_services;
 mod native_client_world;
 mod native_components;
 mod native_configs;
 mod native_criteria;
+mod native_damage;
 mod native_data_maps;
+mod native_diagnostics;
 mod native_entities;
 mod native_entity_data;
 mod native_entity_motion;
@@ -248,12 +251,15 @@ mod native_mobs;
 mod native_motion;
 mod native_mounts;
 mod native_net;
+mod native_npcs;
+mod native_packets;
 mod native_panel;
 mod native_panel_recipes;
 mod native_permissions;
 mod native_player_reads;
 mod native_player_state;
 mod native_profiles;
+mod native_player_fx;
 mod native_projectiles;
 mod native_quick_move;
 mod native_recipes;
@@ -271,6 +277,7 @@ mod native_world_columns;
 pub mod native_world_draw;
 mod native_world_edit;
 mod native_world_read;
+mod native_world_seed;
 mod natural_spawning;
 mod nautili;
 mod net_harness;
@@ -1252,6 +1259,11 @@ impl LevelAccess for GameLevel<'_> {
     ) {
         if self.native_authoritative {
             self.native_neighbor_changed(self.dimension, pos, state, changed, moved);
+        }
+    }
+    fn redstone_change(&self, pos: BlockPos, old: i32, new: &mut i32) {
+        if self.native_authoritative {
+            self.native_block_redstone(self.dimension, pos, old, new);
         }
     }
     fn allow_spread(
@@ -3100,6 +3112,10 @@ struct Game<'a> {
     native_configs: native_configs::NativeConfigs,
     /// Native mods' messages waiting (`game/native_net.rs`).
     native_net: native_net::NativeNet,
+    /// What native mods send one player, waiting for the hub (`game/native_player_fx.rs`).
+    native_player_fx: native_player_fx::NativePlayerFx,
+    /// Native mods' kicks waiting for the tick's end (`game/native_packets.rs`).
+    native_packets: native_packets::NativePackets,
     /// The mod whose own screen is open (`Screen::Mod`).
     native_mod_screen: Option<String>,
     /// Meshed sections waiting for an upload budget (Horizon settings).
@@ -3294,6 +3310,9 @@ struct Game<'a> {
     lan_acting_name: Option<String>,
     /// Their UUID (`Player.getUUID`).
     lan_acting_uuid: Option<u128>,
+    /// The player and the stack on their cursor as they clicked a native
+    /// menu, while `native_menu_clicked` hears it (`native_menu_cursor`).
+    native_click_cursor: Option<(u128, Option<horizon_client::items::ItemStack>)>,
     /// Where the mods refused to prime TNT: the sound and game event the level
     /// queued right after the prime are dropped (`prime_tnt_event`).
     tnt_refused: Option<BlockPos>,
@@ -6678,6 +6697,7 @@ impl Game<'_> {
             let stack = self.held().cloned();
             let mut claimed = false;
             self.native_interact_entity(id, &kind, stack.as_ref(), &mut claimed);
+            self.native_interact_entity_v2(id, &kind, self.hand, stack.as_ref(), &mut claimed);
             if claimed {
                 self.swing_arm();
                 return Ok(true);
@@ -6747,6 +6767,8 @@ impl Game<'_> {
             let mut canceled = false;
             horizon_client::spans::time("use_mods", || {
                 self.native_right_click_block(hit.pos, hit.face, &mut canceled);
+                let hand = self.hand;
+                self.native_right_click_block_v2(hit.pos, hit.face, hand, &mut canceled);
             });
             if canceled {
                 // Nothing was used, so nothing consumed the action.
@@ -20353,6 +20375,8 @@ impl<'a> Game<'a> {
             native_lifecycle: Default::default(),
             native_configs: Default::default(),
             native_net: Default::default(),
+            native_player_fx: Default::default(),
+            native_packets: Default::default(),
             native_mod_screen: None,
             sky_darken_memo: Default::default(),
             water_plane_memo: Default::default(),
@@ -20435,6 +20459,7 @@ impl<'a> Game<'a> {
             guest_player_sounds: Vec::new(),
             lan_acting_name: None,
             lan_acting_uuid: None,
+            native_click_cursor: None,
             tnt_refused: None,
             lan_acting_permission: None,
             lan_acting_entity: None,
@@ -22867,6 +22892,9 @@ pub fn run_with() -> Result<()> {
     {
         return Ok(());
     }
+    // The packets the server sends its players reach the mods that ask (native_packets.rs).
+    let _ = horizon_client::lan::conn::SERVER_PACKET.set(Game::native_server_packet);
+    let _ = horizon_client::lan::conn::ENTITY_DATA_TO.set(Game::native_entity_data_to);
     let _ = horizon_client::health::HURT_SERVER.set(native_hooks::hurt_server);
     let _ = horizon_client::health::DAMAGE_PRE.set(native_hooks::damage_pre);
     let _ = horizon_client::health::DAMAGE_POST.set(native_hooks::damage_post);
@@ -22902,7 +22930,7 @@ pub fn run_with() -> Result<()> {
     {
         options.spikes = Some(dedicated::SLOW_TICK_MS);
     }
-    horizon_client::spans::enable(options.spikes.is_some());
+    tick_profile::want_spans(tick_profile::SPANS_SPIKES, options.spikes.is_some());
     // A player who allows performance statistics also says what their slow frames spent their
     // time in: this thread, which draws the frames, times its steps (wall time only).
     if options.execution_role.is_client()
