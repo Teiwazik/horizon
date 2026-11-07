@@ -255,6 +255,16 @@ fn faded(code: u32, local: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> bool {
     let bayer = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     return (f32(bayer[p.y * 4u + p.x]) + 0.5) / 16.0 >= shown;
 }
+// How much of a fading tile or section is shown, 0 to 1, the fade alone (no column stagger, no
+// pattern): native shader packs' crossfade (gfx/native_material.rs), which leaves pixels out by
+// a noise that turns every frame, so their temporal filter blends the two into a smooth fade.
+fn fade_shown(code: u32) -> f32 {
+    if code == 0u { return 1.0; }
+    let step = (code - 1u) % 129u;
+    let out = step >= 64u;
+    let progress = f32(select(step, step - 64u, out)) / 64.0;
+    return select(progress, 1.0 - progress, out);
+}
 // A fading tile or section is drawn a hair toward the camera (depth is
 // reversed: nearer is larger), the newer the more, so it wins where it draws
 // over the solid tiles it replaces. Distant tiles go back by 0.2% of their

@@ -600,3 +600,16 @@ mod tests {
         assert!(Bounds::mesh(&SectionMesh::default()).is_none());
     }
 }
+
+/// How much of a fading section or tile shows for a fade `code`, as `fade_shown` in terrain.wgsl.
+pub(super) fn shown(code: u32) -> f32 {
+    if code == 0 {
+        return 1.0;
+    }
+    let step = (code - 1) % 129;
+    if step >= 64 {
+        1.0 - (step - 64) as f32 / 64.0
+    } else {
+        step as f32 / 64.0
+    }
+}

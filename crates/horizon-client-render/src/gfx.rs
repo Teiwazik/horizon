@@ -9776,7 +9776,11 @@ impl Renderer {
                             solid: s.solid,
                             translucent: s.translucent,
                             vertices: self.arena.buffer(s.page),
-                            visibility: if rt_fading {
+                            // A section crossfading over its LOD tile stands in the ray
+                            // scene only as much as it shows, like in the shadow map.
+                            visibility: if s.fade(now, false) != 0 {
+                                lod::shown(s.fade(now, false))
+                            } else if rt_fading {
                                 let [x, y, z] = v.origin;
                                 let d = ((x + 8.0).powi(2) + (y + 8.0).powi(2) + (z + 8.0).powi(2))
                                     .sqrt();

@@ -54,6 +54,10 @@ fn horizon_shadow_section(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4
     var out = horizon_shadow_vertex(pos, uv, layer, color);
     out.visibility = mix(1.0, horizon_terrain_instance_visibility(w),
         clamp((length(pos) - 16.0) / 16.0, 0.0, 1.0));
+    // A section crossfading with far terrain (fading in over it, or out back to it) casts the
+    // share of its shadow the material draws of it (`horizon_material_crossfaded`), not all of
+    // it from the first frame to the last: the old terrain behind it was darkened by it.
+    out.visibility *= horizon_terrain_fade_shown(horizon_terrain_fade_code(w));
     return out;
 }
 // A 4x4 ordered pattern over the map's texels: what a fading section leaves out.
