@@ -222,6 +222,8 @@ mod native_chunk_snapshot;
 mod native_chunk_tickets;
 mod native_claimed_items;
 mod native_client_entities;
+mod native_client_particles;
+mod native_client_particles_fixture;
 pub mod native_client_services;
 mod native_client_world;
 mod native_components;
@@ -22235,6 +22237,10 @@ fn start_game<'a>(
                 game_dir: std::env::current_dir()?,
             },
         );
+    }
+    if let Some(directory) = std::env::var_os("HORIZON_NATIVE_CLIENT_PARTICLES_FIXTURE") {
+        game.run_native_client_particles_fixture(std::path::Path::new(&directory))?;
+        return Ok(None);
     }
     if let Some(directory) = std::env::var_os("HORIZON_BOAT_RIDER_FIXTURE") {
         game.run_boat_rider_fixture(std::path::Path::new(&directory))?;
