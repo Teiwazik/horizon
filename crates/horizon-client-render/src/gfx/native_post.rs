@@ -434,21 +434,50 @@ fn eased(value: f32, target: f32, half_life: f32, dt: f32) -> f32 {
 }
 
 impl NativeFrame {
+    #[cfg(test)]
     pub fn new(
-        device: &wgpu::Device, shadow: Option<&horizon_shader_api::manifest::Shadow>,
-        textures: Vec<(wgpu::TextureView, wgpu::Sampler)>, lights: super::block_light::LightTable,
-        pbr: Option<&[wgpu::Texture; 2]>, api: Api,
+        device: &wgpu::Device,
+        shadow: Option<&horizon_shader_api::manifest::Shadow>,
+        textures: Vec<(wgpu::TextureView, wgpu::Sampler)>,
+        lights: super::block_light::LightTable,
+        pbr: Option<&[wgpu::Texture; 2]>,
+        api: Api,
     ) -> Self {
-        Self::with_rt(device, shadow, Vec::new(), textures, lights, pbr, api, false)
+        Self::with_rt(
+            device,
+            shadow,
+            Vec::new(),
+            textures,
+            lights,
+            pbr,
+            api,
+            false,
+        )
     }
+    #[cfg(test)]
     pub fn new_rt(
-        device: &wgpu::Device, shadow: Option<&horizon_shader_api::manifest::Shadow>,
-        materials: Vec<u32>, textures: Vec<(wgpu::TextureView, wgpu::Sampler)>,
-        lights: super::block_light::LightTable, pbr: Option<&[wgpu::Texture; 2]>, rays: bool,
+        device: &wgpu::Device,
+        shadow: Option<&horizon_shader_api::manifest::Shadow>,
+        materials: Vec<u32>,
+        textures: Vec<(wgpu::TextureView, wgpu::Sampler)>,
+        lights: super::block_light::LightTable,
+        pbr: Option<&[wgpu::Texture; 2]>,
+        rays: bool,
     ) -> Self {
-        Self::with_rt(device, shadow, materials, textures, lights, pbr, Api::V0_5, rays)
+        Self::with_rt(
+            device,
+            shadow,
+            materials,
+            textures,
+            lights,
+            pbr,
+            Api::V0_5,
+            rays,
+        )
     }
-    pub fn forget_shadow(&mut self) { self.shadow_terrain = None; }
+    pub fn forget_shadow(&mut self) {
+        self.shadow_terrain = None;
+    }
 
     /// The frame of a pack with the `[shadow]` settings `shadow`, if any, and the
     /// block light colours `lights`.
@@ -469,7 +498,9 @@ impl NativeFrame {
             mapped_at_creation: false,
         });
         let materials = materials_buffer(device, &materials);
-        let rays = rays.then(|| super::native_rt::RayScene::new(device)).flatten();
+        let rays = rays
+            .then(|| super::native_rt::RayScene::new(device))
+            .flatten();
         let mut entries = vec![
             frame_entry(wgpu::ShaderStages::VERTEX_FRAGMENT),
             texture_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
@@ -508,9 +539,14 @@ impl NativeFrame {
         entries.extend(block_light_entries);
         entries.extend(pack_texture_entries(textures.len()));
         entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 5, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false, min_binding_size: None }, count: None,
+            binding: 5,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
         });
         if rays.is_some() {
             entries.push(wgpu::BindGroupLayoutEntry {
@@ -600,8 +636,14 @@ impl NativeFrame {
         let albedo = albedo_target(device, [1, 1]);
         let albedo_view = albedo.create_view(&Default::default());
         Self {
-            engine_taa: None, rays, materials, albedo, albedo_view,
-            shadow_terrain: None, shadow_refresh: true, weather: [f32::NAN; 3],
+            engine_taa: None,
+            rays,
+            materials,
+            albedo,
+            albedo_view,
+            shadow_terrain: None,
+            shadow_refresh: true,
+            weather: [f32::NAN; 3],
             textures,
             block_light,
             pbr,
@@ -656,7 +698,8 @@ impl NativeFrame {
         textures: &[(wgpu::TextureView, wgpu::Sampler)],
         block_light: &super::block_light::BlockLight,
         pbr: &[wgpu::TextureView; 2],
-        materials: &wgpu::Buffer, rays: Option<&super::native_rt::RayScene>,
+        materials: &wgpu::Buffer,
+        rays: Option<&super::native_rt::RayScene>,
     ) -> wgpu::BindGroup {
         let opaque_depth = opaque_depth.create_view(&Default::default());
         let opaque_color = opaque_color.create_view(&Default::default());
@@ -716,7 +759,10 @@ impl NativeFrame {
                 resource: block_light.grid.as_entire_binding(),
             },
         ]);
-        entries.push(wgpu::BindGroupEntry { binding: 5, resource: materials.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: materials.as_entire_binding(),
+        });
         if let Some(rays) = rays {
             entries.push(wgpu::BindGroupEntry {
                 binding: 14,
@@ -969,13 +1015,16 @@ impl NativeFrame {
         inputs.eye_light_smooth = [block, sky];
         inputs.in_water = water;
         inputs.in_lava = lava;
-        let targets = [inputs.wetness,
+        let targets = [
+            inputs.wetness,
             f32::from(u8::from(frame.pack.biome_precipitation == 1)),
-            f32::from(u8::from(frame.pack.biome_precipitation == 2))];
+            f32::from(u8::from(frame.pack.biome_precipitation == 2)),
+        ];
         for (value, target) in self.weather.iter_mut().zip(targets) {
             *value = eased(*value, target, 20.0, dt);
         }
-        inputs.biome_rain = self.weather[1]; inputs.biome_snow = self.weather[2];
+        inputs.biome_rain = self.weather[1];
+        inputs.biome_snow = self.weather[2];
         self.frames = self.frames.wrapping_add(1);
         inputs
     }
@@ -1072,29 +1121,54 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 impl NativePost {
     pub fn new_with_rt(
-        device: &wgpu::Device, stages: Vec<CheckedStage>, manifest: &horizon_shader_api::Manifest,
-        constants: &[(String, f64)], format: wgpu::TextureFormat, frame: &NativeFrame,
-        tonemap: Option<&CheckedStage>, terrain: Option<(&wgpu::BindGroupLayout, [f64; 2])>,
+        device: &wgpu::Device,
+        stages: Vec<CheckedStage>,
+        manifest: &horizon_shader_api::Manifest,
+        constants: &[(String, f64)],
+        format: wgpu::TextureFormat,
+        frame: &NativeFrame,
+        tonemap: Option<&CheckedStage>,
+        terrain: Option<(&wgpu::BindGroupLayout, [f64; 2])>,
     ) -> Result<Self, String> {
         if manifest.api != Api::V0_5 {
             return Self::new(device, stages, manifest, constants, format, frame, tonemap);
         }
-        let rt = super::rt_post::NativePost::new(device, stages, manifest, constants, format, frame, terrain)?;
+        let rt = super::rt_post::NativePost::new(
+            device, stages, manifest, constants, format, frame, terrain,
+        )?;
         let mut shell = Self::new(device, Vec::new(), manifest, constants, format, frame, None)?;
         shell.rt = Some(rt);
         Ok(shell)
     }
 
     pub fn run_with_rt(
-        &mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder,
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
         world: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView),
-        screen: &wgpu::TextureView, size: [u32; 2], history_reset: bool,
+        screen: &wgpu::TextureView,
+        size: [u32; 2],
+        history_reset: bool,
         timing: Option<&mut super::pack_timing::PassTiming>,
-        rays: Option<(&wgpu::BindGroup, &super::native_rt::RayScene, &wgpu::TextureView)>,
+        rays: Option<(
+            &wgpu::BindGroup,
+            &super::native_rt::RayScene,
+            &wgpu::TextureView,
+        )>,
         weather: Option<PostWeather<'_>>,
     ) {
         if let Some(rt) = &mut self.rt {
-            rt.run(device, encoder, world, screen, size, history_reset, timing, rays, weather);
+            rt.run(
+                device,
+                encoder,
+                world,
+                screen,
+                size,
+                history_reset,
+                timing,
+                rays,
+                weather,
+            );
         } else {
             self.run(device, encoder, world, screen, size, history_reset, timing);
         }
@@ -1272,7 +1346,9 @@ impl NativePost {
 
     /// The passes' labels, in order, then the pack's tonemap's.
     pub fn labels(&self) -> Vec<&str> {
-        if let Some(rt) = &self.rt { return rt.labels(); }
+        if let Some(rt) = &self.rt {
+            return rt.labels();
+        }
         let tonemap = self.display.as_ref().and_then(|d| d.label.as_deref());
         self.passes
             .iter()
@@ -1505,7 +1581,17 @@ impl NativePost {
         mut timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
         if let Some(rt) = &mut self.rt {
-            rt.run(device, encoder, world, screen, size, history_reset, timing, None, None);
+            rt.run(
+                device,
+                encoder,
+                world,
+                screen,
+                size,
+                history_reset,
+                timing,
+                None,
+                None,
+            );
             return;
         }
         let window = [screen.texture().width(), screen.texture().height()];
@@ -1714,9 +1800,11 @@ pub fn frame_inputs(
         paper_white: 80.0,
         peak: 80.0,
         black_level: 0.0,
-        biome_rain: 0.0, biome_snow: 0.0,
+        biome_rain: 0.0,
+        biome_snow: 0.0,
         moon_phase: pack.day_time.div_euclid(24000).rem_euclid(8) as u32,
-        engine_taa: [0.0; 4], padding: [],
+        engine_taa: [0.0; 4],
+        padding: [],
     }
 }
 

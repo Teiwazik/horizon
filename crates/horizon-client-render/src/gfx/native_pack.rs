@@ -39,9 +39,6 @@ pub struct NativePack {
     pub weather_after: Option<usize>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
     pub displacement: Option<Displacement>,
-    /// Whether the material stage reads the water mirror (`reflection`) and `[reflection]`'s
-    /// option, if any, is on: else the reflection pass is left out.
-    pub reflection: bool,
 }
 
 /// Whether the option `id`, if any, is on in `constants` (not 0; on when it is not there).
@@ -115,10 +112,28 @@ impl NativePack {
             .shadow
             .as_ref()
             .and_then(|s| chosen_shadow(s, &report.manifest.options, constants));
-        let settings = chosen.as_ref().map(|v| super::native_shadow::fitted(device, v));
+        let settings = chosen
+            .as_ref()
+            .map(|v| super::native_shadow::fitted(device, v));
         let api = report.manifest.api;
-        let rays = report.manifest.rays.is_some() && option_on(constants, report.manifest.rays.as_ref().and_then(|r|r.option.as_ref()));
-        let mut frame = NativeFrame::with_rt(device, settings.as_ref(), materials.to_vec(), textures, lights, terrain.pbr, api, rays,
+        let rays = report.manifest.rays.is_some()
+            && option_on(
+                constants,
+                report
+                    .manifest
+                    .rays
+                    .as_ref()
+                    .and_then(|r| r.option.as_ref()),
+            );
+        let mut frame = NativeFrame::with_rt(
+            device,
+            settings.as_ref(),
+            materials.to_vec(),
+            textures,
+            lights,
+            terrain.pbr,
+            api,
+            rays,
         );
         // `[displacement]`, unless its option is off; nothing to displace without heights.
         let displacement = report
@@ -155,7 +170,6 @@ impl NativePack {
                     .and_then(|d| Some((d, d.shadow.as_ref()?, material?)))
                     .map(|(d, picks, material)| ShadowGrid {
                         distance: d.distance,
-                        cells: picks.cells,
                         steps: picks.steps,
                         material,
                         layout: &d.draw_layout,
@@ -215,8 +229,8 @@ impl NativePack {
                     } else {
                         format
                     },
-                    terrain.entities,
-                    terrain.weather_time,
+                    terrain.weather_groups[0],
+                    terrain.weather_groups[1],
                     &frame,
                     stage,
                     constants,
@@ -240,7 +254,6 @@ impl NativePack {
             .map(|stage| {
                 let displaced = displacement.as_ref().map(|d| DisplacedShape {
                     distance: d.distance,
-                    cells: d.view.cells,
                     steps: d.view.steps,
                     layout: &d.draw_layout,
                 });
@@ -257,11 +270,19 @@ impl NativePack {
             })
             .transpose()?;
         mark("material", &mut marks);
-        let tonemap = others.iter().find(|s|s.kind == StageKind::Tonemap);
+        let tonemap = others.iter().find(|s| s.kind == StageKind::Tonemap);
         let post = (!post.is_empty() || api == horizon_shader_api::Api::V0_2)
             .then(|| {
-                NativePost::new_with_rt(device, post, &report.manifest, constants, format, &frame,
-                    tonemap, Some((terrain.globals, terrain.sprites)))
+                NativePost::new_with_rt(
+                    device,
+                    post,
+                    &report.manifest,
+                    constants,
+                    format,
+                    &frame,
+                    tonemap,
+                    Some((terrain.globals, terrain.sprites)),
+                )
             })
             .transpose()?;
         mark("post", &mut marks);
@@ -294,7 +315,6 @@ impl NativePack {
             weather,
             weather_after,
             displacement,
-            reflection,
         };
         Ok((pack, labels))
     }

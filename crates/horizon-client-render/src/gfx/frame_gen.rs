@@ -113,7 +113,8 @@ struct Fsr {
 
 /// This frame's camera, for the interpolation.
 pub struct Camera {
-    /// Camera view to clip space, without world rotation or temporal jitter.
+    /// Camera view to clip space, without world rotation or temporal jitter (for DLSS).
+    #[cfg_attr(not(all(feature = "dlss", target_os = "linux")), allow(dead_code))]
     pub projection: Mat4,
     /// The world's projection this frame (with TAA's jitter) and without the jitter.
     pub jittered: Mat4,
@@ -510,6 +511,10 @@ impl FrameGen {
                     t.span(device, encoder, (generated, *format), name);
                 }
             };
+        #[cfg_attr(
+            not(all(feature = "dlss", target_os = "linux")),
+            allow(unused_variables)
+        )]
         let count = self.requested_count();
         self.generated_count = 1;
         self.dlss_ran = false;

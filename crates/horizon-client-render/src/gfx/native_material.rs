@@ -303,8 +303,9 @@ pub struct TerrainShape<'a> {
     pub format: wgpu::TextureFormat,
     /// The entities' group 0 (their atlas), for the shadow pass's entity draw.
     pub entities: &'a wgpu::BindGroupLayout,
-    /// The weather's group 1 (its fall clock), for the pack's weather stage.
-    pub weather_time: &'a wgpu::BindGroupLayout,
+    /// The weather's groups 0 and 1 (the entities' atlas, the fall clock), for the weather
+    /// stage.
+    pub weather_groups: [&'a wgpu::BindGroupLayout; 2],
     /// The resource packs' LabPBR maps (normals, specular), when they ship any.
     pub pbr: Option<&'a [wgpu::Texture; 2]>,
 }
@@ -346,7 +347,6 @@ enum Pass {
 /// its group 1.
 pub struct DisplacedShape<'a> {
     pub distance: f32,
-    pub cells: u32,
     pub steps: bool,
     pub layout: &'a wgpu::BindGroupLayout,
 }
@@ -973,8 +973,13 @@ fn shader_source(
     api: horizon_shader_api::Api,
     rays: bool,
 ) -> String {
-    let source = if source.contains("fn ray_hit(") { source.to_owned() } else {
-        format!("{source}\n{}\n@group(3) @binding(5) var<storage, read> material_ids: array<u32>;\n", horizon_shader_api::stages::RT_MATERIAL_HELPERS)
+    let source = if source.contains("fn ray_hit(") {
+        source.to_owned()
+    } else {
+        format!(
+            "{source}\n{}\n@group(3) @binding(5) var<storage, read> material_ids: array<u32>;\n",
+            horizon_shader_api::stages::RT_MATERIAL_HELPERS
+        )
     };
     let terrain = format!(
         "{source}\n// Horizon's terrain (terrain.wgsl)\n{}{}{}{}{}{ENTRIES}{}{}",
@@ -993,20 +998,47 @@ fn shader_source(
         } else {
             String::new()
         }
-    )
- ;
-    let extra = if rays { RAYS.to_owned() + FILTERED_MATERIAL_RAYS } else { NO_RAYS.to_owned() };
+    );
+    let extra = if rays {
+        RAYS.to_owned() + FILTERED_MATERIAL_RAYS
+    } else {
+        NO_RAYS.to_owned()
+    };
     let enable = if rays { "enable wgpu_ray_query;\n" } else { "" };
     format!("{enable}{terrain}\n{extra}")
 }
 
 /// The material's naga module, its errors in the stage's file.
-fn module(stage: &CheckedStage, tags: &[(u32,u32)], materials: &[(u32,u32)], vertex: bool, displaced: bool, api: horizon_shader_api::Api) -> Result<naga::Module,String> {
+#[cfg(test)]
+fn module(
+    stage: &CheckedStage,
+    tags: &[(u32, u32)],
+    materials: &[(u32, u32)],
+    vertex: bool,
+    displaced: bool,
+    api: horizon_shader_api::Api,
+) -> Result<naga::Module, String> {
     module_with_rays(stage, tags, materials, vertex, displaced, api, false)
 }
-fn module_with_rays(stage: &CheckedStage, tags: &[(u32,u32)], materials: &[(u32,u32)], vertex: bool, displaced: bool, api: horizon_shader_api::Api, rays: bool) -> Result<naga::Module,String> {
-    let text = shader_source(&stage.source, tags, materials, (vertex,displaced), api, rays);
-    naga::front::wgsl::parse_str(&text).map_err(|e|format!("{}: {}",stage.file,e.emit_to_string(&text)))
+fn module_with_rays(
+    stage: &CheckedStage,
+    tags: &[(u32, u32)],
+    materials: &[(u32, u32)],
+    vertex: bool,
+    displaced: bool,
+    api: horizon_shader_api::Api,
+    rays: bool,
+) -> Result<naga::Module, String> {
+    let text = shader_source(
+        &stage.source,
+        tags,
+        materials,
+        (vertex, displaced),
+        api,
+        rays,
+    );
+    naga::front::wgsl::parse_str(&text)
+        .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
 }
 
 impl NativeMaterial {
@@ -1022,9 +1054,15 @@ impl NativeMaterial {
         displaced: Option<&DisplacedShape<'_>>,
     ) -> Result<Self, String> {
         let rays = frame.rays.is_some();
-        let writes_surface = horizon_shader_api::stages::calls_set_surface(&stage.source);
-        let module = module_with_rays(stage, shape.sprite_tags, &[],
-            vertex, displaced.is_some(), frame.api, rays)?;
+        let module = module_with_rays(
+            stage,
+            shape.sprite_tags,
+            &[],
+            vertex,
+            displaced.is_some(),
+            frame.api,
+            rays,
+        )?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [
             "horizon_terrain_SPRITE_ARRAYS",
@@ -1347,7 +1385,8 @@ mod tests {
                     &tags,
                     &materials,
                     (false, false),
-                    Api::V0_1, false
+                    Api::V0_1,
+                    false
                 ))
             )
         });
@@ -1419,7 +1458,14 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| {
-            let text = shader_source(&stage.source, &[], &materials, (false, true), Api::V0_1, false);
+            let text = shader_source(
+                &stage.source,
+                &[],
+                &materials,
+                (false, true),
+                Api::V0_1,
+                false,
+            );
             panic!("{}", e.emit_to_string(&text))
         });
         assert!(

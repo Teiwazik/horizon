@@ -3848,11 +3848,7 @@ impl PackPost {
                         "STARS" => Some(stars),
                         _ => None,
                     });
-            rp.set_pipeline(
-                part_pipeline
-                    .and_then(|p| p.get())
-                    .unwrap_or(pass.render()),
-            );
+            rp.set_pipeline(part_pipeline.and_then(|p| p.get()).unwrap_or(pass.render()));
             if pass.draw {
                 self.draws.bind(rp, part.stage);
             }

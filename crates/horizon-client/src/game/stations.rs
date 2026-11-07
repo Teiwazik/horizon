@@ -2727,6 +2727,8 @@ impl Game<'_> {
         );
     }
     /// The tooltip box in the default colours, for native mods (newer Horizon's static form).
+    /// Called only from mods applied by the mixin build, so plain builds never use it.
+    #[allow(dead_code)]
     pub(crate) fn tooltip_box_plain(
         batch: &mut HudBatch,
         atlas: &horizon_client::hud::HudAtlas,

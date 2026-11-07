@@ -6,10 +6,8 @@
 //! onto the screen. Every stage of a pack reads the same `frame`, written once a frame
 //! (`NativeFrame`).
 
-use glam::{Mat4, Vec3};
 use horizon_shader_api::{Frame as FrameInputs, check::CheckedStage, stages::GROUP};
 
-use super::Frame;
 use super::native_post::NativeFrame;
 
 pub(super) const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -142,43 +140,6 @@ fn scaled(size: [u32; 2], scale: f32) -> [u32; 2] {
 /// The `frame` every stage of a pack reads (group 3, binding 0), written once a frame, and
 /// what the material stage reads besides.
 
-/// A depth texture of `size` the world's depth is copied into.
-fn depth_copy(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
-    copy_target(
-        device,
-        "Native shader pack opaque depth",
-        size,
-        wgpu::TextureFormat::Depth32Float,
-    )
-}
-
-/// A colour texture of `size` and `format` the world's colour is copied into.
-fn color_copy(device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) -> wgpu::Texture {
-    copy_target(device, "Native shader pack opaque colour", size, format)
-}
-
-fn copy_target(
-    device: &wgpu::Device,
-    label: &str,
-    size: [u32; 2],
-    format: wgpu::TextureFormat,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: size[0].max(1),
-            height: size[1].max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    })
-}
-
 /// The uniform `frame` at binding 0, read by `visibility`.
 fn frame_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -192,25 +153,6 @@ fn frame_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
-
-/// The water mirror's targets at `size` of the world: half of it, rounded up.
-pub fn reflection_size(size: [u32; 2]) -> [u32; 2] {
-    size.map(|s| s.div_ceil(2).max(1))
-}
-
-/// Seconds between frames past which the last one is forgotten (`NativeFrame::write`).
-const MAX_FRAME_GAP: f32 = 0.5;
-
-/// `value` moved toward `target` over `dt` seconds by a half-life in seconds; a NaN `value`
-/// (the first frame) starts at `target`.
-fn eased(value: f32, target: f32, half_life: f32, dt: f32) -> f32 {
-    if value.is_nan() {
-        target
-    } else {
-        target + (value - target) * 0.5f32.powf(dt / half_life)
-    }
-}
-
 
 /// The option values of `constants` that `module` declares as overrides (wgpu refuses others).
 pub fn present_constants<'a>(
@@ -255,103 +197,6 @@ fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::Bi
         },
         count: None,
     }
-}
-
-/// The solid terrain's surface target of `size` (`SURFACE_FORMAT`), drawn and read.
-fn albedo_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Native shader pack albedo"),
-        size: wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: super::native_material::ALBEDO_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    })
-}
-
-fn surface_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Native shader pack surface"),
-        size: wgpu::Extent3d {
-            width: size[0].max(1),
-            height: size[1].max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: super::native_material::SURFACE_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    })
-}
-
-/// `wetness` after `dt` seconds of `rain`: halfway there in 30 seconds while it rains
-/// harder, in 10 while it dries (the half-lives of the `shaders/` format's `wetness`).
-fn wetness(wetness: f32, rain: f32, dt: f32) -> f32 {
-    let half_life = if rain > wetness { 30.0 } else { 10.0 };
-    rain + (wetness - rain) * 0.5f32.powf(dt / half_life)
-}
-
-/// The pack's `[[textures]]` (`check::Image`s), uploaded with samplers as the manifest says.
-pub fn pack_textures(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    report: &horizon_shader_api::Report,
-) -> Vec<(wgpu::TextureView, wgpu::Sampler)> {
-    report
-        .manifest
-        .textures
-        .iter()
-        .zip(&report.textures)
-        .map(|(t, image)| {
-            let texture = wgpu::util::DeviceExt::create_texture_with_data(
-                device,
-                queue,
-                &wgpu::TextureDescriptor {
-                    label: Some(&t.id),
-                    size: wgpu::Extent3d {
-                        width: image.width,
-                        height: image.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                wgpu::util::TextureDataOrder::LayerMajor,
-                &image.rgba,
-            );
-            let filter = if t.linear {
-                wgpu::FilterMode::Linear
-            } else {
-                wgpu::FilterMode::Nearest
-            };
-            let address = if t.repeat {
-                wgpu::AddressMode::Repeat
-            } else {
-                wgpu::AddressMode::ClampToEdge
-            };
-            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some(&t.id),
-                address_mode_u: address,
-                address_mode_v: address,
-                mag_filter: filter,
-                min_filter: filter,
-                ..Default::default()
-            });
-            (texture.create_view(&Default::default()), sampler)
-        })
-        .collect()
 }
 
 /// Layout entries of `count` pack textures and their samplers.
@@ -416,24 +261,6 @@ pub(super) fn materials_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
-}
-
-/// The material ids by sprite layer (one 0 when there are none).
-fn materials_buffer(device: &wgpu::Device, materials: &[u32]) -> wgpu::Buffer {
-    let zero = [0u32];
-    let ids = if materials.is_empty() {
-        &zero[..]
-    } else {
-        materials
-    };
-    wgpu::util::DeviceExt::create_buffer_init(
-        device,
-        &wgpu::util::BufferInitDescriptor {
-            label: Some("Native shader pack material ids"),
-            contents: bytemuck::cast_slice(ids),
-            usage: wgpu::BufferUsages::STORAGE,
-        },
-    )
 }
 
 fn comparison_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -1280,125 +1107,8 @@ fn half(bytes: [u8; 2]) -> f32 {
     }
 }
 
-/// The frame as packs read it (docs/api/shaders-reference.md), from the renderer's `Frame`.
-pub fn frame_inputs(
-    frame: &Frame,
-    size: [u32; 2],
-    seconds: f32,
-    index: u32,
-    shadow: Option<&horizon_shaders::Shadow>,
-) -> FrameInputs {
-    let aspect = size[0] as f32 / size[1].max(1) as f32;
-    let view = crate::camera::view_matrix(frame.yaw, frame.pitch);
-    let projection = super::world_projection(frame.fov_degrees, aspect, frame.depth_far)
-        * frame.bob
-        * frame.spin;
-    // A celestial body's direction at `angle` degrees (SkyRenderer: Y -90°, then X by the
-    // angle, of straight up): overhead at 0, rising in the east (+x).
-    let body = |angle: f32| {
-        let a = angle.to_radians();
-        Vec3::new(-a.sin(), a.cos(), 0.0)
-    };
-    let (fog_color, fog_start, fog_end) = match &frame.fog {
-        Some(f) => (
-            [f.color[0], f.color[1], f.color[2]],
-            f.environmental_start.min(f.render_distance_start),
-            f.environmental_end.min(f.render_distance_end),
-        ),
-        None => (frame.sky.fog_color, frame.distance * 0.9, frame.distance),
-    };
-    let pack = &frame.pack;
-    let level = |l: i32| l as f32 / 15.0;
-    let m = |m: Mat4| m.to_cols_array_2d();
-    FrameInputs {
-        view: m(view),
-        projection: m(projection),
-        view_inverse: m(view.inverse()),
-        projection_inverse: m(projection.inverse()),
-        camera_position: frame.camera.as_vec3().to_array(),
-        time: seconds,
-        sun_direction: body(frame.sky.sun_angle).to_array(),
-        day_time: pack.day_time.rem_euclid(24000) as f32 / 24000.0,
-        moon_direction: body(frame.sky.moon_angle).to_array(),
-        game_time: frame.shader_game_time,
-        sky_color: frame.sky.sky_color,
-        rain: pack.rain,
-        fog_color,
-        thunder: pack.thunder,
-        resolution: [size[0] as f32, size[1] as f32],
-        eye_light: [level(pack.eye_light[0]), level(pack.eye_light[1])],
-        fog_start,
-        fog_end,
-        render_distance: frame.distance,
-        far: frame.depth_far,
-        night_vision: frame.night_vision,
-        blindness: pack.blindness,
-        darkness: frame.darkness.1.clamp(0.0, 1.0),
-        brightness: pack.brightness,
-        eye_in: pack.eye_in as u32,
-        dimension: if frame.end_sky {
-            1
-        } else if frame.nether_lighting {
-            -1
-        } else {
-            0
-        },
-        frame_index: index,
-        hide_gui: u32::from(pack.hide_gui),
-        water_plane: frame.water_plane.unwrap_or(0.0),
-        has_reflection: u32::from(frame.water_plane.is_some()),
-        shadow_distance: shadow.map_or(0.0, |s| s.distance),
-        shadow_distortion: shadow.map_or(0.0, |s| {
-            super::native_shadow::distortion(s.distance, s.resolution)
-        }),
-        light_direction: match shadow {
-            Some(s) => super::pack_uniforms::shadow_light(frame, s),
-            None => body(frame.sky.sun_angle),
-        }
-        .to_array(),
-        has_shadow: u32::from(shadow.is_some()),
-        shadow_view_proj: m(shadow.map_or(Mat4::IDENTITY, |s| {
-            super::pack_uniforms::shadow_culling(frame, s)
-        })),
-        previous_view_projection: m(Mat4::IDENTITY),
-        camera_motion: [0.0; 3],
-        delta_time: 0.0,
-        wetness: 0.0,
-        biome_rain: 0.0,
-        biome_snow: 0.0,
-        moon_phase: pack.day_time.div_euclid(24000).rem_euclid(8) as u32,
-        eye_light_smooth: [level(pack.eye_light[0]), level(pack.eye_light[1])],
-        in_water: f32::from(u8::from(pack.eye_in as u32 == 1)),
-        in_lava: f32::from(u8::from(pack.eye_in as u32 == 2)),
-        engine_taa: [0.0; 4],
-        precipitation: pack.biome_precipitation.clamp(0, 2) as u32,
-        temperature: pack.temperature,
-        downfall: pack.rainfall,
-        reflection_resolution: reflection_size(size).map(|s| s as f32),
-        mods: pack.mod_params,
-        shadow_resolution: shadow.map_or(0.0, |s| s.resolution as f32),
-        shadow_center_texel: shadow.map_or(0.0, |s| {
-            let k = super::native_shadow::distortion(s.distance, s.resolution);
-            2.0 * s.distance / s.resolution.max(1) as f32 * (1.0 - k)
-        }),
-        hdr: 0,
-        headroom: 1.0,
-        paper_white: 80.0,
-        peak: 80.0,
-        black_level: 0.0,
-        padding: [],
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn eased_values_start_at_the_target_and_halve_the_distance() {
-        use super::eased;
-        assert_eq!(eased(f32::NAN, 0.25, 2.0, 0.0), 0.25);
-        assert_eq!(eased(1.0, 0.0, 2.0, 2.0), 0.5);
-        assert_eq!(eased(1.0, 0.0, 2.0, 0.0), 1.0);
-    }
     use super::*;
     use horizon_shader_api::{MANIFEST, Pack, check};
 
@@ -1722,7 +1432,15 @@ file = \"b.wgsl\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = NativeFrame::new_rt(&device, None, Vec::new(), Vec::new(), Default::default(), None, false);
+        let frame = NativeFrame::new_rt(
+            &device,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+            None,
+            false,
+        );
         let mut post = NativePost::new(
             &device,
             report.stages,

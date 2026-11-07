@@ -411,8 +411,6 @@ struct Band {
 /// near the eye, half its cells past `FAR_FROM` of the distance, where a cell is a few pixels
 /// and most of the quads lie (the vertices of every quad's grid were most of the cost).
 pub struct Picks {
-    /// The grid's cells along a face's side, near the eye.
-    pub cells: u32,
     /// Each cell a flat step with walls.
     pub steps: bool,
     bands: Vec<Band>,
@@ -611,11 +609,7 @@ impl Displacement {
             } else {
                 vec![band(cells, 0.0, distance)]
             };
-            Picks {
-                cells,
-                steps,
-                bands,
-            }
+            Picks { steps, bands }
         };
         let view = picks(cells);
         // A step's flat top has to lie where its shadow was cast from, or it shadows itself in

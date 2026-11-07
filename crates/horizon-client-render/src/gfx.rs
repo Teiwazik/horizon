@@ -181,7 +181,6 @@ mod lod;
 mod native_material;
 mod native_pack;
 mod native_post;
-mod rt_post;
 pub mod native_render;
 mod native_rt;
 mod native_shadow;
@@ -208,6 +207,7 @@ pub mod panorama;
 mod readback;
 mod resident;
 mod reuse;
+mod rt_post;
 mod stars;
 pub mod submit;
 mod sunrise_fan;
@@ -7120,8 +7120,8 @@ impl Renderer {
             sprites: self.terrain_sprites,
             format: self.frame_format,
             sprite_tags: tags,
-            entities: &self.weather.entity_layout,
-            weather_time: &self.weather.time_layout,
+            entities: &self.entity_bindings,
+            weather_groups: [&self.weather.entity_layout, &self.weather.time_layout],
             pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
         };
         let (pack, labels) = native_pack::NativePack::new(
@@ -8162,7 +8162,8 @@ impl Renderer {
             .or_else(|| {
                 // One of Horizon's own packs with `[shadow]` uses the same lists.
                 let native = self.native.as_ref().filter(|_| !frame.title)?;
-                Some(native.shadow.as_ref()?.view(frame))
+                native.shadow.as_ref()?;
+                native.frame.shadow_view(frame)
             });
         let pack_terrain = !frame.title
             && self
@@ -10058,6 +10059,14 @@ impl Renderer {
                     .frame
                     .fit_opaque(&self.device, &world_depth.texture(), color);
             }
+            // The material's solid terrain always writes the surface and albedo targets.
+            let depth = world_depth.texture();
+            let size = if native.material.is_some() && !frame.title {
+                [depth.width(), depth.height()]
+            } else {
+                [1, 1]
+            };
+            native.frame.fit_surface(&self.device, size);
         }
         // The pack's timer, out of the pack while the world's passes borrow it: the solid
         // terrain is timed apart from what draws after it.

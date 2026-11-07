@@ -11,7 +11,6 @@ use horizon_shader_api::{
 use horizon_shaders::Shadow;
 
 use super::native_material::TerrainShape;
-use super::pack_post::ShadowView;
 use super::wgsl_prefix::{TERRAIN, prefixed, section};
 
 const PREFIX: &str = "horizon_terrain_";
@@ -338,7 +337,6 @@ fn depth_pass<'e>(
 /// and, where they run, its flat ones, and the frame they read (group 3, the uniform alone:
 /// the stages' own group 3 also holds the map being drawn).
 pub struct NativeShadow {
-    pub camera: Shadow,
     pub solid: wgpu::RenderPipeline,
     pub flat: Option<wgpu::RenderPipeline>,
     /// The translucent terrain's draws into the translucent map and the colour, instanced
@@ -356,7 +354,6 @@ pub struct NativeShadow {
 /// and group 1's layout.
 pub struct ShadowGrid<'a> {
     pub distance: f32,
-    pub cells: u32,
     pub steps: bool,
     pub material: &'a CheckedStage,
     pub layout: &'a wgpu::BindGroupLayout,
@@ -776,7 +773,6 @@ impl NativeShadow {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {
-            camera: camera(settings),
             solid,
             flat,
             translucent,
@@ -811,21 +807,6 @@ impl NativeShadow {
         }
         if shadow_only.1 > 0 {
             pass.draw_indexed(0..shadow_only.1 * 6, shadow_only.0 as i32, 0..1);
-        }
-    }
-
-    /// What the shadow camera sees this frame, for the renderer's shadow lists.
-    pub fn view(&self, frame: &super::Frame) -> ShadowView {
-        ShadowView {
-            cull: super::pack_uniforms::shadow_culling(frame, &self.camera),
-            light: super::pack_uniforms::shadow_light(frame, &self.camera),
-            // The light's box culls: on the ground it reaches further than `distance`
-            // along the sun's azimuth while the sun is low.
-            distance: None,
-            unculled: None,
-            every_face: false,
-            view_casters: false,
-            depth_planes: true,
         }
     }
 }
