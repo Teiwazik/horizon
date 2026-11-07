@@ -2557,6 +2557,9 @@ struct WorldIcon {
 }
 
 struct Game<'a> {
+    /// How far the field of view has moved into the water's (or lava's) narrower view, 0..1,
+    /// and when it was last advanced: the switch eases over a fraction of a second.
+    fluid_fov_blend: std::cell::Cell<(f32, Option<std::time::Instant>)>,
     /// Shared with an integrated server; `collision` and `motion` borrow from it.
     res: Arc<Resources>,
     rest_loader: Option<WorldRestLoader>,
@@ -20378,6 +20381,7 @@ impl<'a> Game<'a> {
             &gui.atlas.translucent,
         );
         let mut game = Game {
+            fluid_fov_blend: std::cell::Cell::new((0.0, None)),
             world_biomes: None,
             world_biomes_base: None,
             res: res.clone(),

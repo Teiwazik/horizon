@@ -125,16 +125,31 @@ impl Game<'_> {
             FogType::Atmospheric => CameraFluid::None,
         }
     }
+    /// Eases the water/lava narrowing of the view in and out (vanilla switches at once).
+    fn fluid_fov_blend(&self, camera: [f64; 3]) -> f32 {
+        let target = if self.camera_fluid(camera) == CameraFluid::None { 0.0 } else { 1.0 };
+        let (blend, last) = self.fluid_fov_blend.get();
+        let now = std::time::Instant::now();
+        let dt = last.map_or(1.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        let blend = if last.is_none() { target } else { blend + (target - blend) * (1.0 - (-dt / 0.15).exp()) };
+        self.fluid_fov_blend.set((blend, Some(now)));
+        blend
+    }
     /// `Camera.calculateFov` with `modifyFovBasedOnDeathOrFluid`.
     pub(super) fn fov_degrees(&self, partial: f32, camera: [f64; 3]) -> f32 {
-        let fov = self.view.calculate_fov(
-            partial,
-            self.settings.fov as i32,
-            self.fov_effect_scale(),
-            self.death_time(),
-            self.camera_fluid(camera),
-            false,
-        );
+        let blend = self.fluid_fov_blend(camera);
+        let fov_in = |fluid| {
+            self.view.calculate_fov(
+                partial,
+                self.settings.fov as i32,
+                self.fov_effect_scale(),
+                self.death_time(),
+                fluid,
+                false,
+            )
+        };
+        let dry = fov_in(CameraFluid::None);
+        let fov = dry + (fov_in(self.camera_fluid(camera)) - dry) * blend;
         let vanilla = self.zoomed_fov_degrees(fov);
         let mut degrees = vanilla;
         self.native_compute_fov(partial, camera, &mut degrees);
