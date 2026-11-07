@@ -229,6 +229,25 @@ impl StateLight {
 
 /// The querying entity class, captured by the real caller. Empty and position-only
 /// queries have no entity and always use the ordinary shape tables.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ShapeEntityKind {
+    Item,
+    Player,
+    Living,
+    Other,
+}
+impl ShapeEntityKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Item => "item",
+            Self::Player => "player",
+            Self::Living => "living",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// A state property a block declares on its own, beside its template's.
 /// A block's states become the template's states times these values, so a
 /// pipe can have a connection per side without a template that has one.
@@ -271,6 +290,11 @@ struct BlockFile {
     #[serde(default)]
     state_light: Option<StateLight>,
     #[serde(default)]
+    outline_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    #[serde(default)]
+    collision_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    interaction_shapes: Option<BlockShapes>,
+    #[serde(default)]
     state_properties: BTreeMap<String, StateProperty>,
     #[serde(default)]
     default_state: BTreeMap<String, String>,
@@ -306,6 +330,11 @@ pub struct Block {
     pub collision_shapes: Option<BlockShapes>,
     /// Per-state emission; takes precedence over `properties.light`.
     pub state_light: Option<StateLight>,
+    /// Independent overrides for actual entity queries; omitted kinds use the defaults.
+    pub outline_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    pub collision_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    /// Ray-face override; does not replace the outline hit point or create a hit.
+    pub interaction_shapes: Option<BlockShapes>,
     /// State properties of its own, which its template does not have.
     pub state_properties: BTreeMap<String, StateProperty>,
     /// State properties overlaid on the template default.
@@ -824,6 +853,9 @@ impl Content {
                 shapes: file.shapes,
                 collision_shapes: file.collision_shapes,
                 state_light: file.state_light,
+                outline_context_shapes: file.outline_context_shapes,
+                collision_context_shapes: file.collision_context_shapes,
+                interaction_shapes: file.interaction_shapes,
                 state_properties: file.state_properties,
                 default_state: file.default_state,
                 item: file.item,
@@ -1053,7 +1085,14 @@ fn check_block(file: &Block) -> Result<(), String> {
             file.template
         ));
     }
-    for shapes in file.shapes.iter().chain(file.collision_shapes.iter()) {
+    for shapes in file
+        .shapes
+        .iter()
+        .chain(file.collision_shapes.iter())
+        .chain(file.outline_context_shapes.values())
+        .chain(file.collision_context_shapes.values())
+        .chain(file.interaction_shapes.iter())
+    {
         shapes.check()?;
     }
     if let Some(light) = &file.state_light {
@@ -1543,6 +1582,9 @@ capabilities = ["registries"]
                 shapes: None,
                 collision_shapes: None,
                 state_light: None,
+                outline_context_shapes: BTreeMap::new(),
+                collision_context_shapes: BTreeMap::new(),
+                interaction_shapes: None,
                 state_properties: BTreeMap::new(),
                 default_state: BTreeMap::new(),
                 properties: BlockProperties {
@@ -2428,5 +2470,49 @@ capabilities = ["registries"]
         ] {
             assert!(check_path(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod context_shape_tests {
+    use super::*;
+    #[test]
+    fn context_shape_selectors_and_tables_are_validated() {
+        for selector in ["item", "player", "living", "other"] {
+            for channel in ["outline_context_shapes", "collision_context_shapes"] {
+                let text = format!(
+                    r#"{{"template":"minecraft:stone","{channel}":{{"{selector}":{{"default":[]}}}}}}"#
+                );
+                let _: BlockFile = serde_json::from_str(&text).unwrap();
+            }
+        }
+        for selector in ["none", "Item", "minecraft:item", "entity"] {
+            let text = format!(
+                r#"{{"template":"minecraft:stone","collision_context_shapes":{{"{selector}":{{"default":[]}}}}}}"#
+            );
+            assert!(serde_json::from_str::<BlockFile>(&text).is_err());
+        }
+        let mut block = Block {
+            template: "minecraft:stone".into(),
+            ..Default::default()
+        };
+        let bad = BlockShapes {
+            property: String::new(),
+            properties: vec![],
+            values: BTreeMap::new(),
+            default: Some(vec![[1., 0., 0., 0., 1., 1.]]),
+        };
+        block
+            .outline_context_shapes
+            .insert(ShapeEntityKind::Player, bad.clone());
+        assert!(check_block(&block).is_err());
+        block.outline_context_shapes.clear();
+        block
+            .collision_context_shapes
+            .insert(ShapeEntityKind::Item, bad.clone());
+        assert!(check_block(&block).is_err());
+        block.collision_context_shapes.clear();
+        block.interaction_shapes = Some(bad);
+        assert!(check_block(&block).is_err());
     }
 }
