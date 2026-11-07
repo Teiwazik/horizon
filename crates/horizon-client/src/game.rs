@@ -221,6 +221,7 @@ mod native_biome_colors;
 pub mod native_block_entity_draw;
 mod native_block_sprites;
 mod native_chunk_snapshot;
+mod native_bots;
 mod native_chunk_tickets;
 mod native_claimed_items;
 mod native_client_entities;
