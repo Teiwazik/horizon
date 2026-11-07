@@ -477,8 +477,17 @@ fn shader_source(
                 DISPLACE_VANILLA
             },
         ),
+        // The vertex stage's prelude declares only the frame: `horizon_shadow_solid` below
+        // reads the material ids too.
         (None, Some(stage)) => (
-            stage.source.clone() + UNTAKEN,
+            if stage.source.contains("var<storage, read> material_ids") {
+                stage.source.clone() + UNTAKEN
+            } else {
+                format!(
+                    "{}\n@group({GROUP}) @binding(5) var<storage, read> material_ids: array<u32>;\n{UNTAKEN}",
+                    stage.source
+                )
+            },
             super::native_material::DISPLACE_PACK,
         ),
         (None, None) => (
