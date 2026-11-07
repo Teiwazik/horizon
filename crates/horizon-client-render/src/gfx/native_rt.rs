@@ -114,6 +114,9 @@ pub struct RayScene {
     light_scratch: Vec<(f32, [i32; 3], Light)>,
     light_cell_lists: Vec<Vec<(f32, u16)>>,
     light_out: Vec<Light>,
+    /// What the grid was last built from (cell, sources against it, their reach), so a frame
+    /// that changes none of it keeps the grid.
+    light_signature: u64,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Sections whose mesh changed: their old structures, still traced (and their data still
     /// held) until the new ones are built, so a remesh never leaves a hole in the rays.
@@ -325,6 +328,7 @@ impl RayScene {
             light_scratch: Vec::new(),
             light_cell_lists: Vec::new(),
             light_out: Vec::new(),
+            light_signature: 0,
             built: Default::default(),
             stale: Default::default(),
             free: vec![(0, DATA_VERTICES)],
@@ -470,49 +474,64 @@ impl RayScene {
         let snap = (camera / f64::from(LIGHT_CELL)).floor() * f64::from(LIGHT_CELL);
         let half = (LIGHT_GRID / 2) as f32 * LIGHT_CELL;
         let origin = (snap - camera).as_vec3() - half;
-        self.light_grid.fill(0);
-        let mut cells = std::mem::take(&mut self.light_cell_lists);
-        cells.resize_with((LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize, Vec::new);
-        cells.iter_mut().for_each(Vec::clear);
-        for (i, (_, _, light)) in lights.iter().enumerate() {
-            let [x, y, z, reach] = light.position;
-            let cell = |v: f32, o: f32| ((v - o) / LIGHT_CELL).floor() as i32;
-            let span = |v: f32, o: f32| {
-                cell(v - reach, o).max(0)..=cell(v + reach, o).min(LIGHT_GRID as i32 - 1)
-            };
-            for cz in span(z, origin.z) {
-                for cy in span(y, origin.y) {
-                    for cx in span(x, origin.x) {
-                        // How strong it is at the cell's nearest point, by the shader's falloff:
-                        // ranked at the middle, a source by the cell's edge lost its place to
-                        // farther ones and its light ended on the edge in a straight line.
-                        let middle = |c: i32, o: f32| o + (c as f32 + 0.5) * LIGHT_CELL;
-                        let off = |v: f32, c: i32, o: f32| {
-                            ((v - middle(c, o)).abs() - LIGHT_CELL * 0.5).max(0.0)
-                        };
-                        let (dx, dy, dz) = (
-                            off(x, cx, origin.x),
-                            off(y, cy, origin.y),
-                            off(z, cz, origin.z),
-                        );
-                        let d2 = dx * dx + dy * dy + dz * dz;
-                        let n = LIGHT_GRID as i32;
-                        cells[((cz * n + cy) * n + cx) as usize]
-                            .push((reach * reach / (1.0 + d2 * 0.12), i as u16 + 1));
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::fast_hash::FxHasher::default();
+            snap.to_array().map(f64::to_bits).hash(&mut h);
+            for (_, _, l) in &lights {
+                let [x, y, z, reach] = l.position;
+                let q = |v: f32| (v * 64.0).round() as i32;
+                [q(x - origin.x), q(y - origin.y), q(z - origin.z), q(reach)].hash(&mut h);
+            }
+            h.finish()
+        };
+        let regrid = signature != self.light_signature;
+        self.light_signature = signature;
+        if regrid {
+            self.light_grid.fill(0);
+            let mut cells = std::mem::take(&mut self.light_cell_lists);
+            cells.resize_with((LIGHT_GRID * LIGHT_GRID * LIGHT_GRID) as usize, Vec::new);
+            cells.iter_mut().for_each(Vec::clear);
+            for (i, (_, _, light)) in lights.iter().enumerate() {
+                let [x, y, z, reach] = light.position;
+                let cell = |v: f32, o: f32| ((v - o) / LIGHT_CELL).floor() as i32;
+                let span = |v: f32, o: f32| {
+                    cell(v - reach, o).max(0)..=cell(v + reach, o).min(LIGHT_GRID as i32 - 1)
+                };
+                for cz in span(z, origin.z) {
+                    for cy in span(y, origin.y) {
+                        for cx in span(x, origin.x) {
+                            // How strong it is at the cell's nearest point, by the shader's falloff:
+                            // ranked at the middle, a source by the cell's edge lost its place to
+                            // farther ones and its light ended on the edge in a straight line.
+                            let middle = |c: i32, o: f32| o + (c as f32 + 0.5) * LIGHT_CELL;
+                            let off = |v: f32, c: i32, o: f32| {
+                                ((v - middle(c, o)).abs() - LIGHT_CELL * 0.5).max(0.0)
+                            };
+                            let (dx, dy, dz) = (
+                                off(x, cx, origin.x),
+                                off(y, cy, origin.y),
+                                off(z, cz, origin.z),
+                            );
+                            let d2 = dx * dx + dy * dy + dz * dz;
+                            let n = LIGHT_GRID as i32;
+                            cells[((cz * n + cy) * n + cx) as usize]
+                                .push((reach * reach / (1.0 + d2 * 0.12), i as u16 + 1));
+                        }
                     }
                 }
             }
-        }
-        for (i, cell) in cells.iter_mut().enumerate() {
-            cell.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            let words = &mut self.light_grid[i * LIGHT_CELL_WORDS..(i + 1) * LIGHT_CELL_WORDS];
-            let count = cell.len().min(LIGHT_CELL_WORDS * 2 - 1);
-            words[0] = count as u32;
-            for (j, (_, id)) in cell.iter().take(count).enumerate() {
-                words[(j + 1) / 2] |= u32::from(*id) << (((j + 1) % 2) * 16);
+            for (i, cell) in cells.iter_mut().enumerate() {
+                cell.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                let words = &mut self.light_grid[i * LIGHT_CELL_WORDS..(i + 1) * LIGHT_CELL_WORDS];
+                let count = cell.len().min(LIGHT_CELL_WORDS * 2 - 1);
+                words[0] = count as u32;
+                for (j, (_, id)) in cell.iter().take(count).enumerate() {
+                    words[(j + 1) / 2] |= u32::from(*id) << (((j + 1) % 2) * 16);
+                }
             }
+            self.light_cell_lists = cells;
         }
-        self.light_cell_lists = cells;
         let mut out = std::mem::take(&mut self.light_out);
         out.clear();
         out.push(Light {
@@ -524,7 +543,9 @@ impl RayScene {
         self.light_scratch = lights;
         queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&out));
         self.light_out = out;
-        queue.write_buffer(&self.light_cells, 0, bytemuck::cast_slice(&self.light_grid));
+        if regrid {
+            queue.write_buffer(&self.light_cells, 0, bytemuck::cast_slice(&self.light_grid));
+        }
     }
 
     /// This frame's top-level structure over `sections` and `entities`, building sections'
