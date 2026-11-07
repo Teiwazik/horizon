@@ -227,22 +227,10 @@ pub fn check_stage(pack: &Pack, kind: StageKind, file: &str) -> Result<CheckedSt
     let mut own = compose(pack, kind, file);
     let entries = own.parts.pop().expect("entries are the last part");
     own.text.truncate(entries.1.start);
-    // The material prelude's `block_texture` calls into the renderer: a stand-in here.
-    let module = if kind == StageKind::Material {
-        let mut checked = own.clone();
-        checked.text += if own.text.contains("fn ray_hit(") {
-            crate::stages::BLOCK_SAMPLING_STUB
-        } else {
-            crate::stages::PBR_STUB
-        };
-        parse(&checked)?
-    } else if kind == StageKind::Post {
-        let mut checked = own.clone();
-        checked.text += crate::stages::POST_RAY_STUB;
-        parse(&checked)?
-    } else {
-        parse(&own)?
-    };
+    // The material prelude's LabPBR functions call into the renderer: a stand-in here.
+    own.text += renderer_stub(pack.manifest.api, kind);
+    let module = parse(&own)?;
+    own.text.truncate(entries.1.start);
     let mut problems = signature(&module, kind, file);
     if kind == StageKind::Material && pack.manifest.displacement.is_some() {
         problems.extend(function_signature(
@@ -254,7 +242,7 @@ pub fn check_stage(pack: &Pack, kind: StageKind, file: &str) -> Result<CheckedSt
             file,
         ));
     }
-    problems.extend(api_rules(&module, &own));
+    problems.extend(api_rules(&module, kind, pack.manifest.api, &own));
     problems.extend(options(&module, &pack.manifest.options, file));
     if !problems.is_empty() {
         return Err(problems);
@@ -418,21 +406,29 @@ fn names(module: &naga::Module) -> HashSet<String> {
         .collect()
 }
 
+/// What the renderer defines for a stage's prelude to call: the LabPBR maps, and under 0.5
+/// the rays (stand-ins that find nothing, as on a device without ray queries).
+fn renderer_stub(api: crate::Api, kind: StageKind) -> &'static str {
+    match (api, kind) {
+        (crate::Api::V0_5, StageKind::Material) => crate::stages::BLOCK_SAMPLING_STUB,
+        (crate::Api::V0_5, StageKind::Post) => crate::stages::POST_RAY_STUB,
+        (_, StageKind::Material) => crate::stages::PBR_STUB,
+        _ => "",
+    }
+}
+
 /// A pack's files declare no bindings, no entry points and no `horizon_`
 /// names: what the prelude doesn't define is the pack's.
-fn api_rules(module: &naga::Module, own: &Composed) -> Vec<Problem> {
-    // The prelude as composed: the stage's own, with the pack's `[[textures]]`.
-    // The material prelude calls into the renderer (`block_texture`): its stand-in is ours too.
+fn api_rules(
+    module: &naga::Module,
+    kind: StageKind,
+    api: crate::Api,
+    own: &Composed,
+) -> Vec<Problem> {
+    // The prelude as composed: the stage's own, with the pack's `[[textures]]`. The material
+    // prelude's LabPBR functions call into the renderer: its stand-in is ours too.
     let mut text = own.text[own.parts[0].1.clone()].to_owned();
-    if text.contains("fn block_texture(") {
-        text += if text.contains("fn ray_hit(") {
-            crate::stages::BLOCK_SAMPLING_STUB
-        } else {
-            crate::stages::PBR_STUB
-        };
-    } else if text.contains("fn ray_hit(") {
-        text += crate::stages::POST_RAY_STUB;
-    }
+    text += renderer_stub(api, kind);
     let prelude = naga::front::wgsl::parse_str(&text).expect("the prelude parses");
     let ours = names(&prelude);
     let file = &own.parts[own.parts.len() - 1].0;
