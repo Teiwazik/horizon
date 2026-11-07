@@ -475,6 +475,43 @@ impl Game<'_> {
         self.water_plane_memo.set(Some(plane));
         Some(plane)
     }
+    /// Whether a native pack draws the waterline itself: its mirror is on and the eye is
+    /// within 0.3 blocks below the surface, so neither the engine's nor the pack's
+    /// whole-screen under-water look applies.
+    pub(super) fn pack_waterline(&self, eye: glam::DVec3) -> bool {
+        let w = self.eye_water_line(eye);
+        w > 0.5
+            && w < 0.8
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.wants_water_plane())
+    }
+    /// The waterline at the eye, for packs: `0.5 + surface - eye` (0..1) when the water's
+    /// surface in the camera's own column lies within half a block of the eye, else 0.
+    /// Read from the column itself, never the remembered mirror plane.
+    pub(super) fn eye_water_line(&self, eye: glam::DVec3) -> f32 {
+        let (x, y, z) = (
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        );
+        for by in [y + 1, y, y - 1] {
+            if let Some((h, _)) = self.fluid_height_of(x, by, z, Some(Fluid::Water)) {
+                if h >= 1.0 {
+                    // Water above it as well: the surface is higher still.
+                    return 0.0;
+                }
+                let rel = f64::from(by) + f64::from(h) - eye.y;
+                return if rel.abs() < 0.5 {
+                    (0.5 + rel).clamp(0.001, 0.999) as f32
+                } else {
+                    0.0
+                };
+            }
+        }
+        0.0
+    }
     /// `FluidState.getHeight` and whether it is a source, for `fluid` or,
     /// with `None`, any fluid (`ClipContext.Fluid.ANY`).
     pub(super) fn fluid_height_of(

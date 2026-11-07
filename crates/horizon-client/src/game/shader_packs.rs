@@ -433,10 +433,13 @@ impl Game<'_> {
             thunder: lerp(self.world.weather.thunder_level),
             eye_in: match self.camera_fluid(camera.to_array()) {
                 CameraFluid::None => 0,
+                // Just under the surface the pack draws the split view itself.
+                CameraFluid::Water if self.pack_waterline(camera) => 0,
                 CameraFluid::Water => 1,
                 CameraFluid::Lava => 2,
                 CameraFluid::PowderSnow => 3,
             },
+            water_line: self.eye_water_line(camera),
             blindness: f32::from(u8::from(self.potions.effects.get("blindness").is_some())),
             eye_light: [i32::from(light & 15), i32::from(light >> 4)],
             hide_gui: self.ui.hide_gui,

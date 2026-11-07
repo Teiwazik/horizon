@@ -42,6 +42,9 @@ pub struct PackInputs {
     pub thunder: f32,
     /// The fluid at the camera: 0 none, 1 water, 2 lava, 3 powder snow.
     pub eye_in: i32,
+    /// `Game::eye_water_line`: 0.5 + water surface - eye in the camera's column, 0 when
+    /// no surface is within half a block. Passed to native packs as `Frame.in_water`.
+    pub water_line: f32,
     pub blindness: f32,
     /// Block and sky light at the camera, 0..15.
     pub eye_light: [i32; 2],

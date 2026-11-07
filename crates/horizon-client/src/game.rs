@@ -16890,7 +16890,7 @@ impl Game<'_> {
                         || self
                             .fluid_height_of(bx, by, bz, Some(Fluid::Water))
                             .is_some_and(|(h, _)| c.y < f64::from(by) + f64::from(h)));
-                (c, in_water, yaw, pitch)
+                (c, in_water && !self.pack_waterline(c), yaw, pitch)
             }
             None => (
                 glam::DVec3::new(0.5, 100.0, 0.5),

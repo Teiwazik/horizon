@@ -1787,7 +1787,8 @@ pub fn frame_inputs(
         camera_motion: [0.0; 3],
         delta_time: 0.0,
         eye_light_smooth: [level(pack.eye_light[0]), level(pack.eye_light[1])],
-        in_water: f32::from(u8::from(pack.eye_in as u32 == 1)),
+        // rt5: the waterline at the eye (`PackInputs::water_line`), 0 away from a surface.
+        in_water: pack.water_line,
         in_lava: f32::from(u8::from(pack.eye_in as u32 == 2)),
         water_plane: frame.water_plane.unwrap_or(0.0),
         has_reflection: u32::from(frame.water_plane.is_some() && !frame.underwater),
