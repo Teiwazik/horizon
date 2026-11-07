@@ -9718,6 +9718,8 @@ impl Renderer {
         let mut native_sky_pass = false;
         // The ray tracing prototype: every section near, in sight or not, the entities and the
         // light sources.
+        // Sections still fading in leave the ray scene until half in, as in the shadow map.
+        let rt_fading = self.sections_fading_in(fade_ms, now);
         if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
             let list = if frame.title {
                 Vec::new()
@@ -9735,6 +9737,20 @@ impl Renderer {
                             solid: s.solid,
                             translucent: s.translucent,
                             vertices: self.arena.buffer(s.page),
+                            visibility: if rt_fading {
+                                let [x, y, z] = v.origin;
+                                let d = ((x + 8.0).powi(2) + (y + 8.0).powi(2) + (z + 8.0).powi(2))
+                                    .sqrt();
+                                let ramp = ((d - 16.0) / 16.0).clamp(0.0, 1.0);
+                                let seen = section_visibility(
+                                    self.section_uploaded.get(&v.key),
+                                    fade_ms,
+                                    now,
+                                );
+                                1.0 + (seen - 1.0) * ramp
+                            } else {
+                                1.0
+                            },
                         }
                     })
                     .collect()

@@ -67,6 +67,8 @@ pub struct RaySection<'a> {
     pub solid: u32,
     pub translucent: u32,
     pub vertices: &'a wgpu::Buffer,
+    /// The section's chunk fade-in (1 whole): below half it is left out of the scene.
+    pub visibility: f32,
 }
 
 /// The entities' vertices this frame: quads from the start, then the shadow-only ones.
@@ -711,6 +713,9 @@ impl RayScene {
         // The instances, camera-relative.
         let mut instances: Vec<wgpu::TlasInstance> = Vec::new();
         for s in &sections {
+            if s.visibility < 0.5 {
+                continue;
+            }
             let Some(b) = self.built.get(&s.key) else {
                 continue;
             };

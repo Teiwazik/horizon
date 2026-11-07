@@ -26,6 +26,9 @@ struct HorizonShadowOut {
     @location(3) @interpolate(flat) fluid: u32,
     // The point on the flat face, camera-relative (`horizon_shadow_taken`).
     @location(4) base: vec3<f32>,
+    // The section's fade-in as the material draws it (terrain.wgsl's `visibility`): a section
+    // coming in casts a dithered part of its shadow (`horizon_shadow_faded`).
+    @location(5) @interpolate(flat) visibility: f32,
 }
 // `color` is the vertex colour: the tint, and the fluid flag in its alpha's high nibble
 // (mesher.rs's `fluid_face`).
@@ -42,7 +45,23 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     let high = u32(round(color.a * 255.0)) >> 4u;
     out.fluid = u32(high >= 8u && (high & 7u) < 6u);
     out.base = pos;
+    out.visibility = 1.0;
     return out;
+}
+// `horizon_shadow_vertex` with the fade-in of the section at instance `w`.
+fn horizon_shadow_section(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>, w: f32)
+    -> HorizonShadowOut {
+    var out = horizon_shadow_vertex(pos, uv, layer, color);
+    out.visibility = mix(1.0, horizon_terrain_instance_visibility(w),
+        clamp((length(pos) - 16.0) / 16.0, 0.0, 1.0));
+    return out;
+}
+// A 4x4 ordered pattern over the map's texels: what a fading section leaves out.
+fn horizon_shadow_faded(in: HorizonShadowOut) -> bool {
+    if in.visibility >= 1.0 { return false; }
+    let p = vec2<u32>(in.clip.xy) & vec2(3u);
+    let bayer = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    return (f32(bayer[p.y * 4u + p.x]) + 0.5) / 16.0 >= in.visibility;
 }
 @vertex fn horizon_shadow_vs(
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
@@ -50,7 +69,7 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     @location(5) origin: vec4<f32>) -> HorizonShadowOut {
     let atlas = horizon_terrain_terrain_uv(uv, origin.w);
     let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    return horizon_shadow_section(pos, atlas, layer, color, origin.w);
 }
 @vertex fn horizon_shadow_vs_flat(
     @builtin(vertex_index) index: u32,
@@ -60,10 +79,10 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
     let atlas = horizon_terrain_terrain_uv(uv, origin.w);
     let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    return horizon_shadow_section(pos, atlas, layer, color, origin.w);
 }
 @fragment fn horizon_shadow_fs(in: HorizonShadowOut) {
-    if horizon_shadow_taken(in.base, in.layer) { discard; }
+    if horizon_shadow_taken(in.base, in.layer) || horizon_shadow_faded(in) { discard; }
     horizon_shadow_cutout(in);
 }
 fn horizon_shadow_cutout(in: HorizonShadowOut) {
@@ -76,7 +95,7 @@ fn horizon_shadow_cutout(in: HorizonShadowOut) {
 // alpha 1 marks a fluid, other surfaces keep their alpha below it.
 @fragment fn horizon_shadow_fs_translucent(in: HorizonShadowOut) -> @location(0) vec4<f32> {
     let color = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
-    if color.a < 0.01 { discard; }
+    if color.a < 0.01 || horizon_shadow_faded(in) { discard; }
     return vec4(horizon_line_in(color.rgb * in.tint), select(min(color.a, 0.99), 1.0, in.fluid != 0u));
 }
 ";

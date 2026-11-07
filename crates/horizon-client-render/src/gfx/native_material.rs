@@ -36,7 +36,11 @@ struct HorizonMaterialOut {
     @location(4) lightmap: vec3<f32>,
     @location(5) position: vec3<f32>,
     @location(6) spherical: f32,
-    @location(7) cylindrical: f32,
+    // terrain.wgsl's `local`: the tile-relative corner, for a distant tile's crossfade
+    // (`horizon_material_crossfaded`), whose code rides bits 4..15 of `hdr_code`. Fog's
+    // cylindrical distance comes from `position` instead (`horizon_material_cylindrical`):
+    // the weakest GPUs allow 15 varyings.
+    @location(7) local: vec3<f32>,
     @location(8) @interpolate(flat) face: u32,
     @location(9) @interpolate(flat) fluid_quad: u32,
     @location(10) @interpolate(flat) emission: f32,
@@ -59,7 +63,22 @@ fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color
     let visibility = mix(1.0, horizon_terrain_instance_visibility(origin.w),
         clamp((length(pos) - 16.0) / 16.0, 0.0, 1.0));
     out.hdr_code |= u32(round((1.0 - visibility) * 65535.0)) << 16u;
+    // terrain.wgsl's crossfade between a distant tile and the sections replacing it: the
+    // dither code, and the depth nudge that lets the newer one win where both draw.
+    out.hdr_code |= min(horizon_terrain_fade_code(origin.w), 4095u) << 4u;
+    out.local = position;
+    out.clip = horizon_terrain_fade_depth(out.clip, origin.w);
     return out;
+}
+fn horizon_material_cylindrical(in: HorizonMaterialOut) -> f32 {
+    return max(length(in.position.xz), abs(in.position.y));
+}
+// terrain.wgsl's `faded`: whether a fading tile or section leaves this pixel out. The
+// derivatives are taken before any discard.
+fn horizon_material_crossfaded(in: HorizonMaterialOut) -> bool {
+    let dx = dpdx(in.local);
+    let dy = dpdy(in.local);
+    return horizon_terrain_faded((in.hdr_code >> 4u) & 4095u, in.local, dx, dy);
 }
 // terrain.wgsl's fade-in: toward the fog colour, alpha kept.
 fn horizon_material_faded(in: HorizonMaterialOut, color: vec4<f32>) -> vec4<f32> {
@@ -81,7 +100,6 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     out.lightmap = horizon_terrain_sample_lightmap(sky / 16.0, block / 16.0).rgb;
     out.position = pos;
     out.spherical = length(pos);
-    out.cylindrical = max(length(pos.xz), abs(pos.y));
     // The colour's alpha byte (mesher.rs's `fluid_face` and `emitting`): a fluid quad's
     // high nibble is 8 + its face (0..5), every other quad keeps 0xF there; the low nibble
     // is 15 minus the light the block emits. Every corner of a quad carries the same byte,
@@ -99,6 +117,7 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     out.emission = select(min(f32(tier) * 7.0 / 15.0, 1.0), 0.0, tier == 0u);
     out.displaced = 0.0;
     out.normal = vec3(0.0);
+    out.local = vec3(0.0);
     return out;
 }
 @vertex fn horizon_material_vs(
@@ -227,6 +246,7 @@ fn horizon_material_mark(in: HorizonMaterialOut, texel: vec4<f32>) -> f32 {
     return 1.0;
 }
 @fragment fn horizon_material_fs_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
+    if horizon_material_crossfaded(in) { discard; }
     if length(in.base) < horizon_displace_distance - 0.05 && horizon_displaced_layer(in.layer) {
         discard;
     }
@@ -242,7 +262,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     }
     var out: HorizonMaterialSolid;
     let mark = horizon_material_mark(in, texel);
-    out.color = horizon_material_fogged(vec4(color.rgb, mark), in.spherical, in.cylindrical);
+    out.color = horizon_material_fogged(vec4(color.rgb, mark), in.spherical, horizon_material_cylindrical(in));
     out.surface = bitcast<vec4<u32>>(vec4(horizon_surface.xyz, in.clip.z));
     out.albedo = vec4(horizon_material_albedo, 1.0);
     return out;
@@ -250,6 +270,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
 // The depth pre-pass (`NativeMaterial::prepass`): the solid terrain's depth alone, cut out by
 // its texture's alpha, before the material shades only the nearest point of each pixel.
 @fragment fn horizon_material_fs_depth(in: HorizonMaterialOut) -> HorizonMaterialSolid {
+    if horizon_material_crossfaded(in) { discard; }
     let alpha = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu).a;
     if length(in.base) < horizon_displace_distance - 0.05 && horizon_displaced_layer(in.layer) {
         discard;
@@ -258,9 +279,10 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     return HorizonMaterialSolid(vec4(0.0), vec4(0u), vec4(0.0));
 }
 @fragment fn horizon_material_fs_translucent(in: HorizonMaterialOut) -> @location(0) vec4<f32> {
+    if horizon_material_crossfaded(in) { discard; }
     let color = horizon_material_faded(in, horizon_material_color(in, true));
     if color.a < 0.01 { discard; }
-    return horizon_material_fogged(color, in.spherical, in.cylindrical);
+    return horizon_material_fogged(color, in.spherical, horizon_material_cylindrical(in));
 }
 ";
 
@@ -461,7 +483,8 @@ fn horizon_motion_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: 
     let then = horizon_material_displace(base, uv, layer, color, light);
     horizon_motion_shift = 0.0;
     var out: HorizonMotionOut;
-    out.clip = horizon_terrain_globals.view_proj * vec4(now, 1.0);
+    out.clip = horizon_terrain_fade_depth(horizon_terrain_globals.view_proj * vec4(now, 1.0),
+        origin.w);
     out.current = horizon_motion.current * vec4(now, 1.0);
     out.previous = horizon_motion.previous * vec4(then, 1.0);
     out.moved = select(0.0, 1.0, any(now != then));
@@ -1714,8 +1737,15 @@ mod tests {
         .validate(&module)
         .unwrap();
         // The motion pass: the vertex stage again, a frame earlier.
-        for entry in ["horizon_motion_vs", "horizon_motion_vs_flat", "horizon_motion_fs"] {
-            assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
+        for entry in [
+            "horizon_motion_vs",
+            "horizon_motion_vs_flat",
+            "horizon_motion_fs",
+        ] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "{entry}"
+            );
         }
     }
 
