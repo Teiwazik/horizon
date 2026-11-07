@@ -768,7 +768,10 @@ pub fn mob_to_nbt(
         }
         "minecraft:creeper" => {
             map.insert("Fuse".into(), Tag::Short(m.max_swell as i16));
-            map.entry("ExplosionRadius".into()).or_insert(Tag::Byte(3));
+            map.insert(
+                "ExplosionRadius".into(),
+                Tag::Byte(m.extra.explosion_radius),
+            );
             map.insert("powered".into(), Tag::Byte(i8::from(m.extra.charged)));
             map.insert("ignited".into(), Tag::Byte(i8::from(m.extra.flag)));
         }
@@ -1162,6 +1165,11 @@ pub fn mob_to_nbt(
             map.insert("Peek".into(), Tag::Byte(m.extra.counter as i8));
             map.insert("Color".into(), Tag::Byte(m.extra.color as i8));
         }
+        // HappyGhast.addAdditionalSaveData: the still timeout (`serverStillTimeout`,
+        // kept in `counter`), which vanilla writes even at 0.
+        "minecraft:happy_ghast" => {
+            map.insert("still_timeout".into(), Tag::Int(m.extra.counter));
+        }
         // GlowSquid.addAdditionalSaveData.
         "minecraft:glow_squid" => {
             map.insert(
@@ -1422,6 +1430,11 @@ pub fn mob_to_nbt(
                     equipment.remove(&slot.into());
                 }
             }
+        }
+        // LivingEntity saves the actual saddle equipment even on a mob whose
+        // Survival interaction does not offer saddling (for example a husk).
+        if let Some(saddle) = m.saddle_item() {
+            equipment.insert("saddle".into(), crate::save::item_to_nbt(&saddle));
         }
         // A happy ghast wears its harness in the body slot (and a nautilus
         // its armour, a sulfur cube its swallowed block, a wolf its armor,
@@ -1854,6 +1867,8 @@ pub fn mob_from_nbt(
         // Creeper.readAdditionalSaveData: `ignited` lights the fuse.
         m.extra.flag = flag(tag, "ignited");
         m.max_swell = number(tag.get("Fuse")).unwrap_or(30) as i16 as i32;
+        // `getByteOr("ExplosionRadius", 3)`: any numeric tag, as a byte.
+        m.extra.explosion_radius = number(tag.get("ExplosionRadius")).unwrap_or(3) as i8;
     }
     // InventoryCarrier.readInventoryFromTag, using the existing occupied-stack model.
     let carrier_slots = match m.species() {
@@ -2258,6 +2273,11 @@ pub fn mob_from_nbt(
             .and_then(|t| state_from_nbt(registry, t))
             .filter(|&state| !is_air(registry, state));
     }
+    // HappyGhast.readAdditionalSaveData: the still timeout, 0 when absent (a fresh
+    // ghast, or one saved by a version that did not write it).
+    if m.species() == crate::mobs::Species::HappyGhast {
+        m.extra.counter = number(tag.get("still_timeout")).unwrap_or(0) as i32;
+    }
     if m.species() == crate::mobs::Species::Shulker {
         m.extra.variant3 = number(tag.get("AttachFace")).unwrap_or(0).clamp(0, 5) as u8;
         m.extra.counter = number(tag.get("Peek")).unwrap_or(0).clamp(0, 100) as i32;
@@ -2457,6 +2477,14 @@ pub fn evoker_fangs_to_nbt(
     tag
 }
 
+/// `UUIDUtil.CODEC` via `NbtOps.getIntStream`: boxed Number conversions,
+/// with the first-four partial value retained by `TagValueInput.read`.
+fn item_uuid_from_tag(tag: Option<&Tag>) -> Option<[i32; 4]> {
+    let values = horizon_world::datafix::dynamic::as_int_stream(tag)?;
+    values.get(..4)?.try_into().ok()
+}
+
+/// `ItemEntity.readAdditionalSaveData`: Owner and Thrower use the numeric UUID codec.
 pub fn item_entity_from_nbt(tag: &Tag, id: u32, bob_offset: f32) -> Option<ItemEntity> {
     let stack = item_from_nbt(tag.get("Item")?)?;
     let position = position(tag)?;
@@ -2468,8 +2496,8 @@ pub fn item_entity_from_nbt(tag: &Tag, id: u32, bob_offset: f32) -> Option<ItemE
         fire_ticks: number(tag.get("Fire")).unwrap_or(0) as i32,
         id,
         stack,
-        thrower: uuid_from_tag(tag.get("Thrower")),
-        target: uuid_from_tag(tag.get("Owner")),
+        thrower: item_uuid_from_tag(tag.get("Thrower")),
+        target: item_uuid_from_tag(tag.get("Owner")),
         position,
         previous: position,
         velocity: motion(tag),
@@ -2706,8 +2734,9 @@ pub fn arrow_from_nbt(
     Some((p, tag.get("inBlockState").cloned()))
 }
 
-/// `LargeFireball` and `SmallFireball`: `AbstractHurtingProjectile`'s
-/// `acceleration_power`, `Projectile`'s owner and flags, `ExplosionPower`.
+/// `LargeFireball`, `SmallFireball` and `WitherSkull`: `AbstractHurtingProjectile`'s
+/// `acceleration_power`, `Projectile`'s owner and flags, `ExplosionPower`,
+/// and a skull's `dangerous`.
 pub fn fireball_to_nbt(
     p: &Projectile,
     uuid: [i32; 4],
@@ -2718,7 +2747,8 @@ pub fn fireball_to_nbt(
         ProjectileKind::LargeFireball { power } => Some(power),
         ProjectileKind::SmallFireball
         | ProjectileKind::WindCharge
-        | ProjectileKind::BreezeWindCharge => None,
+        | ProjectileKind::BreezeWindCharge
+        | ProjectileKind::WitherSkull { .. } => None,
         _ => return None,
     };
     let base = Base {
@@ -2738,13 +2768,18 @@ pub fn fireball_to_nbt(
     );
     put_projectile(&mut tag, p, owner);
     // AbstractHurtingProjectile.tick: shouldBurn is true for both fireballs, so
-    // once ticked they igniteForSeconds(1) every tick.
-    if p.age > 0 && !p.kind.ignores_blast() {
+    // once ticked they igniteForSeconds(1) every tick. WitherSkull.shouldBurn is
+    // false, so a skull never saves a fire.
+    if p.age > 0 && p.kind.is_item_fireball() {
         let fire = number(tag.get("Fire")).unwrap_or(0).max(20);
         put(&mut tag, "Fire", Tag::Short(fire as i16));
     }
     if let Some(power) = power {
         put(&mut tag, "ExplosionPower", Tag::Byte(power as i8));
+    }
+    // WitherSkull.addAdditionalSaveData: `dangerous`, false for a black skull.
+    if let ProjectileKind::WitherSkull { dangerous } = p.kind {
+        put(&mut tag, "dangerous", Tag::Byte(i8::from(dangerous)));
     }
     // Fireball.addAdditionalSaveData: the item `getItem` returns, a fire
     // charge unless `setItem` was given another (kept as a single one).
@@ -2824,6 +2859,7 @@ pub fn saved_with_chunk(p: &Projectile) -> bool {
         | ProjectileKind::SmallFireball
         | ProjectileKind::WindCharge
         | ProjectileKind::BreezeWindCharge
+        | ProjectileKind::WitherSkull { .. }
         | ProjectileKind::Snowball
         | ProjectileKind::Egg
         | ProjectileKind::EnderPearl
@@ -2838,8 +2874,7 @@ pub fn saved_with_chunk(p: &Projectile) -> bool {
         ProjectileKind::Trident
         | ProjectileKind::ShulkerBullet {
             target: Some(_), ..
-        }
-        | ProjectileKind::WitherSkull { .. } => false,
+        } => false,
     }
 }
 
@@ -2973,6 +3008,10 @@ pub fn fireball_from_nbt(tag: &Tag, player: Option<[i32; 4]>) -> Option<Projecti
         "minecraft:small_fireball" => ProjectileKind::SmallFireball,
         "minecraft:wind_charge" => ProjectileKind::WindCharge,
         "minecraft:breeze_wind_charge" => ProjectileKind::BreezeWindCharge,
+        // WitherSkull.readAdditionalSaveData: an absent `dangerous` is a black skull.
+        "minecraft:wither_skull" => ProjectileKind::WitherSkull {
+            dangerous: flag(tag, "dangerous"),
+        },
         _ => return None,
     };
     let owner = uuid_from_tag(tag.get("Owner"));
@@ -4224,6 +4263,52 @@ mod tests {
         }
     }
 
+    /// #11332: `Creeper.readAdditionalSaveData` reads `ExplosionRadius` as a
+    /// byte (default 3), `explodeCreeper` blows with it, twice it when powered,
+    /// and `addAdditionalSaveData` writes the value back as a byte.
+    #[test]
+    fn creeper_explosion_radius_nbt_sizes_the_blast_and_saves() {
+        let blast = |mob: &mut Mob| -> f32 {
+            let mut events = Vec::new();
+            mob.max_swell = 1;
+            crate::mobs::hostile::creeper_tick(mob, &mut events);
+            events
+                .iter()
+                .find_map(|e| match e {
+                    crate::mobs::MobEvent::Explode(_, radius, _) => Some(*radius),
+                    _ => None,
+                })
+                .expect("the creeper exploded")
+        };
+        for (radius, powered, expected) in [
+            (None, false, 3.0),
+            (None, true, 6.0),
+            (Some(Tag::Byte(12)), false, 12.0),
+            (Some(Tag::Byte(12)), true, 24.0),
+            (Some(Tag::Byte(0)), false, 0.0),
+            // getByteOr takes any numeric tag, narrowed to a byte.
+            (Some(Tag::Long(300)), false, 44.0),
+        ] {
+            let (mut mob, raw) = fused_creeper(None);
+            let mut tag = raw.clone();
+            if let Tag::Compound(c) = &mut tag {
+                if let Some(radius) = radius.clone() {
+                    c.insert("ExplosionRadius".into(), radius);
+                }
+                c.insert("powered".into(), Tag::Byte(i8::from(powered)));
+            }
+            let types = [("minecraft:creeper".into(), mob.kind.clone())].into();
+            mob = mob_from_nbt(&tag, &types, 1, None).unwrap();
+            let saved = mob_to_nbt(&mob, [0; 4], Some(&raw), None, |_| None);
+            assert_eq!(
+                saved.get("ExplosionRadius"),
+                Some(&Tag::Byte(expected as i8 / if powered { 2 } else { 1 })),
+                "{radius:?} powered={powered}"
+            );
+            assert_eq!(blast(&mut mob), expected, "{radius:?} powered={powered}");
+        }
+    }
+
     #[test]
     fn creeper_fall_swell_uses_custom_fuse_without_a_zero_floor() {
         for (fuse, expected) in [(Some(1), -4), (None, 25), (Some(40), 35)] {
@@ -4596,6 +4681,149 @@ mod tests {
         legacy.pickup_delay = i64::from(u32::MAX);
         assert!(tick(&mut legacy));
         assert_eq!(legacy.pickup_delay, i64::from(u32::MAX));
+    }
+
+    #[test]
+    fn item_numeric_uuid_codec_adopts_numeric_streams_before_save() {
+        let cases = [
+            (Tag::IntArray(vec![54, 1, -2, 3]), [54, 1, -2, 3]),
+            (
+                Tag::LongArray(vec![
+                    54,
+                    4_294_967_297,
+                    -4_294_967_298,
+                    9_007_199_254_740_993,
+                ]),
+                [54, 1, -2, 1],
+            ),
+            (
+                Tag::List(vec![
+                    Tag::Float(54.9_f32.to_bits()),
+                    Tag::Float(1.75_f32.to_bits()),
+                    Tag::Float((-2.75_f32).to_bits()),
+                    Tag::Float((-0.5_f32).to_bits()),
+                ]),
+                [54, 1, -2, 0],
+            ),
+            (
+                Tag::List(vec![
+                    Tag::Double(54.9_f64.to_bits()),
+                    Tag::Double(1.75_f64.to_bits()),
+                    Tag::Double((-2.75_f64).to_bits()),
+                    Tag::Double((-0.5_f64).to_bits()),
+                ]),
+                [54, 1, -2, 0],
+            ),
+            (
+                Tag::List(vec![
+                    Tag::Long(54),
+                    Tag::Long(4_294_967_297),
+                    Tag::Long(-4_294_967_298),
+                    Tag::Long(9_007_199_254_740_993),
+                ]),
+                [54, 1, -2, 1],
+            ),
+            (
+                Tag::ByteArray(vec![54, 1, (-2_i8) as u8, 3]),
+                [54, 1, -2, 3],
+            ),
+            // Util.fixedSize returns a partial first-four result for overlong streams.
+            (Tag::IntArray(vec![54, 1, -2, 3, 4]), [54, 1, -2, 3]),
+        ];
+        for field in ["Owner", "Thrower"] {
+            for (value, expected) in &cases {
+                let raw = Tag::compound([
+                    ("Pos", doubles(&[2.5, 200.0, 2.5])),
+                    (
+                        "Item",
+                        Tag::compound([("id", string("minecraft:stone")), ("count", Tag::Int(1))]),
+                    ),
+                    ("CustomName", string("kept")),
+                    (field, value.clone()),
+                ]);
+                let mut item = item_entity_from_nbt(&raw, 7, 0.0).unwrap();
+                assert_eq!(
+                    if field == "Owner" {
+                        item.target
+                    } else {
+                        item.thrower
+                    },
+                    Some(*expected),
+                    "{field}: {value:?}"
+                );
+                assert_eq!(
+                    if field == "Owner" {
+                        item.thrower
+                    } else {
+                        item.target
+                    },
+                    None
+                );
+                for source in [None, Some(&raw)] {
+                    let saved = item_entity_to_nbt(&item, [54, 0, 0, 1], source);
+                    assert_eq!(saved.get(field), Some(&Tag::IntArray(expected.to_vec())));
+                    assert_eq!(saved.get("Item").unwrap().get("count"), Some(&Tag::Int(1)));
+                }
+                let saved = item_entity_to_nbt(&item, [54, 0, 0, 1], Some(&raw));
+                assert_eq!(saved.get("CustomName"), raw.get("CustomName"));
+                item.target = None;
+                item.thrower = None;
+                let cleared = item_entity_to_nbt(&item, [54, 0, 0, 1], Some(&saved));
+                assert!(cleared.get("Owner").is_none());
+                assert!(cleared.get("Thrower").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn item_numeric_uuid_codec_rejects_nonstreams_and_short_inputs() {
+        let cases = [
+            None,
+            Some(string("00000036-0000-0001-ffff-fffe00000003")),
+            Some(Tag::IntArray(vec![])),
+            Some(Tag::IntArray(vec![54, 1, -2])),
+            Some(Tag::Int(7)),
+            Some(Tag::compound([("value", Tag::Int(7))])),
+            Some(Tag::List(vec![
+                Tag::Int(54),
+                Tag::Int(1),
+                Tag::Int(-2),
+                string("3"),
+            ])),
+        ];
+        for field in ["Owner", "Thrower"] {
+            for value in &cases {
+                let mut raw = Tag::compound([
+                    ("Pos", doubles(&[2.5, 200.0, 2.5])),
+                    (
+                        "Item",
+                        Tag::compound([("id", string("minecraft:stone")), ("count", Tag::Int(1))]),
+                    ),
+                ]);
+                if let Some(value) = value {
+                    put(&mut raw, field, value.clone());
+                }
+                let mut item = item_entity_from_nbt(&raw, 7, 0.0).unwrap();
+                assert_eq!(
+                    (item.target, item.thrower),
+                    (None, None),
+                    "{field}: {value:?}"
+                );
+                for source in [None, Some(&raw)] {
+                    let saved = item_entity_to_nbt(&item, [54, 0, 0, 1], source);
+                    assert!(saved.get("Owner").is_none());
+                    assert!(saved.get("Thrower").is_none());
+                }
+                item.target = Some([54, 1, -2, 3]);
+                item.thrower = Some([54, 4, 5, 6]);
+                let saved = item_entity_to_nbt(&item, [54, 0, 0, 1], Some(&raw));
+                assert_eq!(saved.get("Owner"), Some(&Tag::IntArray(vec![54, 1, -2, 3])));
+                assert_eq!(
+                    saved.get("Thrower"),
+                    Some(&Tag::IntArray(vec![54, 4, 5, 6]))
+                );
+            }
+        }
     }
 
     #[test]
@@ -5477,6 +5705,47 @@ mod axolotl_nbt_tests {
                 .get("FromBucket")
                 .is_none()
         );
+    }
+
+    /// `HappyGhast.addAdditionalSaveData` / `readAdditionalSaveData`: the still timeout
+    /// (`serverStillTimeout`) goes with the world. A ghast saved while it was held still
+    /// comes back still, which is what keeps the box a dropped item rests on
+    /// (`EntityGetter.getEntityCollisions`) and the control a rider has
+    /// (`getControllingPassenger` reads `isOnStillTimeout`).
+    #[test]
+    fn a_happy_ghast_keeps_its_still_timeout() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let types: HashMap<_, _> = data
+            .types
+            .into_iter()
+            .map(|(id, kind)| (id, Arc::new(kind)))
+            .collect();
+        let kind = types["minecraft:happy_ghast"].clone();
+        let mut m = Mob::new(1, kind, Vec3::new(0.5, 80.0, 0.5), 0.0);
+        // Past `HappyGhast.tick`'s 60-tick gate, so the timer counts down from here.
+        m.extra.age = 100;
+        for timeout in [0, 7, 10] {
+            m.extra.counter = timeout;
+            let saved = mob_to_nbt(&m, [1; 4], None, None, |_| None);
+            assert_eq!(
+                number(saved.get("still_timeout")),
+                Some(i64::from(timeout)),
+                "{timeout}"
+            );
+            let back = mob_from_nbt(&saved, &types, 2, None).unwrap();
+            assert_eq!(back.extra.counter, timeout, "{timeout}");
+            assert_eq!(
+                crate::mobs::happy_ghast::on_still_timeout(&back),
+                timeout > 0,
+                "{timeout}"
+            );
+        }
     }
 
     #[test]
@@ -6586,6 +6855,38 @@ mod item_component_tests {
 #[cfg(test)]
 mod fireball_nbt_tests {
     use super::*;
+
+    /// `WitherSkull`: a skull in flight is saved with its chunk, `dangerous`
+    /// is a byte (absent means a black skull), and it never saves a fire
+    /// because `WitherSkull.shouldBurn` is false.
+    #[test]
+    fn a_wither_skull_keeps_whether_it_is_dangerous() {
+        let blue = Tag::compound([
+            ("id", Tag::String("minecraft:wither_skull".into())),
+            ("Pos", doubles(&[3.0, 64.0, 3.0])),
+            ("Motion", doubles(&[0.0, 0.0, 0.0])),
+            ("dangerous", Tag::Byte(1)),
+        ]);
+        let mut skull = fireball_from_nbt(&blue, None).unwrap();
+        assert_eq!(skull.kind, ProjectileKind::WitherSkull { dangerous: true });
+        assert!(saved_with_chunk(&skull));
+        skull.age = 5;
+        let back = fireball_to_nbt(&skull, [1, 2, 3, 4], None, None).unwrap();
+        assert_eq!(kind(&back).as_deref(), Some("minecraft:wither_skull"));
+        assert_eq!(number(back.get("dangerous")), Some(1));
+        // Entity saves Fire every time; a skull's stays 0 (a fireball's is 20 once ticked).
+        assert_eq!(number(back.get("Fire")), Some(0));
+
+        let black = Tag::compound([
+            ("id", Tag::String("minecraft:wither_skull".into())),
+            ("Pos", doubles(&[0.0, 0.0, 0.0])),
+        ]);
+        let skull = fireball_from_nbt(&black, None).unwrap();
+        assert_eq!(skull.kind, ProjectileKind::WitherSkull { dangerous: false });
+        let back = fireball_to_nbt(&skull, [1, 2, 3, 4], None, None).unwrap();
+        assert_eq!(number(back.get("dangerous")), Some(0));
+    }
+
     #[test]
     fn a_fireball_round_trips_its_flight() {
         let raw = Tag::compound([
@@ -7470,6 +7771,23 @@ mod generic_home_nbt_tests {
             ("home_pos", Tag::IntArray(vec![90, 91, 92])),
             ("audit:unrelated", Tag::Int(7)),
         ])
+    }
+
+    #[test]
+    fn spawned_trader_home_restricts_and_survives_save() {
+        let mut m = mob(Species::WanderingTrader, "minecraft:wandering_trader");
+        crate::mobs::trader::start_visit(&mut m, [4, 201, 0]);
+        m.position = Vec3::new(19.5, 201.0, 0.5);
+        assert!(crate::mobs::trader::within_home(&m));
+        m.position = Vec3::new(20.5, 201.0, 0.5);
+        assert!(!crate::mobs::trader::within_home(&m));
+        let saved = mob_to_nbt(&m, [0; 4], None, None, |_| None);
+        assert_eq!(saved.get("home_radius"), Some(&Tag::Int(16)));
+        assert_eq!(saved.get("home_pos"), Some(&Tag::IntArray(vec![4, 201, 0])));
+        let mut loaded = mob(Species::WanderingTrader, "minecraft:wandering_trader");
+        loaded.position = m.position;
+        read_mob_home(&mut loaded, &saved);
+        assert!(!crate::mobs::trader::within_home(&loaded));
     }
 
     #[test]

@@ -136,6 +136,18 @@ pub(super) fn remote_text(tag: &Tag) -> horizon_client::text::Text {
     comp_text(&tag_to_json(tag))
 }
 
+/// Who hurt the local player, for `native_client_hurt`: the damage event's
+/// causing entity (`sourceCauseId`) and whether `is_player` knows it as a
+/// player. An entity this client doesn't track is still named, as not a player.
+fn own_hurt_attacker(
+    cause: Option<i32>,
+    is_player: impl FnMut(u32) -> Option<bool>,
+) -> (Option<u32>, bool) {
+    let attacker = cause.and_then(|id| u32::try_from(id).ok());
+    let player = attacker.and_then(is_player).unwrap_or(false);
+    (attacker, player)
+}
+
 /// `Player.getVoicePitch`: a constant 1.0
 /// (`javap -p -c -constants net.minecraft.world.entity.player.Player`:
 /// `0: fconst_1  1: freturn`), so a player's own hurt and death sounds are
@@ -497,6 +509,10 @@ enum OwnProfile {
 
 pub(super) struct Remote {
     pub session: Session,
+    /// The single-player save this connection plays, by its folder in
+    /// `saves/`: the window's own server thread, or P1's for a splitscreen
+    /// seat. None on a server.
+    pub(super) save_folder: Option<String>,
     pub brand: String,
     /// This connection's configured feature flags, carried through reconfiguration.
     pub(super) features: Vec<String>,
@@ -548,6 +564,9 @@ pub(super) struct Remote {
     /// `BlockStatePredictionHandler.currentSequenceNr`: the level's, so a new level (a login,
     /// another dimension) counts from 0 again.
     sequence: i32,
+    /// `BlockStatePredictionHandler.lastTeleportSequence`: the sequence of the last
+    /// teleport, so a prediction made before it keeps its block but not its snap.
+    last_teleport_sequence: i32,
     position_sender: horizon_client::player_sync::PositionSender,
     last_input: u8,
     was_sprinting: bool,
@@ -573,10 +592,10 @@ pub(super) struct Remote {
     /// again when a view distance, Chat, skin or Main Hand option changes).
     sent_info: horizon_protocol::packets::configuration::ClientInformation,
     /// BlockStatePredictionHandler: blocks changed ahead of the server (a predicted break),
-    /// with the sequence of the last action that changed them and the state the server
-    /// last said they have. Until the server acknowledges that sequence its block updates
-    /// only replace the remembered state; then the block takes it.
-    predictions: HashMap<[i32; 3], (i32, i32)>,
+    /// with what it remembers of each of them. Until the server acknowledges the
+    /// sequence its block updates only replace the remembered state; then the block
+    /// takes it.
+    predictions: HashMap<[i32; 3], Prediction>,
     /// Open container: (window id, menu name).
     pub(super) menu: Option<(i32, String)>,
     /// The crafting result slot of the open menu as the server last set it
@@ -1084,6 +1103,7 @@ impl Game<'_> {
             });
         self.remote = Some(Remote {
             session,
+            save_folder: None,
             brand: "unknown".into(),
             features: vec!["minecraft:vanilla".into()],
             quiet_commands: false,
@@ -1117,6 +1137,7 @@ impl Game<'_> {
             view_distance: self.settings.render_distance,
             simulation_distance: self.settings.simulation_distance,
             sequence: 0,
+            last_teleport_sequence: -1,
             position_sender: Default::default(),
             last_input: 0,
             was_sprinting: false,
@@ -1404,6 +1425,7 @@ impl Game<'_> {
         let mut e = horizon_client::effects::EffectInstance::new(id, p.duration, p.amplifier);
         e.ambient = p.flags & 1 != 0;
         e.visible = p.flags & 2 != 0;
+        e.show_icon = p.flags & 4 != 0;
         let list = &mut self.potions.effects.list;
         match list.iter_mut().find(|x| x.id == id) {
             // forceAddEffect's copyBlendState: an updated effect keeps its fade.
@@ -2632,12 +2654,12 @@ impl Game<'_> {
     /// predicted state until the server acknowledges the action; the server's state is
     /// remembered for then.
     fn server_block(&mut self, pos: [i32; 3], state: i32) {
-        if let Some((_, known)) = self
+        if let Some(p) = self
             .remote
             .as_mut()
             .and_then(|r| r.predictions.get_mut(&pos))
         {
-            *known = state;
+            p.state = state;
             return;
         }
         self.set_block(pos, state);
@@ -2649,20 +2671,81 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
+        let last_teleport = r.last_teleport_sequence;
         let settled: Vec<_> = r
             .predictions
             .iter()
-            .filter(|(_, (s, _))| *s <= sequence)
-            .map(|(&pos, &(_, state))| (pos, state))
+            .filter(|(_, p)| p.sequence <= sequence)
+            .map(|(&pos, &p)| (pos, p))
             .collect();
-        for (pos, state) in settled {
+        for (pos, prediction) in settled {
             if let Some(r) = self.remote.as_mut() {
                 r.predictions.remove(&pos);
             }
-            if self.world.block(pos[0], pos[1], pos[2]).0 as i32 != state {
-                self.set_block(pos, state);
+            if self.world.block(pos[0], pos[1], pos[2]).0 as i32 == prediction.state {
+                continue;
+            }
+            self.set_block(pos, prediction.state);
+            // ClientLevel.syncBlockState: the block that comes back may now hold
+            // the player, and then it goes to the position the prediction
+            // remembered.
+            let meets = self.block_meets_player(pos, prediction.state);
+            if let Some(at) = snap_target(prediction.player_pos, last_teleport, sequence, meets) {
+                self.snap_player_to(at);
             }
         }
+    }
+    /// The player's position, for `retainKnownServerState`'s `player.position()`.
+    fn player_position(&self) -> [f64; 3] {
+        let at = self
+            .player
+            .as_ref()
+            .map(|p| p.position)
+            .unwrap_or(Vec3::ZERO);
+        [at.x, at.y, at.z]
+    }
+    /// `Entity.isColliding(pos, state)` for the local player: the state's own
+    /// collision shape, at the player's pose, against the player's box.
+    fn block_meets_player(&self, pos: [i32; 3], state: i32) -> bool {
+        let Some(player) = self.player.as_ref() else {
+            return false;
+        };
+        let entity = player.bounds();
+        let context = horizon_world::collision_context::CollisionContext::for_entity(
+            horizon_world::collision_context::CollisionEntity {
+                identity: horizon_world::entity_obstruction::EntityIdentity(0),
+                y: player.position.y,
+                descending: player.shift_key_down,
+                main_hand: None,
+            },
+            false,
+        );
+        let mut scene = horizon_client::collisions::SceneCollisions {
+            world: &self.world,
+            binding: self.collision,
+            subject: None,
+        };
+        let at = horizon_core::position::BlockPos::new(pos[0], pos[1], pos[2]);
+        match self.collision.collision_shape_with_context(
+            &mut scene,
+            BlockStateId(state.max(0) as u32),
+            at,
+            &context,
+        ) {
+            Ok(shape) => shape_meets(&shape, pos, entity),
+            Err(_) => false,
+        }
+    }
+    /// `Entity.absSnapTo`: the remembered point, clamped to the level's edge.
+    /// The velocity is left alone, and the player has no separate previous
+    /// position to reset (its box is drawn from `position`).
+    fn snap_player_to(&mut self, at: [f64; 3]) {
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let x = at[0].clamp(-3.0e7, 3.0e7);
+        let z = at[2].clamp(-3.0e7, 3.0e7);
+        player.position = Vec3::new(x, at[1], z);
     }
     fn set_block(&mut self, pos: [i32; 3], state: i32) {
         // A state we don't have (a server with mods we lack) reads as air, as in its chunks.
@@ -3929,6 +4012,15 @@ impl Game<'_> {
                                     pl.air = *air;
                                 }
                             }
+                            // Entity.DATA_TICKS_FROZEN: the server's count of the
+                            // powder snow freeze, which the client's own copy reads
+                            // for the frost overlay, the frozen hearts and the
+                            // shiver of its third-person model (#11217).
+                            (7, Value::Int(ticks)) => {
+                                if let Some(pl) = self.player.as_mut() {
+                                    pl.ticks_frozen = *ticks;
+                                }
+                            }
                             // LivingEntity.DATA_ARROW_COUNT_ID and DATA_STINGER_COUNT_ID.
                             (12, Value::Int(count)) => {
                                 if let Some(r) = self.remote.as_mut() {
@@ -4199,6 +4291,12 @@ impl Game<'_> {
                 let own = me == Some(p.id);
                 self.pvp_hurt(p.id, own, p.direct.map(|d| Some(d) == me));
                 if own {
+                    let (attacker, player) = own_hurt_attacker(p.cause, |id| {
+                        self.mob_index
+                            .get(&self.mobs, id)
+                            .map(|m| &*m.kind.id == "minecraft:player")
+                    });
+                    self.native_client_hurt(attacker, player);
                     let at = self
                         .player
                         .as_ref()
@@ -5991,6 +6089,11 @@ impl Game<'_> {
             (yaw, pitch),
             p,
         );
+        // BlockStatePredictionHandler.onTeleport: a prediction made before this
+        // one keeps its block but not the player position it remembered.
+        if let Some(r) = self.remote.as_mut() {
+            r.last_teleport_sequence = r.sequence;
+        }
         match self.player.as_mut() {
             Some(player) => {
                 player.position = position;
@@ -7685,11 +7788,16 @@ impl Game<'_> {
         self.pad_rumble(horizon_client::gamepad::Rumble::BlockBroken);
         self.tutorial_destroy(state, 1.0);
         // BlockStatePredictionHandler.retainKnownServerState.
+        let here = self.player_position();
         if let Some(r) = self.remote.as_mut() {
             r.predictions
                 .entry(pos)
-                .and_modify(|p| p.0 = sequence)
-                .or_insert((sequence, state.0 as i32));
+                .and_modify(|p| p.sequence = sequence)
+                .or_insert(Prediction {
+                    sequence,
+                    state: state.0 as i32,
+                    player_pos: here,
+                });
         }
         // Block.playerWillDestroy's destroy event (particles and the break
         // sound), which BaseFireBlock skips: the server's extinguish sound
@@ -8430,11 +8538,16 @@ impl Game<'_> {
         for &(p, state) in changes {
             let pos = [p.x, p.y, p.z];
             let before = self.world.block(p.x, p.y, p.z);
+            let here = self.player_position();
             if let Some(r) = self.remote.as_mut() {
                 r.predictions
                     .entry(pos)
-                    .and_modify(|e| e.0 = seq)
-                    .or_insert((seq, before.0 as i32));
+                    .and_modify(|e| e.sequence = seq)
+                    .or_insert(Prediction {
+                        sequence: seq,
+                        state: before.0 as i32,
+                        player_pos: here,
+                    });
             }
             self.set_block(pos, state.0 as i32);
         }
@@ -9046,10 +9159,15 @@ impl Game<'_> {
         };
         let mut input = std::mem::take(&mut r.input);
         let stop = std::mem::take(&mut r.stop_mining);
+        // Minecraft.tick runs handleKeybinds only while `gui.screen() == null`: a
+        // book, a sign editor, a dialog or a prompt over the world (each a
+        // `Screen` in vanilla) stops the attack and use mappings from acting,
+        // and `KeyMapping.releaseAll` let go of the buttons when it opened
+        // (`track_toggle_screens`), so a dig held into a book ends (#9729).
         let ready = r.loaded_sent
             && self.screen == Screen::Playing
             && self.sleeping.is_none()
-            && !self.dialog_open();
+            && !self.screen_over_playing();
         // MultiPlayerGameMode.tick, first in Minecraft.tick, screen or not: the slot
         // chosen since the last tick (the wheel, the last tick's number keys, the
         // server's SetHeldSlot) goes out before anything else of this tick.
@@ -9191,6 +9309,11 @@ impl Game<'_> {
                     id: self.mobs[i].id as i32,
                 }));
                 self.pvp_attacked(self.mobs[i].id as i32, distance);
+                let (target, player) = (
+                    self.mobs[i].id,
+                    &*self.mobs[i].kind.id == "minecraft:player",
+                );
+                self.native_client_attack(target, player);
                 self.remote_player_attack(i);
                 let charge = self.attack_strength_scale();
                 self.pad_rumble(horizon_client::gamepad::Rumble::Attack(charge));
@@ -10072,13 +10195,20 @@ impl Game<'_> {
         self.send(S::ClientCommand(play::ClientCommand { action: 0 }));
     }
 
+    /// A connection's screen is over the world: connecting, reconfiguring, or
+    /// the level loading screen, a portal's included (`remote_overlay`).
+    pub(super) fn remote_screen_up(&self) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|r| self.player.is_none() || r.level_load.is_active())
+    }
     /// Connecting / loading screens; true when it covered the frame.
     pub(super) fn remote_overlay(&mut self, batch: &mut HudBatch) -> bool {
-        let Some(r) = &self.remote else { return false };
-        let loading = r.level_load.is_active();
-        if self.player.is_some() && !loading {
+        if !self.remote_screen_up() {
             return false;
         }
+        let Some(r) = &self.remote else { return false };
+        let loading = r.level_load.is_active();
         let (w, h) = (batch.width, batch.height);
         if let Some(since) = r.reconfiguring {
             // ServerReconfigScreen narrates its title.
@@ -11119,6 +11249,45 @@ fn hold_server_fire(fire_ticks: i32, server_on_fire: bool) -> i32 {
     }
 }
 
+/// `BlockStatePredictionHandler.ServerVerifiedState`: the sequence of the action
+/// that last changed the block, the state the server last said it has, and where
+/// the player stood when this client first predicted a change there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Prediction {
+    pub sequence: i32,
+    pub state: i32,
+    pub player_pos: [f64; 3],
+}
+
+/// `Entity.isColliding`: whether the collision `shape` of a block at `pos`
+/// meets `entity`'s box. Shapes are block-local, so they move onto the block
+/// first (`VoxelShape.move`), and any box that overlaps is a collision
+/// (`Shapes.joinIsNotEmpty` with `BooleanOp.AND`).
+pub(super) fn shape_meets(
+    shape: &horizon_core::geometry::VoxelShape,
+    pos: [i32; 3],
+    entity: horizon_core::geometry::Aabb,
+) -> bool {
+    let at = Vec3::new(f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]));
+    shape
+        .boxes()
+        .iter()
+        .any(|b| b.move_by(at).intersects(entity))
+}
+
+/// `ClientLevel.syncBlockState`'s snap: a restored block that meets the player
+/// sends it back to the position the prediction remembered, unless the player
+/// was teleported after that prediction was made
+/// (`lastTeleportSequence < sequence`: the remembered position is stale).
+pub(super) fn snap_target(
+    recorded: [f64; 3],
+    last_teleport_sequence: i32,
+    sequence: i32,
+    meets: bool,
+) -> Option<[f64; 3]> {
+    (meets && last_teleport_sequence < sequence).then_some(recorded)
+}
+
 /// [`Remote::has_level`]: logged in (a Login arrived) and no reconfiguration
 /// since (`reconfiguring` is set by StartConfiguration, cleared by the next
 /// Login).
@@ -11130,8 +11299,8 @@ fn client_has_level(logged_in: bool, reconfiguring: Option<u64>) -> bool {
 mod tests {
     use super::{
         boat_interact_passes, client_has_level, hold_server_fire, item_frame_interact_passes,
-        keep_client_state, open_hash_order, remote_object_swings, remote_use_swings,
-        synced_local_use,
+        keep_client_state, open_hash_order, remote_object_swings, remote_use_swings, shape_meets,
+        snap_target, synced_local_use,
     };
 
     /// The vanilla 26.3 client's ServerboundContainerClickPacket for a shift-click from hotbar slot 37
@@ -11316,30 +11485,49 @@ mod tests {
         assert!(!remote_object_swings(Some(false), false));
     }
 
-    /// The packet riding graph must retain invisible intermediary entities. A custom
-    /// sit plugin can use an area-effect cloud, whose server position stops updating
-    /// while it rides a player, with a player or marker stand as its own passenger.
+    /// The local player's attacker for `native_client_hurt`: the cause the
+    /// server named, a player only when this client knows it as one.
+    #[test]
+    fn own_hurt_names_the_cause_and_whether_it_is_a_player() {
+        let known = |id: u32| match id {
+            7 => Some(true),
+            9 => Some(false),
+            _ => None,
+        };
+        assert_eq!(super::own_hurt_attacker(Some(7), known), (Some(7), true));
+        assert_eq!(super::own_hurt_attacker(Some(9), known), (Some(9), false));
+        // Out of this client's tracking range: named, not a player.
+        assert_eq!(super::own_hurt_attacker(Some(40), known), (Some(40), false));
+        // Fall damage, lava, a cactus: no cause.
+        assert_eq!(super::own_hurt_attacker(None, known), (None, false));
+        assert_eq!(super::own_hurt_attacker(Some(-1), known), (None, false));
+    }
+
+    /// A mod's pre-filled chat opens only over the world, with its text
+    /// typed in and nothing sent.
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
-    fn plugin_player_stack_follows_network_moves_and_local_carriers() {
+    fn mod_open_chat_fills_the_box_only_over_the_world() {
         use super::super::{
-            Audio, Game, Options, Progress, Settings, execution_role::ExecutionRole, load_resources,
+            Audio, Game, Options, Progress, Screen, Settings, execution_role::ExecutionRole,
+            load_resources,
         };
-        use super::*;
-        use horizon_client::{motion::PlayerMotion, sprint::Keys};
-        use horizon_protocol::packets::play;
-        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
+        );
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            Instant::now(),
+            std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
-            &mut |_, _| unreachable!(),
+            &mut |_, _| unreachable!("no menu handoff"),
         )
         .unwrap();
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
@@ -11355,88 +11543,28 @@ mod tests {
             None,
         )
         .unwrap();
-        let (client, _server) = horizon_protocol::connection::Pipe::pair();
-        game.connect_local(client, "SeatTest").unwrap();
-        game.remote.as_mut().unwrap().entity_id = 7;
-        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
-        game.spawn_entity(40, "minecraft:player", [2.0, 64.0, 3.0], [0.0; 3]);
-        game.spawn_entity(41, "minecraft:player", [0.0, 64.0, 0.0], [0.0; 3]);
-        game.spawn_entity(42, "minecraft:area_effect_cloud", [0.0; 3], [0.0; 3]);
-        let set = |g: &mut Game<'_>, vehicle, passengers: Vec<i32>| {
-            g.handle_packet(C::SetPassengers(play::SetPassengers {
-                vehicle,
-                passengers,
-            }))
-            .unwrap();
-        };
-        set(&mut game, 40, vec![42]);
-        set(&mut game, 42, vec![7, 41]);
-        let close = |at: Vec3, x: f64, y: f64, z: f64| {
-            assert!(
-                (at.x - x).abs() < 1e-5 && (at.y - y).abs() < 1e-5 && (at.z - z).abs() < 1e-5,
-                "position {at:?}, expected [{x}, {y}, {z}]"
-            );
-        };
-        assert!(game.remote_ride(Keys::default(), 0).unwrap());
-        close(game.player.as_ref().unwrap().position, 2.0, 65.7, 3.0);
-        close(
-            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
-            2.0,
-            65.7,
-            3.0,
+
+        // No player: the title screen.
+        game.player = None;
+        assert!(game.native_open_chat("/tp ").is_err());
+        assert!(game.ui.chat_screen.is_none());
+        game.player = Some(
+            horizon_client::motion::PlayerMotion::new(
+                game.motion,
+                horizon_core::geometry::Vec3::ZERO,
+            )
+            .unwrap(),
         );
-        game.handle_packet(C::EntityPositionSync(play::EntityPositionSync {
-            id: 40,
-            path: play::PositionPath::Linear([12.0, 67.0, -4.0]),
-            yaw: 45.0,
-            pitch: 0.0,
-            on_ground: true,
-        }))
-        .unwrap();
-        for _ in 0..4 {
-            game.tick_remote_entities(true);
-            game.remote_ride(Keys::default(), 0).unwrap();
-        }
-        close(game.player.as_ref().unwrap().position, 12.0, 68.7, -4.0);
-        close(
-            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
-            12.0,
-            68.7,
-            -4.0,
-        );
-        // The intermediary's packet position must remain unchanged for relative decoding.
-        assert_eq!(
-            game.remote.as_ref().unwrap().tracked(42).unwrap().1,
-            [0.0; 3]
-        );
-        // A remote player riding the local player must follow our own movement too.
-        set(&mut game, 42, vec![41]);
-        set(&mut game, 7, vec![42]);
-        game.player.as_mut().unwrap().position = Vec3::new(20.0, 70.0, 25.0);
-        game.position_riders();
-        close(
-            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
-            20.0,
-            71.7,
-            25.0,
-        );
-        // A direct stack has no intermediary's 0.5-height offset.
-        set(&mut game, 40, vec![7, 41]);
-        game.remote_ride(Keys::default(), 0).unwrap();
-        close(game.player.as_ref().unwrap().position, 12.0, 68.2, -4.0);
-        close(
-            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
-            12.0,
-            68.2,
-            -4.0,
-        );
-        // Removing the carrier detaches passengers even without a final empty packet.
-        game.remove_entity(40);
-        assert_eq!(game.riding, None);
-        assert_eq!(
-            game.mobs.iter().find(|m| m.id == 41).unwrap().extra.mount,
-            None
-        );
+        game.screen = Screen::Paused;
+        assert!(game.native_open_chat("/tp ").is_err());
+        assert!(game.ui.chat_screen.is_none());
+        game.screen = Screen::Playing;
+        assert!(game.native_open_chat("/tp ").is_ok());
+        assert!(game.screen == Screen::Chat);
+        assert_eq!(game.ui.chat_screen.as_ref().unwrap().input.value, "/tp ");
+        // The chat is a screen too: a second call doesn't replace what's typed.
+        assert!(game.native_open_chat("hello").is_err());
+        assert_eq!(game.ui.chat_screen.as_ref().unwrap().input.value, "/tp ");
     }
 
     /// A mod's chat goes out only from a joined player, and only what the
@@ -11495,6 +11623,41 @@ mod tests {
         assert!(game.native_send_chat("/warp spawn").is_ok());
         game.settings.chat_visibility = 2;
         assert!(game.native_send_chat("/warp spawn").is_err());
+    }
+
+    /// `Entity.isColliding` and the snap `ClientLevel.syncBlockState` makes: a
+    /// block the server puts back where the player stands sends it to the
+    /// position the prediction remembered, and a block that comes back clear of
+    /// the player, an empty one, or one the player has been teleported since
+    /// leaves it where it is.
+    #[test]
+    fn a_block_the_server_puts_back_snaps_the_player_out_of_it() {
+        use horizon_core::geometry::{Aabb, Vec3, VoxelShape};
+        // A player standing in block (0, 64, 0): 0.6 wide, 1.8 tall.
+        let player = Aabb::new(Vec3::new(0.2, 64.0, 0.2), Vec3::new(0.8, 65.8, 0.8));
+        let cube = VoxelShape::block();
+        assert!(
+            shape_meets(&cube, [0, 64, 0], player),
+            "the block the player is standing in"
+        );
+        assert!(!shape_meets(&cube, [0, 66, 0], player), "above its head");
+        assert!(
+            !shape_meets(&cube, [1, 64, 0], player),
+            "the block beside it"
+        );
+        assert!(!shape_meets(&VoxelShape::empty(), [0, 64, 0], player));
+
+        // The snap itself: the remembered position, unless a teleport came after
+        // the prediction (`lastTeleportSequence < sequence`).
+        let at = [0.5, 64.0, 0.5];
+        assert_eq!(snap_target(at, -1, 3, true), Some(at));
+        assert_eq!(snap_target(at, -1, 3, false), None, "a block it clears");
+        assert_eq!(snap_target(at, 3, 3, true), None, "teleported at 3");
+        assert_eq!(
+            snap_target(at, 2, 3, true),
+            Some(at),
+            "teleported before it"
+        );
     }
 
     /// `MultiPlayerGameMode.useItem`'s `shouldSwing`: the SUCCESS answers
@@ -12475,4 +12638,127 @@ mod tests {
         assert_eq!(crafting.event, 12);
         assert!(crafting.param == 1.0);
     }
+    /// The packet riding graph must retain invisible intermediary entities. A custom
+    /// sit plugin can use an area-effect cloud, whose server position stops updating
+    /// while it rides a player, with a player or marker stand as its own passenger.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn plugin_player_stack_follows_network_moves_and_local_carriers() {
+        use super::super::{
+            Audio, Game, Options, Progress, Settings, execution_role::ExecutionRole, load_resources,
+        };
+        use super::*;
+        use horizon_client::{motion::PlayerMotion, sprint::Keys};
+        use horizon_protocol::packets::play;
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = ExecutionRole::Client;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        let (client, _server) = horizon_protocol::connection::Pipe::pair();
+        game.connect_local(client, "SeatTest").unwrap();
+        game.remote.as_mut().unwrap().entity_id = 7;
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+        game.spawn_entity(40, "minecraft:player", [2.0, 64.0, 3.0], [0.0; 3]);
+        game.spawn_entity(41, "minecraft:player", [0.0, 64.0, 0.0], [0.0; 3]);
+        game.spawn_entity(42, "minecraft:area_effect_cloud", [0.0; 3], [0.0; 3]);
+        let set = |g: &mut Game<'_>, vehicle, passengers: Vec<i32>| {
+            g.handle_packet(C::SetPassengers(play::SetPassengers {
+                vehicle,
+                passengers,
+            }))
+            .unwrap();
+        };
+        set(&mut game, 40, vec![42]);
+        set(&mut game, 42, vec![7, 41]);
+        let close = |at: Vec3, x: f64, y: f64, z: f64| {
+            assert!(
+                (at.x - x).abs() < 1e-5 && (at.y - y).abs() < 1e-5 && (at.z - z).abs() < 1e-5,
+                "position {at:?}, expected [{x}, {y}, {z}]"
+            );
+        };
+        assert!(game.remote_ride(Keys::default(), 0).unwrap());
+        close(game.player.as_ref().unwrap().position, 2.0, 65.7, 3.0);
+        close(
+            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
+            2.0,
+            65.7,
+            3.0,
+        );
+        game.handle_packet(C::EntityPositionSync(play::EntityPositionSync {
+            id: 40,
+            path: play::PositionPath::Linear([12.0, 67.0, -4.0]),
+            yaw: 45.0,
+            pitch: 0.0,
+            on_ground: true,
+        }))
+        .unwrap();
+        for _ in 0..4 {
+            game.tick_remote_entities(true);
+            game.remote_ride(Keys::default(), 0).unwrap();
+        }
+        close(game.player.as_ref().unwrap().position, 12.0, 68.7, -4.0);
+        close(
+            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
+            12.0,
+            68.7,
+            -4.0,
+        );
+        // The intermediary's packet position must remain unchanged for relative decoding.
+        assert_eq!(
+            game.remote.as_ref().unwrap().tracked(42).unwrap().1,
+            [0.0; 3]
+        );
+        // A remote player riding the local player must follow our own movement too.
+        set(&mut game, 42, vec![41]);
+        set(&mut game, 7, vec![42]);
+        game.player.as_mut().unwrap().position = Vec3::new(20.0, 70.0, 25.0);
+        game.position_riders();
+        close(
+            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
+            20.0,
+            71.7,
+            25.0,
+        );
+        // A direct stack has no intermediary's 0.5-height offset.
+        set(&mut game, 40, vec![7, 41]);
+        game.remote_ride(Keys::default(), 0).unwrap();
+        close(game.player.as_ref().unwrap().position, 12.0, 68.2, -4.0);
+        close(
+            game.mobs.iter().find(|m| m.id == 41).unwrap().position,
+            12.0,
+            68.2,
+            -4.0,
+        );
+        // Removing the carrier detaches passengers even without a final empty packet.
+        game.remove_entity(40);
+        assert_eq!(game.riding, None);
+        assert_eq!(
+            game.mobs.iter().find(|m| m.id == 41).unwrap().extra.mount,
+            None
+        );
+    }
+
 }

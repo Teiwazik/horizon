@@ -115,21 +115,10 @@ impl NativePack {
             .shadow
             .as_ref()
             .and_then(|s| chosen_shadow(s, &report.manifest.options, constants));
-        let mut frame = NativeFrame::new(
-            device,
-            chosen.as_ref(),
-            materials,
-            textures,
-            lights,
-            terrain.pbr,
-            option_on(
-                constants,
-                report
-                    .manifest
-                    .rays
-                    .as_ref()
-                    .and_then(|r| r.option.as_ref()),
-            ),
+        let settings = chosen.as_ref().map(|v| super::native_shadow::fitted(device, v));
+        let api = report.manifest.api;
+        let rays = report.manifest.rays.is_some() && option_on(constants, report.manifest.rays.as_ref().and_then(|r|r.option.as_ref()));
+        let mut frame = NativeFrame::with_rt(device, settings.as_ref(), materials, textures, lights, terrain.pbr, api, rays,
         );
         // `[displacement]`, unless its option is off; nothing to displace without heights.
         let displacement = report
@@ -268,17 +257,11 @@ impl NativePack {
             })
             .transpose()?;
         mark("material", &mut marks);
-        let post = (!post.is_empty())
+        let tonemap = others.iter().find(|s|s.kind == StageKind::Tonemap);
+        let post = (!post.is_empty() || api == horizon_shader_api::Api::V0_2)
             .then(|| {
-                NativePost::new(
-                    device,
-                    post,
-                    &report.manifest,
-                    constants,
-                    format,
-                    &frame,
-                    Some((terrain.globals, terrain.sprites)),
-                )
+                NativePost::new_with_rt(device, post, &report.manifest, constants, format, &frame,
+                    tonemap, Some((terrain.globals, terrain.sprites)))
             })
             .transpose()?;
         mark("post", &mut marks);

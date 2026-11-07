@@ -142,8 +142,6 @@ pub struct Guest {
     pub input: u8,
     /// The boat or minecart the player rides (`Entity.getVehicle`).
     pub vehicle: Option<u32>,
-    /// `Entity.boardingCooldown`: ticks before it may board a vehicle again.
-    pub boarding_cooldown: i32,
     /// When the player last got into its vehicle, from `Hub.seat_order`:
     /// `Entity.addPassenger` seats a rider behind the players already in the
     /// vehicle, so the smallest order on a boat is its controlling rider
@@ -283,6 +281,9 @@ pub struct Guest {
     /// The 36 inventory slots (hotbar first), armor (head..feet) and off hand.
     pub inventory: Vec<Option<ItemStack>>,
     pub armor: [Option<ItemStack>; 4],
+    /// Armor as of this player's last `collectEquipmentChanges` look; swapped
+    /// with `armor` so each player compares against their own snapshot.
+    pub location_armor: [Option<ItemStack>; 4],
     pub offhand: Option<ItemStack>,
     pub selected: usize,
     pub carried: Option<ItemStack>,
@@ -473,7 +474,6 @@ impl Guest {
             sneaking: false,
             input: 0,
             vehicle: None,
-            boarding_cooldown: 0,
             vehicle_order: 0,
             vehicle_good: None,
             sprinting: false,
@@ -533,6 +533,7 @@ impl Guest {
             logs_kept: None,
             inventory: vec![None; 36],
             armor: [None, None, None, None],
+            location_armor: [None, None, None, None],
             offhand: None,
             selected: 0,
             carried: None,

@@ -545,9 +545,10 @@ file in a version that matches, and builds in exactly that version. The crates t
 `crates/horizon-mod-deps/Cargo.toml` (optional dependencies, with the features mods may turn on; nothing builds them):
 `mysql` 27 (blocking MariaDB/MySQL client, `minimal-rust` + `rustls-tls-ring` + `chrono`, no default features), `redis` 1
 (blocking, no default features), `tungstenite` 0.30 (websocket over a stream the mod opens, no default features),
-`rusty-opus` 1 (Opus encoder and decoder), `rusqlite` 0.41 (SQLite, `bundled` + `cache`, no default features; builds
-SQLite's C source), `yaml-rust2` 0.13 (YAML 1.2 reader and writer, no default features, so UTF-8 input only), `gif` 0.14
-and `snap` 1 (Snappy). A feature of theirs that turns on a dependency not listed there is refused.
+`rusty-opus` 1 (Opus encoder and decoder), `quinn` 0.11 (QUIC on tokio, features `runtime-tokio` + `rustls-ring`, no
+default features), `rusqlite` 0.41 (SQLite, `bundled` + `cache`, no default features; builds SQLite's C source),
+`yaml-rust2` 0.13 (YAML 1.2 reader and writer, no default features, so UTF-8 input only), `gif` 0.14 and `snap` 1
+(Snappy). A feature of theirs that turns on a dependency not listed there is refused.
 The lock file is the allow list: horizon-mixins
 refuses a crate the lock lacks (`E_CRATE_DEPENDENCY`) and writes the mod's crates into the staged lock without
 changing any other byte, so the game still builds with `--locked`. The launcher checks it again (every downloaded
@@ -2182,6 +2183,13 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   `number`, `boolean`, `player`, `item`, `block_pos`. The usages of one command merge into one tree, which every
   player receives after vanilla's (filtered by their level, as vanilla's is), so their chat box completes and colours
   it. A name vanilla has, or a usage that doesn't parse, is left out with a warning in the log.
+- **`native_refresh_commands()`** (`host.refresh_commands()` for trait mods, API @API:refresh_commands@): a helper for
+  a mod whose commands change while the server runs (a plugin host that reloads a plugin, a mod turned on at run time).
+  At the start of the next server tick every mod's `native_register_commands` is asked again, the commands players may
+  run (`native_perform_command`, with their levels) are rebuilt, and every player on the server is sent their tree
+  again, after `native_player_commands_sent`, as vanilla sends `Commands.sendCommands` to each player after `/reload`.
+  Call it after you change what you register; nothing happens where no world is open to players, and a server whose
+  mods never call it is unchanged.
 - **`native_armor_stand_manipulate(player, name, stand_id, slot, cancel)`**: a player takes an item from an armor stand or
   puts one on it, heard after the stand's disabled-slot checks and before anything moves. `slot` is `mainhand`,
   `offhand`, `feet`, `legs`, `chest` or `head`. Set `cancel` and nothing changes (the click is spent). The player's
@@ -3000,6 +3008,7 @@ None.
   `host.player_equipment`): the whole stack, components included, in a player's main hand or `EquipmentSlot`, from
   any server hook and for any player, not only the acting one (Bukkit's `getEquipment().getItemInMainHand()` and
   `getItem(slot)`). None for an empty slot and for `Body` and `Saddle`. Bundles need `"hooks": @API:player_equipment@`.
+
 #### Server hooks for plugin ports: per-player feedback
 
 What Bukkit's and Adventure's `Player` methods send one player, which plugin ports built as raw packets through
@@ -3755,6 +3764,59 @@ inventory, creative) and for a menu whose slots the client doesn't lay out (a le
 Each read is a `Host` method too (`host.entity_position(entity)`): a helper whose catalog entry names a `receiver`
 (`entity`, `level`) also becomes a method of that handle.
 
+### Entities a client sees
+
+`crates/horizon-client/src/game/native_client_services.rs`: lists for a client mod that draws the creatures, players
+and dropped items around the player, such as a radar, name tags or a spectator's entity ESP. They read the client's own copy of what
+the server shows the window, so they work the same in single player, on a LAN and on a server. Each is empty (or
+`None`) on a server. They are snapshots: call them each frame and keep what you need.
+
+- `native_client_entities()` (API 411) lists the mobs and other players the client knows, dying ones included (`alive`
+  false). The window's own player is never in it (`native_player()` gives it), nor are the ender dragon, armor stands,
+  vehicles, projectiles, displays and the other entities Horizon keeps outside its mob list. Each
+  `NativeClientEntity` has the entity's `id` (the id `native_entity(id)` takes, for its custom name and the other
+  handle reads), `position` and `previous_position`, `bounds`, `height`, `head_yaw`, `head_pitch`, `alive`,
+  `invisible` (the flag or the effect), and for a player its `player_uuid` and `player_name`. From API
+  @API:client_entity_list@ it also has:
+
+  | Field | What it is |
+  |---|---|
+  | `kind` | The entity type, `minecraft:zombie`. |
+  | `yaw` | `Entity.getYRot` in degrees, 0 facing south, 90 west. |
+  | `baby` | `isBaby`. |
+  | `spectator` | A player in spectator mode, whom vanilla draws only to spectators. |
+  | `texture` | The texture vanilla's renderer selects for its body (`EntityRenderer.getTextureLocation`): the variant's, the baby's (`entity/cow/cow_temperate_baby`), and for a player its skin (`skins/<hash>` once downloaded, else the default skin for its UUID, `entity/player/slim/efe`). A pack's random textures and custom entity models are not followed. |
+
+  `entity.position_at(state.world_partial_tick)` (with `native_client_state()`) is where the frame draws it,
+  `Entity.getPosition(partialTick)`.
+- `native_client_items()` (API @API:client_entity_list@) lists the dropped items the client shows, as
+  `NativeClientItem`: `id`, `stack`, `position`, `previous_position` and `position_at`. `native_item_entities` stays
+  server-only.
+- `native_client_texture(name)` (API @API:client_entity_list@) gives a texture's pixels as `TexturePixels` by the name
+  `texture` or `NativeClientProfile::skin` gives: a downloaded skin while the client holds it in memory (64x64), else
+  `native_client_resources().texture(name)` ([Block states and resource files](#block-states-and-resource-files)), the
+  resource packs' texture of that name. It decodes on each call, so cache the result by name, and clear the cache in
+  `native_client_resources_reloaded`: other packs can change the pixels under a name. It is `None` for a texture it
+  can't read and for a skin still downloading: ask again later.
+- A player's skin by UUID: for a player in the level, find it in `native_client_entities()` by `player_uuid` and read
+  its `texture`. `native_client_profiles()` (API 411) covers the player list instead, in the level or not: each
+  entry's `uuid`, `name` and `skin` (the default one until the download is ready). `native_client_texture(name)` gives
+  either's pixels.
+
+A loop over them, from a mixin helper bound to the game:
+
+```rust
+let (Some(state), Some(me)) = (game.native_client_state(), game.native_player()) else { return };
+for e in game.native_client_entities().iter().filter(|e| e.alive && !e.invisible && !e.spectator) {
+    let [x, _, z] = e.position_at(state.world_partial_tick);
+    let face = e.texture.as_deref().and_then(|t| game.native_client_texture(t)); // cache it by name
+    // draw at (x - me.x, z - me.z)
+}
+for item in game.native_client_items() {
+    let [x, _, z] = item.position_at(state.world_partial_tick);
+}
+```
+
 ### Mobs drawn by a mod
 
 `crates/horizon-client/src/game/native_mob_draw.rs`: `native_mob_submit(mob, draw, drawn)` (client) is asked once a frame for
@@ -3894,6 +3956,34 @@ give it what Horizon's own rows use, without reading `Game`'s fields:
 
 Bundles need `"hooks": @API:health_hud_state@`.
 
+### What a client HUD reads
+
+A minimap, a coordinates line or a waypoint mod reads the player and the session through helpers, not `Game`'s fields.
+They answer the same on a server's client, a LAN guest and single player's window, which is a client of its own server
+thread:
+
+- `native_player()` is the player's feet this tick, their yaw and pitch as the mouse turned them this frame, and their
+  dimension. `native_camera()` is the frame's interpolated camera, and `native_clock()` the time of day.
+- `native_client_state()` (None on a server) has, besides `gui_hidden` (F1):
+  - `screen`, what covers the world: `Playing` (nothing), `Chat`, `Death` (the death screen) or `Other` (the pause
+    menu, an inventory or container, a sign, a book, a dialog or prompt, the loading screen, the title's screens). Xaero's
+    minimap draws on `Playing` and `Chat` only.
+  - `debug_screen`: F3's debug screen is showing.
+  - `world`, the world joined, for a mod's data per world: `NativeWorldId::Singleplayer(folder)` is the save's folder in
+    `saves/` (its LAN host and splitscreen seats too), `Server(address)` the address as the player joined it
+    (`mc.example.com:25565`). A friend's world is `friend:` and what its invite shows anyone, its host's addresses and
+    its relay nameplate, never the invite's secret; the host's code is new each time it shares, so this names that
+    sharing only, as a LAN world's port does. None before a world is joined. A later Horizon may add kinds, so match
+    it with a `_` arm.
+  - `sleeping_pos`: the head of the bed the player sleeps in, as the server says (`LivingEntity.getSleepingPos`); None
+    while awake. `native_block(pos)` names the bed.
+- `native_biome(pos)` is the biome at a block (`minecraft:plains`, a data pack's own), as `Level.getBiome` picks it
+  through `BiomeManager`'s zoom; None where that chunk isn't loaded.
+- `native_data_dir(mod_id)` is the mod's own folder, `horizon-mods/.horizon-mod-data/<id>/` in the instance; the helper
+  doesn't make it. Every world shares it: keep a world's files in a folder named from `world`.
+
+Bundles need `"hooks": @API:session_state@`.
+
 ### Toasts a mod hides
 
 `native_toast_add(kind, id, cancel)` (client) is NeoForge's `ToastAddEvent`: it is heard once for each new toast, just
@@ -3958,6 +4048,23 @@ NeoForge's `ClientPlayerNetworkEvent.LoggingOut`. It is told before a connection
 `native_client_level_unload`, and only when a connection ends: NeoForge's documentation says its event may also fire as
 a new integrated server is created, and Horizon's doesn't. A mod keeps its per-server state between the two: caches, a
 handshake with its server half, a welcome message. Bundles need `"hooks": @API:client_player_network_logging_in@`.
+
+### The local player's combat, on the client
+
+API @API:client_combat@, `crates/horizon-client/src/game/native_hooks.rs`: what the window sees of its own player's
+fights, on any server (a vanilla one, a plugin server, single player's own thread). The server hooks
+(`native_attack_entity`, `native_living_incoming_damage`) run only where Horizon is the server, so a client mod such as
+a battle-music or combat-HUD mod listens to these instead.
+
+- `native_client_attack(target, player)`: the local player attacked entity `target`, right after the attack packet left
+  (`MultiPlayerGameMode.attack`, the same point vanilla swings the arm). `player` is whether `target` is another
+  player. Whether the hit lands is the server's to say: a hit that lands comes back as that entity's hurt animation.
+- `native_client_hurt(attacker, player)`: the server says the local player was hurt (`ClientboundDamageEventPacket`,
+  the packet that tilts the camera and plays the hurt sound). `attacker` is the entity that caused it when the server
+  names one (the shooter of an arrow, not the arrow; none for falling, lava or a cactus), `player` whether this client
+  knows it as a player. An attacker out of this client's tracking range is still named, as not a player.
+
+Both are only told: nothing to answer or cancel. Client only. Bundles need `"hooks": @API:client_combat@`.
 
 ### Sounds a client mod plays
 
@@ -4195,6 +4302,19 @@ state (not connected, not joined yet or being reconfigured), when the trimmed me
 blocks it: Commands Only blocks chat, Hidden blocks chat and commands. The server's own spam limits apply as they do to
 typed chat. Bundles need `"hooks": 404`.
 
+`native_open_chat(text)` (API @API:open_chat@, same file) opens the chat screen with `text` typed in and the cursor at
+its end, as T and / open it: a command macro can fill in `/tp ` for the player to finish. Nothing is sent: the player
+edits and sends it, or presses Escape, and it goes into the chat history then like anything typed. The box keeps its
+256-character limit and its character filter. It is an error with no player in a world, and while another screen
+(the chat itself included) is open. Bundles need `"hooks": @API:open_chat@`.
+
+While the chat is open, `native_chat_input()` (API @API:chat_input@, `crates/horizon-client/src/game/chat.rs`) gives its
+text and cursor (counted in characters), `None` when it's closed, and `native_set_chat_input(text, cursor)` replaces
+them, as an edit: completions refresh as they do for typing, so a mod that turns `:smile:` into an emoji as it's typed
+runs from `native_screen_char_typed_pre` and writes the result back. The cursor is clamped to the text. Only what typing
+lets in reaches the box (no control characters, DEL or section sign), within its 256-character limit. Writing is an
+error while the chat isn't open. Bundles need `"hooks": @API:chat_input@`.
+
 ### Packets a client mod sends
 
 API 409, `crates/horizon-client/src/game/native_net.rs`: `native_send_packet(packet)` sends one
@@ -4206,6 +4326,15 @@ so a packet that needs a sequence number, a signature or the client's own state 
 chat) is the mod's to get right. It is an error when the player isn't in a server's play state (not connected, not
 joined yet or being reconfigured), and for a custom payload over the limit. Mod messages between the halves of one
 Horizon mod stay with `native_net_send_to_server`. Bundles need `"hooks": 409`.
+
+### Screenshots a client mod takes
+
+API @API:take_screenshot@, `crates/horizon-client/src/game/native_client_services.rs`: `native_take_screenshot()` takes a
+screenshot as F2 does (`ScreenShot.grab`): of the next frame, at the game's resolution times Screenshot Quality, into
+`screenshots/` with vanilla's file name, with the same "Saved screenshot as" line in chat. It returns the path (a string) of the file it will
+write, which exists once that frame is drawn. It is an error without a window to draw (a server, an offscreen run with
+no renderer), and while another screenshot waits for the frame (F2's, an agent's or the world icon's): call it again
+next frame. A timed or repeated screenshot mod calls it from its tick. Bundles need `"hooks": @API:take_screenshot@`.
 
 ### Server menus
 
@@ -4331,6 +4460,48 @@ as the terrain samples them. API 380.
   layers, and the arrays are new): ask again then.
 
 Look blocks up once and keep what you need (a few words a block for your own shader), not every frame.
+
+### Block states and resource files
+
+`crates/horizon-client/src/game/native_block_sprites.rs`, `horizon_client::block_states` and
+`horizon_client::client_resources`: for a client mod working out what every block looks like (a map's colours, a
+voxel renderer's table) or reading textures, on a thread of its own. `native_block_states()` returns a copy to keep,
+and `native_client_resources()` a handle that reads the files on disk at each call. Both are cheap to clone, `Send` and
+`Sync`: fetch them on the game's thread, then use them anywhere. Both follow the resources loaded at the time, so ask
+again when `native_block_sprites_version()` changes (`native_client_resources_reloaded` hears the same reloads, but not
+the first load). A reload rebuilds the tree's files in place, so while it runs a read can miss a file or get the new
+pack's before the version changes: read again after it does.
+
+- `native_block_states()` (`BlockStates`) holds every block state by its id (`BlockStateId`, as the world stores
+  blocks): `len()`, `get(id)` and `iter()` give each state's `BlockStateFacts`:
+  - `name`: its block, without properties (`minecraft:grass_block`);
+  - `air`: air, cave air or void air (`BlockState.isAir`);
+  - `invisible`: no model draws it (render shape `INVISIBLE`: air, barriers, light, and water and lava, which are drawn
+    as fluids);
+  - `fluid`: `BlockState.getFluidState` (`FluidState`, whose `kind()` is a `FluidKind`), a waterlogged block's water
+    and kelp's included;
+  - `waterlogged`: its `waterlogged` property is true;
+  - `emission`: the light it gives, 0 to 15;
+  - `outline`: `BlockState.getShape`, the outline the cursor picks, as block-local `[min_x, min_y, min_z, max_x,
+    max_y, max_z]` boxes (`[0, 0, 0, 1, 0.5, 1]` for a bottom slab, none for air), without flowers' random offset;
+  - `map_color`: `MapColor.col` as `0xRRGGBB`, its colour on a vanilla map, none for `MapColor.NONE`;
+  - `collides`: whether it can collide at all (false for a state whose collision shape is always empty: flowers,
+    water). `native_block_collision(pos)` gives a placed block's boxes.
+
+  `sprites(id)` says what the state's model draws on each side, as `native_block_sprites` does for a block by name,
+  and `texture(sprite)` names the texture behind any of its sprites (`block/grass_block_top`: vanilla's without their
+  namespace, a mod's with it), the name `native_texture_sprites` and `native_draw_cube` take.
+- `native_client_resources()` (`ClientResources`) reads the resources the game loaded as one tree: vanilla's, with the
+  resource packs turned on (a higher pack over a lower one) and the content mods' files over it. `read(path)` gives a
+  file's bytes by its path in the tree (`assets/minecraft/textures/entity/cow/cow_temperate.png`, a texture's
+  `.png.mcmeta`), only for plain names under `assets/`; `texture(name)` the decoded pixels of a texture by name
+  (`block/stone`, `entity/cow/cow_temperate`, `mymod:item/gear`), as `TexturePixels`: `width` by `height` RGBA, rows
+  top first, as its PNG stores them. An animated texture is its frames one under another. Both are none for a file
+  that isn't there.
+
+A face's colour on a map, say: `states.sprites(id)` for its top, `states.texture(face.sprite)` for its name, and
+`resources.texture(name)` for its pixels, averaged as the mod likes. Many states share a texture: decode each one
+once.
 
 ### Menu extra data
 

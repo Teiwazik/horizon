@@ -2605,6 +2605,24 @@ impl Game<'_> {
     pub(super) fn native_level_tick_post(&mut self, dimension: &str) {
         mod_api::dispatch_level_tick_post(self, mod_api::mods(), dimension);
     }
+    /// The local player attacked an entity, right after the attack left for
+    /// the server (`MultiPlayerGameMode.attack`): `target` is the entity's id,
+    /// `player` whether it is another player. The window's own view, on any
+    /// server, a vanilla one or single player's own thread: a client mod
+    /// hears its player's attacks where the server's `native_attack_entity`
+    /// doesn't run. Whether the hit lands is the server's to say. Client only.
+    /// API @API:client_combat@.
+    pub(super) fn native_client_attack(&mut self, target: u32, player: bool) {
+        mod_api::dispatch_client_attack(self, mod_api::mods(), target, player);
+    }
+    /// The server says the local player was hurt
+    /// (`ClientboundDamageEventPacket`, the packet that tilts the camera):
+    /// `attacker` is the entity that caused it when the server names one (the
+    /// shooter of an arrow, not the arrow), `player` whether that is another
+    /// player. Client only. API @API:client_combat@.
+    pub(super) fn native_client_hurt(&mut self, attacker: Option<u32>, player: bool) {
+        mod_api::dispatch_client_hurt(self, mod_api::mods(), attacker, player);
+    }
     /// A client tick of the window starts (NeoForge's `ClientTickEvent.Pre`,
     /// at the top of `Minecraft.tick`), before any of its work. The window
     /// ticks 20 times a second on the title screen, while paused and in a
@@ -2672,6 +2690,36 @@ impl Game<'_> {
     /// the layer (`RenderGuiLayerEvent.Post`). API 139.
     pub(super) fn native_gui_layer_post(&mut self, layer: &str, batch: &mut HudBatch) {
         mod_api::dispatch_gui_layer_post(self, mod_api::mods(), layer, batch);
+    }
+    /// A player right-clicks the entity `entity` (`Entity.getId`) of type
+    /// `kind` with `self.hand`, holding `stack`, at `location`: the point
+    /// clicked, measured from the entity's position (`EntityHitResult
+    /// .getLocation()` less `Entity.position()`, the interact packet's
+    /// `location`), as NeoForge's `PlayerInteractEvent.EntityInteractSpecific`.
+    /// It comes first where `Player.interactOn` starts, before
+    /// `native_interact_entity`, the entity's own `interact` (26.3's
+    /// `interactAt` and `interact` in one) and the item's
+    /// `interactLivingEntity`. Set `claimed` to take the click: the hand
+    /// swings and none of those runs. Asked once per hand, as vanilla tries
+    /// the main hand then the off hand. Server-side, for every player of the
+    /// world (the helpers read the acting one). API @API:entity_interact_specific@.
+    pub(super) fn native_entity_interact_specific(
+        &mut self,
+        entity: i32,
+        kind: &str,
+        stack: Option<&ItemStack>,
+        location: [f64; 3],
+        claimed: &mut bool,
+    ) {
+        mod_api::dispatch_entity_interact_specific(
+            self,
+            mod_api::mods(),
+            entity,
+            kind,
+            stack,
+            location,
+            claimed,
+        );
     }
     /// A player right-clicks the entity `entity` (`Entity.getId`) of type
     /// `kind` (`minecraft:cow`) with `self.hand`, holding `stack` (none in an
@@ -4290,7 +4338,8 @@ impl Game<'_> {
     /// yours. Asked once when a world opens to players (a dedicated
     /// server, a LAN host, single player's server thread); every player's
     /// chat box then completes them as vanilla's, within their level. A
-    /// name vanilla has is left out. API 8.
+    /// name vanilla has is left out. Asked again after a mod calls
+    /// `native_refresh_commands`. API 8.
     pub(super) fn native_register_commands(&mut self, commands: &mut Vec<NativeCommand>) {
         mod_api::dispatch_register_commands(self, mod_api::mods(), commands);
     }
@@ -10403,6 +10452,13 @@ impl Game<'_> {
     pub(super) fn native_max_stack_size(&self, item: &str) -> Option<u32> {
         self.res.items().get(item).map(|i| i.max_stack)
     }
+    /// The default state of the block named `block`, `minecraft:air` or
+    /// `mymod:cable` (`Block.defaultBlockState`), what `native_set_block` takes:
+    /// a machine clearing or placing a block by name. None for an unknown
+    /// block. API @API:default_state@.
+    pub(super) fn native_default_state(&self, block: &str) -> Option<BlockStateId> {
+        self.pack.assets.registry.default_state(block)
+    }
     /// The random of the server level `dimension`: vanilla's `Level.random`
     /// (`level.getRandom()`), the one its explosions, block drops and other
     /// level draws use, so a mod's draws move vanilla's later ones as a Java
@@ -10964,6 +11020,15 @@ impl Game<'_> {
         let state = self.world.block(pos[0], pos[1], pos[2]);
         self.res.facts().get(state).name.to_string()
     }
+    /// The biome at `pos` (`minecraft:plains`, a data pack's own), as
+    /// `Level.getBiome` picks it through `BiomeManager`'s zoom: on a client,
+    /// from the chunks the server sent. None where that chunk isn't loaded.
+    /// API @API:session_state@.
+    pub(super) fn native_biome(&self, pos: [i32; 3]) -> Option<String> {
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let [x, y, z] = self.streaming.biome_zoom.quart_at_block(at);
+        self.biome_name_at_block([x << 2, y << 2, z << 2])
+    }
     /// The most recently extracted world frame's camera, if one exists.
     /// During GUI rendering this is the current frame, including bob/spin and FOV.
     pub(super) fn native_camera(&self) -> Option<NativeCamera> {
@@ -11109,7 +11174,9 @@ impl Game<'_> {
     }
     /// A native mod's own folder: `horizon-mods/.horizon-mod-data/<id>/`,
     /// where the WebAssembly mod of the same id kept its storage, so a
-    /// player's settings carry over. Not created here.
+    /// player's settings carry over. Every world shares it: keep a world's
+    /// files under a folder named from `NativeClientState.world`. Not
+    /// created here. API @API:session_state@.
     pub(super) fn native_data_dir(&self, mod_id: &str) -> PathBuf {
         let mods = Self::game_dir().join(mod_list::DIR);
         mods.join(".horizon-mod-data").join(mod_id)
@@ -11144,7 +11211,9 @@ impl Game<'_> {
     /// 8192), as the game's own slots in pages, with a search box; the
     /// player's clicks, searches and keys over items come back as
     /// `native_panel_event`. The panel is the last mod's to show one; empty
-    /// items and no recipe page take yours away.
+    /// items and no recipe page take yours away, except that an empty reply
+    /// to a non-empty Search keeps its field editable. A clear outside that
+    /// event still removes the panel (as when a viewer closes).
     pub(super) fn native_panel_items(&mut self, mod_id: &str, items: Vec<NativeStack>) {
         self.panel.show_items(mod_id, items);
     }

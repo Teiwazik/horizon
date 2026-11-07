@@ -2336,6 +2336,9 @@ impl Game<'_> {
                         host = self.lan.take().expect("the hub is back after the commands");
                     }
                 }
+                HostEvent::Jump { conn, from, yaw } => {
+                    self.guest_jump(&mut host, conn, from, yaw);
+                }
             }
         }
         note_event(&host, previous, &mut timings);
@@ -2615,13 +2618,7 @@ impl Game<'_> {
             let mut states = std::mem::take(&mut host.states);
             if has_guests {
                 self.lan_assign_ids();
-                let guests: Vec<(u32, i32)> = host
-                    .hub
-                    .guests
-                    .iter()
-                    .filter_map(|g| Some((g.vehicle?, g.entity_id)))
-                    .collect();
-                self.lan_riding(&guests, &mut host.hub.riding);
+                self.lan_riding(&host.hub.guests, &mut host.hub.riding);
                 // Idle states are kept only when the players' moves are in:
                 // the clients that could pair are known. The range scale is
                 // the one the tracker gets below.
@@ -3414,6 +3411,7 @@ fn event_kind(event: &HostEvent) -> EventKind {
         HostEvent::Joined(c) => ("join", Some(*c), None),
         HostEvent::Left(g) => ("leave", None, Some(g.name.clone())),
         HostEvent::Packet(c, p) => (p.name(), Some(*c), None),
+        HostEvent::Jump { conn, .. } => ("jump", Some(*conn), None),
         HostEvent::MainHandChanged(c, _) => ("main hand", Some(*c), None),
         HostEvent::LocaleChanged(c, _) => ("locale", Some(*c), None),
         HostEvent::PlayerLoaded(c) => ("loaded", Some(*c), None),

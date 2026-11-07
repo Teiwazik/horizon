@@ -181,6 +181,7 @@ mod lod;
 mod native_material;
 mod native_pack;
 mod native_post;
+mod rt_post;
 pub mod native_render;
 mod native_rt;
 mod native_shadow;
@@ -1056,6 +1057,25 @@ pub struct ScreenshotRequest {
     /// `Renderer::screenshot_quality`, not the window's.
     pub scaled: bool,
 }
+/// A solid terrain pipeline without HDR output's lighting (terrain.wgsl's `HDR_LIGHTING`),
+/// for the frames HDR is off, and with it where the display offers HDR output: the
+/// lighting's code, even never run, slows the shader on Apple GPUs (~15% of the solid
+/// pass at Retina sizes).
+pub struct SolidPipeline {
+    plain: wgpu::RenderPipeline,
+    hdr: Option<wgpu::RenderPipeline>,
+}
+
+impl SolidPipeline {
+    /// The pipeline for a frame with HDR output on (`hdr`) or off.
+    pub fn get(&self, hdr: bool) -> &wgpu::RenderPipeline {
+        match &self.hdr {
+            Some(lit) if hdr => lit,
+            _ => &self.plain,
+        }
+    }
+}
+
 pub struct Renderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -1107,10 +1127,10 @@ pub struct Renderer {
     /// operation fails on a lost device (no error scope sees it).
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     pub config: wgpu::SurfaceConfiguration,
-    solid: wgpu::RenderPipeline,
+    solid: SolidPipeline,
     /// `solid` split in two passes for the world pass (terrain.wgsl's `opaque_quad`).
-    solid_opaque: wgpu::RenderPipeline,
-    solid_cutout: wgpu::RenderPipeline,
+    solid_opaque: SolidPipeline,
+    solid_cutout: SolidPipeline,
     translucent: wgpu::RenderPipeline,
     translucent_mark: wgpu::RenderPipeline,
     /// Flat section draws (`flat`), where multi-draw is emulated.
@@ -1421,9 +1441,12 @@ pub struct Renderer {
     hdr_output: Option<hdr::Output>,
     /// What every pipeline that draws the frame targets: the swapchain's 8-bit format, or
     /// `Rgba16Unorm` when the renderer was made with HDR output on (`wide_frame`) and the
-    /// device draws and blends into it. A 16-bit frame with HDR off since reaches the
-    /// swapchain through `readback`.
+    /// device draws and blends into it, or `LINEAR_FRAME` (`frame_format`). A 16-bit frame
+    /// with HDR off since reaches the swapchain through `readback`.
     frame_format: wgpu::TextureFormat,
+    /// Whether a pack picked or dropped since the renderer was made has been told it runs on
+    /// the frame that exists (`set_native_shader_pack`).
+    frame_kept_logged: bool,
     /// The marker file of an HDR output that has not presented a frame yet
     /// (`graphics::HDR_MARKER`).
     hdr_marker: Option<std::path::PathBuf>,
@@ -1431,10 +1454,14 @@ pub struct Renderer {
     hdr_lighting_setting: bool,
     /// The shader pack's post-processing, and the dimension (legacy id) it was loaded for.
     pack_post: Option<(i32, Option<pack_post::PackPost>)>,
+    /// A `shaders/` pack whose pipelines build on a thread of their own (`load_shader_pack`).
+    pack_loading: Option<PackLoading>,
     /// The post passes of one of Horizon's own shader packs; never beside `pack_post`'s.
     native: Option<native_pack::NativePack>,
     /// Time the shader pack's passes on the GPU (F3, or `HORIZON_SHADER_PACK_TIMING`).
     pass_timing: bool,
+    /// Least time between timed frames (`set_pass_timing_gap`).
+    pass_timing_gap: std::time::Duration,
     /// Times Horizon's own passes on the GPU, as `pass_timing` does (`own_pass_times`).
     own_timing: Option<pack_timing::PassTiming>,
     /// The entity vertices Horizon draws itself while a shader pack draws the others.
@@ -1895,9 +1922,10 @@ impl wgpu::rwh::HasDisplayHandle for WindowDisplay {
 }
 /// The backends to open a device on, each tried in turn until one gives a
 /// device. `api` is the player's choice (`GraphicsApi::with_env` applied);
-/// `os` is `std::env::consts::OS`; `wgpu_backend`: whether `WGPU_BACKEND` is set,
-/// which picks the backends itself. Auto tries DirectX 12 first on Windows ARM64,
-/// then Vulkan, based on the device-loss observed in a Windows ARM64 test. Other
+/// `os` is `std::env::consts::OS`; `arch` the machine's (`system::machine_arch`), not the
+/// build's; `wgpu_backend`: whether `WGPU_BACKEND` is set, which picks the backends itself.
+/// Auto tries DirectX 12 first on Windows ARM64, the x64 build emulated there included,
+/// then Vulkan, based on the device losses seen there (#7513). Other
 /// Windows systems try Vulkan, then DirectX 12, then OpenGL; Linux tries Vulkan then
 /// OpenGL. Each is tried when the one before has no surface, adapter or device. A native
 /// crash in the driver can't be
@@ -2020,7 +2048,13 @@ fn draws_wide_frame(features: wgpu::Features, format: wgpu::TextureFormatFeature
     features.contains(
         wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
             | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-    ) && format.allowed_usages.contains(
+    ) && draws_frame(format)
+}
+
+/// Whether a format with the adapter's `format` features takes every usage and flag the
+/// passes take of the frame.
+fn draws_frame(format: wgpu::TextureFormatFeatures) -> bool {
+    format.allowed_usages.contains(
         wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC
@@ -2030,8 +2064,14 @@ fn draws_wide_frame(features: wgpu::Features, format: wgpu::TextureFormatFeature
     )
 }
 
-/// What a renderer's frame is drawn in: `WIDE_FRAME` when it is made with HDR on and Smooth
-/// Gradients (`wide_frame`, `Graphics::wide_frame`), the surface offering HDR output
+/// The frame of a renderer made with a shader API 0.2 pack picked under
+/// `HORIZON_HDR_FRAME=float` (docs/design/hdr-linear-light.md): float, so values over 1
+/// survive from the world to the tonemap.
+const LINEAR_FRAME: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// What a renderer's frame is drawn in: `LINEAR_FRAME` for a 0.2 pack under the switch
+/// (`linear`: `(picked, the device draws it)`); else `WIDE_FRAME` when it is made with HDR on
+/// and Smooth Gradients (`wide_frame`, `Graphics::wide_frame`), the surface offering HDR output
 /// (`hdr_offered`) and the device drawing it (`draws_wide_frame`): an 8-bit frame's steps band
 /// in dark gradients, and HDR shows them. Else the swapchain's 8-bit format, as without HDR.
 fn frame_format(
@@ -2039,8 +2079,11 @@ fn frame_format(
     hdr_offered: bool,
     device_draws_it: bool,
     swapchain: wgpu::TextureFormat,
+    linear: (bool, bool),
 ) -> wgpu::TextureFormat {
-    if wide_frame && hdr_offered && device_draws_it {
+    if linear.0 && linear.1 {
+        LINEAR_FRAME
+    } else if wide_frame && hdr_offered && device_draws_it {
         WIDE_FRAME
     } else {
         swapchain.remove_srgb_suffix()
@@ -2061,7 +2104,8 @@ async fn open_device(
     for (order, allow_cpu) in device_search(
         api.with_env(),
         std::env::consts::OS,
-        std::env::consts::ARCH,
+        // The machine's: the x64 build emulated on a Windows ARM64 PC has its GPU too (#7513).
+        horizon_telemetry::system::machine_arch(),
         wgpu_backend,
     ) {
         match open_device_with(window, offscreen, &order, layers, allow_cpu).await {
@@ -2536,6 +2580,7 @@ impl Renderer {
         translucent_batching: bool,
         wide_frame: bool,
         shader_pack: bool,
+        linear_pack: bool,
     ) -> Result<Self> {
         let Opened {
             instance,
@@ -2669,7 +2714,22 @@ impl Renderer {
             adapter.get_texture_format_features(WIDE_FRAME),
         );
         crate::graphics::offer_smooth_gradients(wide_ok);
-        let frame_format = frame_format(wide_frame, hdr_output.is_some(), wide_ok, config.format);
+        let linear = (
+            linear_pack,
+            draws_frame(adapter.get_texture_format_features(LINEAR_FRAME)),
+        );
+        if linear == (true, false) {
+            log::warn!(
+                "Horizon renderer: the device can't draw a float frame; the shader API 0.2 pack runs on the 8-bit one"
+            );
+        }
+        let frame_format = frame_format(
+            wide_frame,
+            hdr_output.is_some(),
+            wide_ok,
+            config.format,
+            linear,
+        );
         if previous.is_none() {
             startup_step(format_args!("creating the pipelines"));
         }
@@ -2803,16 +2863,24 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &debug_line_attributes,
         })];
-        let pipeline_in = |layout: &wgpu::PipelineLayout,
-                           label: &str,
-                           vertex: &str,
-                           fragment: &str,
-                           buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-                           topology: wgpu::PrimitiveTopology,
-                           cull: Option<wgpu::Face>,
-                           depth_write: bool,
-                           depth_test: bool,
-                           blend: Option<wgpu::BlendState>| {
+        // The solid terrain's fragment constants without HDR output's lighting, for the
+        // frames HDR is off (`SolidPipeline`).
+        let plain_constants = [
+            sprite_constants[0],
+            sprite_constants[1],
+            ("HDR_LIGHTING", 0.0),
+        ];
+        let pipeline_with = |constants: &[(&str, f64)],
+                             layout: &wgpu::PipelineLayout,
+                             label: &str,
+                             vertex: &str,
+                             fragment: &str,
+                             buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                             topology: wgpu::PrimitiveTopology,
+                             cull: Option<wgpu::Face>,
+                             depth_write: bool,
+                             depth_test: bool,
+                             blend: Option<wgpu::BlendState>| {
             kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
@@ -2843,7 +2911,7 @@ impl Renderer {
                     module: &shader,
                     entry_point: Some(fragment),
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &sprite_constants,
+                        constants,
                         ..Default::default()
                     },
                     targets: &[Some(wgpu::ColorTargetState {
@@ -2855,6 +2923,57 @@ impl Renderer {
                 multiview_mask: None,
                 cache: None,
             })
+        };
+        let pipeline_in = |layout: &wgpu::PipelineLayout,
+                           label: &str,
+                           vertex: &str,
+                           fragment: &str,
+                           buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                           topology: wgpu::PrimitiveTopology,
+                           cull: Option<wgpu::Face>,
+                           depth_write: bool,
+                           depth_test: bool,
+                           blend: Option<wgpu::BlendState>| {
+            pipeline_with(
+                &sprite_constants,
+                layout,
+                label,
+                vertex,
+                fragment,
+                buffers,
+                topology,
+                cull,
+                depth_write,
+                depth_test,
+                blend,
+            )
+        };
+        // A solid terrain pipeline (back faces culled, depth written, no blend) without HDR
+        // output's lighting, and with it where the display offers HDR output.
+        let solid_in = |layout: &wgpu::PipelineLayout,
+                        label: &str,
+                        vertex: &str,
+                        fragment: &str,
+                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
+            let build = |constants: &[(&str, f64)]| {
+                pipeline_with(
+                    constants,
+                    layout,
+                    label,
+                    vertex,
+                    fragment,
+                    buffers,
+                    wgpu::PrimitiveTopology::TriangleList,
+                    Some(wgpu::Face::Back),
+                    true,
+                    true,
+                    None,
+                )
+            };
+            SolidPipeline {
+                plain: build(&plain_constants),
+                hdr: hdr_output.is_some().then(|| build(&sprite_constants)),
+            }
         };
         let pipeline = |label: &str,
                         vertex: &str,
@@ -2879,41 +2998,29 @@ impl Renderer {
             )
         };
         let tri = wgpu::PrimitiveTopology::TriangleList;
-        let solid = pipeline(
+        let solid = solid_in(
+            &layout,
             "Terrain solid",
             "vs_terrain",
             "fs_solid",
             &terrain_buffers,
-            tri,
-            Some(wgpu::Face::Back),
-            true,
-            true,
-            None,
         );
         // `solid` in two passes (terrain.wgsl's `opaque_quad`, `mesher::Part`), for the
         // world pass without a shader pack: no cutout first, through a shader that never
         // discards, then the rest.
-        let solid_opaque = pipeline(
+        let solid_opaque = solid_in(
+            &layout,
             "Terrain solid opaque",
             "vs_terrain_opaque",
             "fs_opaque",
             &terrain_buffers,
-            tri,
-            Some(wgpu::Face::Back),
-            true,
-            true,
-            None,
         );
-        let solid_cutout = pipeline(
+        let solid_cutout = solid_in(
+            &layout,
             "Terrain solid cutout",
             "vs_terrain_cutout",
             "fs_solid",
             &terrain_buffers,
-            tri,
-            Some(wgpu::Face::Back),
-            true,
-            true,
-            None,
         );
         // The water mirror's camera sees the world from the other side of the plane, which
         // flips the winding: its solid terrain culls the front.
@@ -4538,6 +4645,7 @@ impl Renderer {
                         layout, label, vertex, fragment, buffers, tri, cull, true, true, blend,
                     )
                 },
+                |layout, label, vertex, fragment| solid_in(layout, label, vertex, fragment, &[]),
             )
         });
         // With flat draws' page groups the per-section solid draws read their vertices from
@@ -4551,40 +4659,24 @@ impl Renderer {
                     ..Default::default()
                 });
                 let origins = [None, terrain_buffers[1].clone()];
-                let pulled = |label: &str, vertex: &str, fragment: &str, cull| {
+                let solid = |label: &str, vertex: &str, fragment: &str| {
+                    solid_in(&pulled_layout, label, vertex, fragment, &origins)
+                };
+                (
+                    solid("Terrain solid", "vs_section", "fs_solid"),
+                    solid("Terrain solid opaque", "vs_section_opaque", "fs_opaque"),
+                    solid("Terrain solid cutout", "vs_section_cutout", "fs_solid"),
                     pipeline_in(
                         &pulled_layout,
-                        label,
-                        vertex,
-                        fragment,
-                        &origins,
-                        tri,
-                        Some(cull),
-                        true,
-                        true,
-                        None,
-                    )
-                };
-                let back = wgpu::Face::Back;
-                (
-                    pulled("Terrain solid", "vs_section", "fs_solid", back),
-                    pulled(
-                        "Terrain solid opaque",
-                        "vs_section_opaque",
-                        "fs_opaque",
-                        back,
-                    ),
-                    pulled(
-                        "Terrain solid cutout",
-                        "vs_section_cutout",
-                        "fs_solid",
-                        back,
-                    ),
-                    pulled(
                         "Terrain solid (mirrored)",
                         "vs_section",
                         "fs_solid_mirror",
-                        wgpu::Face::Front,
+                        &origins,
+                        tri,
+                        Some(wgpu::Face::Front),
+                        true,
+                        true,
+                        None,
                     ),
                 )
             }
@@ -4935,10 +5027,13 @@ impl Renderer {
             emission_stats,
             hdr_output,
             frame_format,
+            frame_kept_logged: false,
             hdr_marker: None,
             pack_post: None,
+            pack_loading: None,
             native: None,
             pass_timing: pack_timing::PassTiming::logging(),
+            pass_timing_gap: std::time::Duration::ZERO,
             own_timing: None,
             pack_entity_rest: Vec::new(),
             cloud_bindings,
@@ -6814,7 +6909,17 @@ impl Renderer {
                 world,
             )
         });
-        let post = match post.transpose() {
+        self.pack_loading = None;
+        self.install_shader_pack(dimension, post.transpose())
+    }
+    /// Runs the pack `set_shader_pack` or `load_shader_pack` built (`None`: no pack), or none when
+    /// it can't run, for the dimension `dimension`; the programs that run and their notes.
+    fn install_shader_pack(
+        &mut self,
+        dimension: i32,
+        post: std::result::Result<Option<pack_post::PackPost>, pack_post::Refused>,
+    ) -> std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused> {
+        let post = match post {
             Ok(post) => post,
             Err(e) => {
                 self.pack_post = Some((dimension, None));
@@ -6833,8 +6938,138 @@ impl Renderer {
         }
         Ok(report)
     }
+    /// As `set_shader_pack` with a pack, but its pipelines build on a thread of their own while
+    /// the game keeps drawing without one: the driver compiles a big pack's programs for seconds.
+    /// `poll_shader_pack` runs it once they are built. `label` and `started` come back with it.
+    pub fn load_shader_pack(
+        &mut self,
+        dimension: i32,
+        pack: horizon_shaders::Post,
+        block_ids: Vec<i32>,
+        label: String,
+        started: std::time::Instant,
+    ) {
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let adapter = self.adapter.clone();
+        let format = self.frame_format;
+        let atlas = self.pack_atlas.as_ref().map(|a| (a.view.clone(), a.size()));
+        let sprite_rects = self
+            .pack_atlas
+            .as_ref()
+            .map_or_else(Vec::new, |a| a.rects_table());
+        let material_maps = self
+            .pack_material_atlases
+            .as_ref()
+            .map(|a| [a[0].view.clone(), a[1].view.clone()]);
+        let lightmap = self.lightmap_view.clone();
+        let gui_size = self
+            .hud
+            .atlas_texture
+            .as_ref()
+            .map_or([1, 1], |t| [t.width(), t.height()]);
+        let celestial = self
+            .hud
+            .atlas_texture
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
+        let flat = self.pack_terrain_flat;
+        let table = (self.flat.as_ref())
+            .filter(|_| flat)
+            .map(|f| f.draw_layout.clone());
+        let terrain = self.pack_atlas.is_some();
+        let clouds = self.cloud_bindings.clone();
+        let build = move || {
+            let instance = wgpu::vertex_attr_array![5=>Float32x4];
+            let vertex = wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<TerrainVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &TERRAIN_ATTRIBUTES,
+            };
+            let instances = wgpu::VertexBufferLayout {
+                array_stride: 16,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &instance,
+            };
+            let buffers = [Some(vertex), Some(instances)];
+            let world = pack_post::World {
+                atlas,
+                sprite_rects: &sprite_rects,
+                material_maps,
+                lightmap,
+                gui_size,
+                terrain: terrain.then(|| pack_post::Geometry {
+                    buffers: if flat { &buffers[..1] } else { &buffers },
+                    table: table.as_ref(),
+                    depth_write: true,
+                    atlas: None,
+                    material_maps: true,
+                    ids: None,
+                    cull: true,
+                }),
+                block_ids: &block_ids,
+                celestial,
+                clouds: Some(&clouds),
+                weather: true,
+                hand: true,
+            };
+            pack_post::PackPost::new(&device, &queue, &adapter, pack, format, world)
+        };
+        // A pack is not the game's code: a panic building it turns the pack off (#3525).
+        let thread = std::thread::Builder::new()
+            .name("Shader pack".into())
+            .spawn(move || crate::crash::contain(build));
+        match thread {
+            Ok(thread) => {
+                // The last pack doesn't draw this dimension meanwhile.
+                self.pack_post = None;
+                self.pack_loading = Some(PackLoading {
+                    dimension,
+                    thread,
+                    label,
+                    started,
+                });
+            }
+            Err(e) => log::error!("shader pack {label}: no thread to build it on: {e}"),
+        }
+    }
+    /// The pack `load_shader_pack` builds, once its thread is done: it runs from now on, as
+    /// `set_shader_pack` would run it. Its dimension, label, start and what `set_shader_pack`
+    /// returns.
+    #[allow(clippy::type_complexity)]
+    pub fn poll_shader_pack(
+        &mut self,
+    ) -> Option<(
+        i32,
+        String,
+        std::time::Instant,
+        std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused>,
+    )> {
+        if !self.pack_loading.as_ref()?.thread.is_finished() {
+            return None;
+        }
+        let loading = self.pack_loading.take()?;
+        let built = match loading.thread.join() {
+            Ok(Ok(built)) => built,
+            Ok(Err(panic)) => Err(pack_post::Refused {
+                reason: format!("building it panicked: {panic}"),
+                notes: Vec::new(),
+            }),
+            Err(_) => Err(pack_post::Refused {
+                reason: "its thread panicked".into(),
+                notes: Vec::new(),
+            }),
+        };
+        let report = self.install_shader_pack(loading.dimension, built.map(Some));
+        Some((loading.dimension, loading.label, loading.started, report))
+    }
+    /// Whether a `shaders/` pack is still building (`load_shader_pack`).
+    pub fn shader_pack_loading(&self) -> bool {
+        self.pack_loading.is_some()
+    }
     /// Drops the running shader pack, of either kind.
     pub fn drop_shader_packs(&mut self) {
+        self.pack_loading = None;
         self.pack_post = None;
         self.native = None;
         self.pack_atlas = None;
@@ -6863,6 +7098,18 @@ impl Renderer {
         tags: &[(u32, u32)],
         lights: block_light::LightTable,
     ) -> std::result::Result<Vec<String>, String> {
+        let linear = pack
+            .as_ref()
+            .is_some_and(|p| p.0.manifest.api == horizon_shader_api::Api::V0_2);
+        if (linear || self.frame_format == LINEAR_FRAME)
+            && linear != (self.frame_format == LINEAR_FRAME)
+            && !std::mem::replace(&mut self.frame_kept_logged, true)
+        {
+            log::info!(
+                "Horizon renderer: the {:?} frame stays until the renderer is made again; a shader API 0.2 pack picked or dropped since runs on it",
+                self.frame_format
+            );
+        }
         let Some((report, constants)) = pack else {
             self.native = None;
             return Ok(Vec::new());
@@ -7006,6 +7253,15 @@ impl Renderer {
     pub fn set_pass_timing(&mut self, on: bool) {
         self.pass_timing = on || pack_timing::PassTiming::logging();
     }
+    /// Times a frame at most once per `gap` while passes are timed (the F3 overlay needs far fewer
+    /// samples than a measurement). `HORIZON_SHADER_PACK_TIMING` keeps every sample.
+    pub fn set_pass_timing_gap(&mut self, gap: std::time::Duration) {
+        self.pass_timing_gap = if pack_timing::PassTiming::logging() {
+            std::time::Duration::ZERO
+        } else {
+            gap
+        };
+    }
     /// The running shader pack's timer, of either kind.
     fn pass_timer<'a>(
         pack: &'a mut Option<(i32, Option<pack_post::PackPost>)>,
@@ -7058,7 +7314,8 @@ impl Renderer {
 
     /// The dimension the shader pack was last set for.
     pub fn shader_pack_dimension(&self) -> Option<i32> {
-        self.pack_post.as_ref().map(|p| p.0)
+        let loading = self.pack_loading.as_ref().map(|l| l.dimension);
+        loading.or_else(|| self.pack_post.as_ref().map(|p| p.0))
     }
     /// The Texture Filtering and Max Anisotropy options (`filtering`: 0 none, 1 RGSS, 2
     /// anisotropic; `bit`: `maxAnisotropyBit`). All take LevelRenderer's chunk layer sampler
@@ -7604,6 +7861,7 @@ impl Renderer {
                 .flatten();
         }
         if let Some(t) = &mut self.own_timing {
+            t.gap = self.pass_timing_gap;
             t.begin(&self.device, &self.queue);
         }
         if self.animated_textures {
@@ -9281,6 +9539,9 @@ impl Renderer {
                 .then(|| pack_timing::PassTiming::new(&self.device, &self.queue))
                 .flatten();
         }
+        if let Some(Some(t)) = Self::pass_timer(&mut self.pack_post, &mut self.native) {
+            t.gap = self.pass_timing_gap;
+        }
         let pack_reads_world = pack_post || native_post;
         laps.lap("r_uploads");
         // Phase 2 of occlusion culling draws over the depth, and a shader pack or TAA reads it.
@@ -9784,6 +10045,8 @@ impl Renderer {
             }
         }
         if let Some(native) = &mut self.native {
+            let reflection =
+                reflection.map(|view| native.frame.linear_mirror(&self.device, &mut encoder, view));
             native
                 .frame
                 .set_reflection(&self.device, reflection.as_ref());
@@ -9808,6 +10071,7 @@ impl Renderer {
             .as_ref()
             .filter(|_| !frame.title)
             .and_then(|n| Some((n.material.as_ref()?, &n.frame.group)));
+        let hdr = self.hdr.is_some();
         // The pack's solid terrain goes through a depth pre-pass, then its material shades the
         // nearest point of each pixel alone. With occlusion culling the pre-pass holds phase 1's
         // depth for the test, phase 2's goes in after it, and all of it is shaded only then: a
@@ -9817,7 +10081,7 @@ impl Renderer {
             .filter(|_| !pack_draws_terrain);
         let solid_pipeline = match prepass {
             Some(p) => &p.solid,
-            None => material.map_or(&self.solid, |(m, _)| &m.solid),
+            None => material.map_or(self.solid.get(hdr), |(m, _)| &m.solid),
         };
         let split_solid = self.info.backend == wgpu::Backend::Metal;
         let translucent_pipeline = material.map_or(&self.translucent, |(m, _)| &m.translucent);
@@ -10096,14 +10360,14 @@ impl Renderer {
                             0..phase2_calls,
                         )],
                         None if split_solid => &[
-                            (&flat.solid_opaque, 0..opaque, 0..phase2_split),
+                            (flat.solid_opaque.get(hdr), 0..opaque, 0..phase2_split),
                             (
-                                &flat.solid_cutout,
+                                flat.solid_cutout.get(hdr),
                                 cutout..flat.phase1_calls,
                                 phase2_split..phase2_calls,
                             ),
                         ],
-                        None => &[(&flat.solid, 0..flat.phase1_calls, 0..phase2_calls)],
+                        None => &[(flat.solid.get(hdr), 0..flat.phase1_calls, 0..phase2_calls)],
                     };
                     let draw = |pass: &mut wgpu::RenderPass<'_>| {
                         for (pipeline, calls, _) in passes {
@@ -10167,9 +10431,13 @@ impl Renderer {
                     type Draws = std::ops::Range<u32>;
                     let passes: &[(&wgpu::RenderPipeline, Draws, Draws)] = match material {
                         None if split_solid => &[
-                            (&self.solid_opaque, 0..opaque, phase1_draws..phase2_cutout),
                             (
-                                &self.solid_cutout,
+                                self.solid_opaque.get(hdr),
+                                0..opaque,
+                                phase1_draws..phase2_cutout,
+                            ),
+                            (
+                                self.solid_cutout.get(hdr),
                                 cutout..phase1_draws,
                                 phase2_cutout..solid_draws,
                             ),
@@ -10672,12 +10940,7 @@ impl Renderer {
                     depth.size(),
                 );
                 if let Some((color, _)) = &scaled {
-                    let color = color.texture();
-                    encoder.copy_texture_to_texture(
-                        color.as_image_copy(),
-                        native.frame.opaque_color.as_image_copy(),
-                        color.size(),
-                    );
+                    native.frame.copy_opaque(&self.device, &mut encoder, color);
                 }
                 pass = world_pass_after_culling(
                     &mut encoder,
@@ -11424,12 +11687,18 @@ impl Renderer {
         {
             self.readback.present(&self.device, &mut encoder, image);
         }
+        // A 0.2 pack is shown at paper white: HDR output lifts nothing of its world.
+        let lifts_world = !frame.title
+            && self
+                .native
+                .as_ref()
+                .is_none_or(|n| n.frame.api == horizon_shader_api::Api::V0_1);
         match (&self.hdr, &surface_frame) {
             (Some(hdr), Some(f)) => hdr.present(
                 &self.queue,
                 &mut encoder,
                 &f.texture,
-                !frame.title,
+                lifts_world,
                 self.own_timing.as_mut(),
             ),
             // Offscreen nothing shows HDR: the target gets the frame as SDR shows it, for
@@ -11448,7 +11717,7 @@ impl Renderer {
             .filter(|(request, _)| request.size.is_none())
             .zip(self.hdr.as_ref())
             .and_then(|(_, hdr)| {
-                let texture = hdr.capture(&self.device, &self.queue, &mut encoder, !frame.title)?;
+                let texture = hdr.capture(&self.device, &self.queue, &mut encoder, lifts_world)?;
                 let size = [self.config.width, self.config.height];
                 Some(copy_frame(&self.device, &mut encoder, &texture, size))
             });
@@ -13003,20 +13272,39 @@ mod tests {
     fn the_frame_is_16_bit_only_with_hdr_and_a_device_that_draws_it() {
         use super::frame_format;
         use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba8Unorm, Rgba16Unorm};
-        assert_eq!(frame_format(true, true, true, Bgra8Unorm), Rgba16Unorm);
-        for (wide_frame, hdr_offered, draws) in [
-            (false, true, true),
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
-        ] {
+        // No 0.2 pack (or a device without the float frame) leaves it as before.
+        for linear in [(false, false), (false, true), (true, false)] {
             assert_eq!(
-                frame_format(wide_frame, hdr_offered, draws, Bgra8UnormSrgb),
-                Bgra8Unorm
+                frame_format(true, true, true, Bgra8Unorm, linear),
+                Rgba16Unorm
             );
+            for (wide_frame, hdr_offered, draws) in [
+                (false, true, true),
+                (true, false, true),
+                (true, true, false),
+                (false, false, false),
+            ] {
+                assert_eq!(
+                    frame_format(wide_frame, hdr_offered, draws, Bgra8UnormSrgb, linear),
+                    Bgra8Unorm
+                );
+                assert_eq!(
+                    frame_format(wide_frame, hdr_offered, draws, Rgba8Unorm, linear),
+                    Rgba8Unorm
+                );
+            }
+        }
+    }
+    /// A shader API 0.2 pack picked under `HORIZON_HDR_FRAME=float` gets the float frame
+    /// wherever the device draws it, HDR on or off.
+    #[test]
+    fn a_0_2_pack_gets_the_float_frame_where_the_device_draws_it() {
+        use super::{LINEAR_FRAME, frame_format};
+        use wgpu::TextureFormat::Bgra8UnormSrgb;
+        for (wide_frame, hdr_offered, draws) in [(true, true, true), (false, false, false)] {
             assert_eq!(
-                frame_format(wide_frame, hdr_offered, draws, Rgba8Unorm),
-                Rgba8Unorm
+                frame_format(wide_frame, hdr_offered, draws, Bgra8UnormSrgb, (true, true)),
+                LINEAR_FRAME
             );
         }
     }
@@ -13413,6 +13701,77 @@ mod tests {
         for (count, gl) in [(1, 2), (2, 2), (5, 5), (6, 7), (12, 13), (2048, 2048)] {
             assert_eq!(super::array_layers(count, true), gl);
             assert_eq!(super::array_layers(count, false), count);
+        }
+    }
+    #[test]
+    fn plain_solid_shaders_translate_for_every_backend() {
+        // `SolidPipeline::plain` builds terrain.wgsl's solid entries with `HDR_LIGHTING`
+        // off on every backend: they must still translate (the other test translates them
+        // with the constants' defaults).
+        let module = naga::front::wgsl::parse_str(include_str!("terrain.wgsl")).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        let stage = naga::ShaderStage::Fragment;
+        let constants = [("HDR_LIGHTING".to_owned(), 0.0)].into_iter().collect();
+        for entry in ["fs_solid", "fs_opaque"] {
+            let (module, info) = naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                Some((stage, entry)),
+                &constants,
+            )
+            .unwrap();
+            let msl = naga::back::msl::write_string(
+                &module,
+                &info,
+                &naga::back::msl::Options {
+                    fake_missing_bindings: true,
+                    ..Default::default()
+                },
+                &naga::back::msl::PipelineOptions {
+                    entry_point: Some((stage, entry.to_owned())),
+                    ..Default::default()
+                },
+            );
+            // Metal compiles the lighting out from this constant.
+            assert!(
+                msl.unwrap()
+                    .0
+                    .contains("constant bool HDR_LIGHTING = false;"),
+                "{entry}"
+            );
+            let mut hlsl = String::new();
+            naga::back::hlsl::Writer::new(
+                &mut hlsl,
+                &Default::default(),
+                &naga::back::hlsl::PipelineOptions {
+                    entry_point: Some((stage, entry.to_owned())),
+                },
+            )
+            .write(&module, &info, None)
+            .unwrap_or_else(|e| panic!("{entry}: {e}"));
+            let mut glsl = String::new();
+            naga::back::glsl::Writer::new(
+                &mut glsl,
+                &module,
+                &info,
+                &naga::back::glsl::Options {
+                    version: naga::back::glsl::Version::Desktop(330),
+                    ..Default::default()
+                },
+                &naga::back::glsl::PipelineOptions {
+                    shader_stage: stage,
+                    entry_point: entry.to_owned(),
+                    multiview: None,
+                },
+                Default::default(),
+            )
+            .and_then(|mut w| w.write())
+            .unwrap_or_else(|e| panic!("{entry}: {e}"));
         }
     }
     #[test]
@@ -14723,4 +15082,16 @@ impl Drop for Renderer {
         #[cfg(target_os = "linux")]
         self.frame_gen.shutdown_native();
     }
+}
+
+/// A `shaders/` pack building on its own thread (`Renderer::load_shader_pack`): the dimension it
+/// is for, the thread (a panic in it contained), and what the game named it with and when.
+struct PackLoading {
+    dimension: i32,
+    #[allow(clippy::type_complexity)]
+    thread: std::thread::JoinHandle<
+        std::result::Result<std::result::Result<pack_post::PackPost, pack_post::Refused>, String>,
+    >,
+    label: String,
+    started: std::time::Instant,
 }

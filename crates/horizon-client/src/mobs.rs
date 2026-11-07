@@ -684,6 +684,7 @@ impl NamedDamage {
     pub const IS_PROJECTILE: u32 = 1 << 7;
     pub const IS_EXPLOSION: u32 = 1 << 8;
     pub const IS_FALL: u32 = 1 << 9;
+    pub const BYPASSES_ENCHANTMENTS: u32 = 1 << 10;
 
     pub const fn new(name: &'static str, tags: u32) -> Self {
         Self { name, tags }
@@ -783,6 +784,13 @@ impl DamageKind {
             return named.has(NamedDamage::BYPASSES_RESISTANCE);
         }
         matches!(self, DamageKind::OutOfWorld | DamageKind::GenericKill)
+    }
+    /// DamageTypeTags.BYPASSES_ENCHANTMENTS: `sonic_boom` alone in vanilla.
+    pub fn bypasses_enchantments(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::BYPASSES_ENCHANTMENTS);
+        }
+        matches!(self, DamageKind::SonicBoom)
     }
 }
 /// `source.getEntity()` of a blow, as `SulfurCube.knockback` reads it: `getEyePosition()`,
@@ -1124,6 +1132,10 @@ pub struct Extra {
     pub player_created: bool,
     pub carried: Option<horizon_world::registry::BlockStateId>,
     pub charged: bool,
+    /// `Creeper.explosionRadius` (`ExplosionRadius`, a byte): the blast's
+    /// radius, 3 unless the save or a command says otherwise; a powered
+    /// creeper blows with twice it (`explodeCreeper`).
+    pub explosion_radius: i8,
     /// Held item ids (main hand, off hand) and head item.
     pub main_hand: Option<Arc<str>>,
     /// Components of the current held stack; setters clear these on replacement.
@@ -1358,6 +1370,7 @@ fn totem_death_effects() -> Vec<crate::items::ConsumeEffect> {
         amplifier,
         ambient: false,
         show_particles: true,
+        show_icon: true,
     };
     vec![
         ConsumeEffect::ClearAllEffects,
@@ -1866,6 +1879,9 @@ pub enum MobEvent {
         name: crate::text::Text,
         /// `Entity.isInWater` of the source: `BlockAttached.ignoreExplosion`.
         in_water: bool,
+        /// Its entity type: a player the blast kills is still credited to it
+        /// (`getKillCredit` finds the source during its own explosion).
+        kind: String,
     },
     /// The centre, the radius and the kind of the mob blowing up (it may be
     /// gone from the list by the time the blast is handled).
@@ -2392,6 +2408,7 @@ pub struct Seen {
     pub bred: bool,
     /// A tamed animal's owner (`getOwner`).
     pub owner: Option<[i32; 4]>,
+    /// `instanceof Enemy` (what the golems' target predicates test).
     pub hostile: bool,
     pub target: Option<Who>,
     pub health: f32,
@@ -2616,7 +2633,7 @@ impl Mob {
             tame: m.extra.tame,
             bred: m.extra.bred,
             owner: m.extra.owner,
-            hostile: m.hostile(),
+            hostile: m.is_enemy(),
             target: m.ai.target,
             health: m.health,
             variant: m.extra.variant,
@@ -3225,6 +3242,8 @@ impl Mob {
         if mob.species() == Species::Salmon {
             mob.extra.variant = 1;
         }
+        // `Creeper.explosionRadius = 3` until a save or a command sets it.
+        mob.extra.explosion_radius = 3;
         // The PathNavigation constructor: the base follow range.
         mob.ai.nav.max_visited_nodes = (mob.kind.follow_range * 16.0).floor() as i32;
         ai::register(&mut mob);
@@ -3305,6 +3324,16 @@ impl Mob {
     }
     pub fn hostile(&self) -> bool {
         self.kind.category == "monster"
+    }
+    /// `instanceof Enemy`. The zombie horse, camel husk and zombie nautilus are in
+    /// the monster category but extend `Animal`/`AbstractNautilus`, which do
+    /// not implement `Enemy`.
+    pub fn is_enemy(&self) -> bool {
+        self.hostile()
+            && !matches!(
+                self.species(),
+                Species::ZombieHorse | Species::CamelHusk | Species::ZombieNautilus
+            )
     }
     #[inline]
     pub fn species(&self) -> Species {
@@ -3534,13 +3563,8 @@ impl Mob {
                 amount *= 1.0 - fraction;
             }
         }
-        // CombatRules.getDamageAfterMagicAbsorb: enchantment protection.
-        let epf = gear::protection(self, source.kind);
-        if epf > 0.0 {
-            amount *= 1.0 - epf / 25.0;
-        }
         // LivingEntity.getDamageAfterMagicAbsorb: Resistance takes 20% per level off
-        // (`#bypasses_resistance` and `#bypasses_effects` skip it).
+        // (`#bypasses_resistance` and `#bypasses_effects` skip it) ...
         if !source.kind.bypasses_effects()
             && !source.kind.bypasses_resistance()
             && let Some(&(_, _, amp)) = self
@@ -3552,6 +3576,15 @@ impl Mob {
             let remainder = 25i32.wrapping_sub(amp.wrapping_add(1).wrapping_mul(5));
             amount = (amount * remainder as f32 / 25.0).max(0.0);
             // actuallyHurt is void: zero health damage still lets hurtServer set hurt state.
+        }
+        // ... then, with damage left and outside `#bypasses_enchantments` (a
+        // warden's sonic boom), CombatRules.getDamageAfterMagicAbsorb's
+        // enchantment protection (#11308).
+        if amount > 0.0 && !source.kind.bypasses_enchantments() {
+            let epf = gear::protection(self, source.kind);
+            if epf > 0.0 {
+                amount *= 1.0 - epf / 25.0;
+            }
         }
         // Witch.getDamageAfterMagicAbsorb: none from its own doing, else
         // 85% less from `#witch_resistant_to`.
@@ -4124,14 +4157,16 @@ impl Mob {
     /// living mob (6 << amplifier, magic) and heals an undead one, a healing effect
     /// the reverse (4 << amplifier), both scaled by `scale`.
     pub fn apply_heal_or_harm(&mut self, harm: bool, inverted: bool, amplifier: i32, scale: f64) {
-        let amp = amplifier.clamp(0, 30);
+        // HealOrHarmMobEffect.applyEffectTick: Java's `<<` takes the distance
+        // modulo 32 and wraps; a heal is at least 0.
+        let shift = amplifier as u32;
         if harm != inverted {
             self.damage(
-                (scale * f64::from(6i32 << amp)) as i32 as f32,
+                (scale * f64::from(6i32.wrapping_shl(shift))) as i32 as f32,
                 Damage::of(DamageKind::Magic),
             );
         } else {
-            let heal = (scale * f64::from(4i32 << amp)) as i32 as f32;
+            let heal = (scale * f64::from(4i32.wrapping_shl(shift).max(0))) as i32 as f32;
             self.heal(heal);
         }
     }
@@ -4168,15 +4203,10 @@ impl Mob {
         if self.species() == Species::Wither || !self.can_be_affected(effect) {
             return;
         }
-        // AbsorptionMobEffect.addAttributeModifiers: at least 4 hearts-halves per level.
-        if effect == "minecraft:absorption"
-            && self
-                .extra
-                .effects
-                .iter()
-                .find(|e| e.0 == effect)
-                .is_none_or(|e| amplifier > e.2)
-        {
+        // AbsorptionMobEffect.onEffectStarted, which addEffect runs for every
+        // effect it accepts, new, stronger or not: at least 4 hearts-halves per
+        // level of the effect given (#11386).
+        if effect == "minecraft:absorption" {
             self.absorption = self.absorption.max(4.0 * (amplifier + 1) as f32);
         }
         if let Some(e) = self.extra.effects.iter_mut().find(|e| e.0 == effect) {
@@ -5971,6 +6001,25 @@ mod named_damage_tests {
         );
         assert!(no_effects.damage(2.0, fire(NamedDamage::BYPASSES_EFFECTS)));
         assert_eq!(no_effects.health, 8.0);
+        // #bypasses_enchantments (#11308): a warden's sonic boom, or a named
+        // type with the tag, is not reduced by Protection, as
+        // getDamageAfterMagicAbsorb returns it before the enchantments.
+        for kind in [
+            DamageKind::SonicBoom,
+            DamageKind::Named(NamedDamage::new(
+                "example:boom",
+                NamedDamage::BYPASSES_ARMOR | NamedDamage::BYPASSES_ENCHANTMENTS,
+            )),
+        ] {
+            let mut plated = pig();
+            gear::set(
+                &mut plated,
+                gear::CHEST,
+                vec![("minecraft:protection".into(), 4)],
+            );
+            assert!(plated.damage(4.0, Damage::of(kind)));
+            assert_eq!(plated.health, 6.0, "{kind:?}");
+        }
         let mut armor = gear::Gear::default();
         armor.slots[gear::FEET] = vec![("minecraft:feather_falling".into(), 4)];
         armor.slots[gear::CHEST] = vec![("minecraft:blast_protection".into(), 4)];

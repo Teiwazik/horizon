@@ -17,7 +17,7 @@ use horizon_client::{
     collisions::SceneCollisions,
     crafting::Recipes,
     graphics::EntityCullingMode,
-    health::{HurtSource, Hurting, Knock, knockback_canceled},
+    health::{HealthEvent, HurtSource, Hurting, Knock, knockback_canceled},
     items::ItemStack,
     mesher::Vertex,
     mobs::{
@@ -1063,6 +1063,7 @@ impl Game<'_> {
         // waiting any more.
         self.combat.charged_exploders.clear();
         self.combat.exploded.clear();
+        self.combat.exploded_kinds.clear();
         // EntityTickEvent.Pre for the mobs about to tick, before the loop holds them.
         let mut round = self.native_tick_round();
         if round.listening() {
@@ -1463,7 +1464,6 @@ impl Game<'_> {
             }
         }
         laps.lap("creature_retain");
-        self.tick_boarding();
         self.sync_riders();
         self.tick_skeleton_traps();
         self.tick_apparition();
@@ -2519,12 +2519,14 @@ impl Game<'_> {
                     charged,
                     name,
                     in_water,
+                    kind,
                 } => {
                     self.combat.explosion_source = Some(mob);
                     self.combat.explosion_in_water = in_water;
                     // The creeper causes the blast's damage, but it is out of
                     // the mob list already: its name comes with the event.
                     self.combat.exploded.push((mob, name));
+                    self.combat.exploded_kinds.push((mob, kind));
                     if charged {
                         self.combat.charged_exploders.push(mob);
                     }
@@ -4001,6 +4003,7 @@ impl Game<'_> {
         // The hit's own push, held back until after the shield's (`hurtServer`
         // runs `applyItemBlocking` before `dealDefaultKnockback`).
         let mut default_push: Option<([f64; 2], HurtSource<'_>)> = None;
+        let events_before = self.player.as_ref().map_or(0, |p| p.events.len());
         if let Some(player) = self.player.as_mut()
             && let Some(id) = self.health_resources.damage.id(damage_type)
             && let Ok(o) = player.hurt_caused_by(
@@ -4036,14 +4039,35 @@ impl Game<'_> {
                 default_push = Some(([xd, zd], source));
             }
             // The thorns hurt the entity that caused the hit, if there is one.
+            // Thorns' own hit is no attack, so nothing answers it
+            // (`doPostAttackEffects` runs from the attacks, not `hurtServer`).
             let killed = self.player.as_ref().is_some_and(|p| {
                 super::wither::killed(true, p.health.dead_or_dying(), p.health.totem_used)
             });
             if let Some(a) = attacker.or(owner)
                 && !(post_attack_if_alive && killed)
+                && damage_type != "minecraft:thorns"
             {
                 self.thorns(a);
             }
+        }
+        // LivingEntity.playSecondaryHurtSound: a thorns hit that landed whole
+        // sounds where the player stands, for everyone around.
+        if let Some(p) = self.player.as_ref()
+            && p.events.get(events_before..).is_some_and(|new| {
+                new.iter().any(|e| {
+                    matches!(
+                        e,
+                        horizon_client::motion::MotionEvent::Health(HealthEvent::Phase(
+                            "thorns-sound"
+                        ))
+                    )
+                })
+            })
+        {
+            let at = [p.position.x, p.position.y, p.position.z];
+            self.audio
+                .play("minecraft:enchant.thorns.hit", Some(at), 1.0, 1.0);
         }
         // LivingEntity.hurtServer: ENTITY_HURT_PLAYER, unless it returned
         // early (invulnerable, or inside the hurt cooldown).
@@ -4625,6 +4649,23 @@ impl Game<'_> {
             None => self.projectile_hit(p, hit),
         }
     }
+    /// `EnchantmentHelper.doPostAttackEffects` after the player's shot `p`
+    /// (its `direct` entity, a hit of `damage_type`) hurt the mob `who`: the
+    /// victim's own post-attack enchantments answer the player (Thorns).
+    pub(super) fn shot_post_attack(
+        &mut self,
+        p: &Projectile,
+        who: Who,
+        direct: &str,
+        damage_type: &str,
+    ) {
+        if p.owner == Some(Who::Player)
+            && let Who::Mob(id) = who
+            && let Some(index) = self.mobs.iter().position(|m| m.id == id)
+        {
+            self.victim_post_attack(index, direct, Some(damage_type));
+        }
+    }
     /// What an arrow or a thrown trident hits an entity of type `victim`
     /// for (`AbstractArrow.onHitEntity`, `ThrownTrident.onHitEntity`): a
     /// trident's 8 through `EnchantmentHelper.modifyDamage` of the trident
@@ -4718,10 +4759,11 @@ impl Game<'_> {
                 | ProjectileKind::WindCharge
                 | ProjectileKind::BreezeWindCharge
         );
+        use horizon_client::arrows::OwnerLookup;
         let shooter_may_break = match p.owner {
             Some(Who::Player) => self.mode != GameMode::Adventure,
             Some(Who::Mob(_)) => false,
-            None => true,
+            None => !p.owner_uuid.is_some_and(|u| self.non_player_entity(u)),
         };
         if !impact || !shooter_may_break || !self.ui.rules.bool("projectiles_can_break_blocks") {
             return;
@@ -4870,6 +4912,7 @@ impl Game<'_> {
             raining: rain,
             mob_griefing: self.ui.rules.bool("mob_griefing"),
             tnt_explodes: self.ui.rules.bool("tnt_explodes"),
+            owners: self,
         }
     }
     /// The rest of the tick of an arrow that hit an entity
@@ -4929,6 +4972,12 @@ impl Game<'_> {
         }
     }
     pub(super) fn projectile_hit(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
+        let result = self.projectile_hit_inner(p, hit);
+        // LivingEntity.actuallyHurt credits the shooter (a ServerPlayer) with the absorbed damage.
+        self.settle_dealt_absorbed(p.owner == Some(Who::Player));
+        result
+    }
+    fn projectile_hit_inner(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
         let _attacker = self.knockback_scope_for(p.owner);
         // Projectile.onHitBlock: BlockState.onProjectileHit, for every
         // projectile (a wind charge out of the world's top has no face).
@@ -5132,6 +5181,7 @@ impl Game<'_> {
                     }),
                 };
                 let outcome = if hurt {
+                    self.shot_post_attack(p, who, "minecraft:trident", "minecraft:trident");
                     EntityHit::Hurt
                 } else {
                     EntityHit::Refused
@@ -5306,6 +5356,16 @@ impl Game<'_> {
                     }])?;
                 }
                 if hurt {
+                    let spectral = p
+                        .arrow
+                        .as_ref()
+                        .is_some_and(|a| &*a.pickup_item.item == "minecraft:spectral_arrow");
+                    let direct = if spectral {
+                        "minecraft:spectral_arrow"
+                    } else {
+                        "minecraft:arrow"
+                    };
+                    self.shot_post_attack(p, who, direct, "minecraft:arrow");
                     self.arrow_post_hurt_effects(p, who);
                 }
                 match (hurt, who) {
@@ -8845,6 +8905,16 @@ mod dye_mix_tests {
         assert_eq!(dye_color_mix_in_recipes(&recipes, orange, cyan), None);
         let kept = dye_mix(&recipes, &mut random, orange, cyan);
         assert!(kept == orange || kept == cyan, "kept {kept}");
+    }
+}
+
+impl horizon_client::arrows::OwnerLookup for Game<'_> {
+    fn non_player_entity(&self, uuid: [i32; 4]) -> bool {
+        let found = self.target_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid));
+        !matches!(
+            found,
+            None | Some(super::commands::Target::Player | super::commands::Target::Guest(_))
+        )
     }
 }
 
