@@ -1214,6 +1214,18 @@ the scalar `BlockProperties.light` only when present. The content compiler valid
 every state once; native, content-only, dedicated-server and client declarations use the same emitted
 state facts and ordinary light propagation, without a runtime callback.
 
+`Item.place_block: Option<String>` binds an item to an ordinary `BlockItem` placement of a vanilla
+block or a block in the item's namespace, including blocks with `item: false`. It uses the same
+[content field](mods.md) on clients and servers. Components still come from the item template;
+the placement context, consumption and statistics retain the alias item's ID. It does not inherit
+specialized placement-item behavior from the component template.
+
+Prepared-resource regression tests explicitly exercise this boundary:
+`cargo test -p horizon-client-lib --lib place_block_aliases_keep_ -- --ignored` checks both level
+contexts; `HORIZON_TEST_RESOURCES=<prepared-root> cargo test -p horizon-client --lib
+place_block_alias_survival_ -- --ignored` checks ordinary survival consumption, adventure refusal
+and dry client prediction. These native tests do not require a renderer or game window.
+
 API 146 adds entities ticking, through `native_entity_tick_pre` (NeoForge's `EntityTickEvent.Pre`) and `native_entity_tick_post` (`EntityTickEvent.Post`), with the entity's id and type (`minecraft:zombie`, `minecraft:item`) and the level. Set `canceled` in the Pre and the entity doesn't tick this tick (and its Post isn't told). Told for the mobs, item entities, minecarts and boats that tick in an entity-ticking chunk, on the single player server thread and on a dedicated server; not for a player's own boat or minecart, projectiles, orbs, primed TNT, falling blocks or armor stands yet (check `kind`: later APIs add kinds). Mobs and items hear every Pre before the family's first tick and every Post after its last; minecarts and boats hear theirs around each one's tick. A mod that hooks them also hooks `native_entity_tick_listened(listened)` and sets `*listened = true`: otherwise no entity's tick is told. It runs each tick for every ticking entity, so keep it cheap. Bundles that use them need "hooks": 146.
 
 API 147 adds a fluid handler on items (`Capabilities.FluidHandler.ITEM`). `native_item_fluid_tank(item, capacity)` makes a mod item a container with a capacity in millibuckets; what it holds lives in the stack's `minecraft:custom_data` under `horizon_fluid` (`Fluid`, `Amount`), so it is saved, sent to Horizon clients and stacks only with equal contents. `native_item_fluid(stack)` reads one item of a stack (vanilla's buckets are built in: empty, water and lava, a whole bucket or nothing); `native_item_fluid_fill(stack, fluid, amount)` and `native_item_fluid_drain(stack, max)` answer how much one item takes or gives and the single item it becomes, as `IFluidHandler.fill`/`drain` through an `ItemAccess`; the stack given is not changed, so the caller shrinks it by one and hands out the result. They work on any side. Bundles need "hooks": 147.
