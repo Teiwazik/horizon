@@ -106,6 +106,11 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     // 16 per level, 15 levels.
     out.light = min(vec2(block, sky) / 240.0, vec2(1.0));
     out.lightmap = horizon_terrain_sample_lightmap(sky / 16.0, block / 16.0).rgb;
+    // Fullbright fills the whole lightmap white (gfx.rs): a pack sees full light levels
+    // too, so its lighting follows the setting instead of ignoring it.
+    if horizon_terrain_sample_lightmap(0.0, 0.0).r > 0.999 {
+        out.light = vec2(1.0);
+    }
     out.position = pos;
     out.spherical = length(pos);
     // The colour's alpha byte (mesher.rs's `fluid_face` and `emitting`): a fluid quad's
