@@ -109,7 +109,9 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     // Fullbright fills the whole lightmap white (gfx.rs): a pack sees full light levels
     // too, so its lighting follows the setting instead of ignoring it.
     if horizon_terrain_sample_lightmap(0.0, 0.0).r > 0.999 {
-        out.light = vec2(1.0);
+        // Sky light only: full block light too would light every face like a torch and
+        // blow the tiles out.
+        out.light.y = 1.0;
     }
     out.position = pos;
     out.spherical = length(pos);
