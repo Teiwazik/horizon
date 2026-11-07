@@ -9716,10 +9716,7 @@ impl Renderer {
                 vertices: &self.entity_buffer,
                 stride: std::mem::size_of::<Vertex>() as u64,
                 quads: entity_quads,
-                shadow_only: (
-                    shadow_only_first,
-                    shadow_only_quads,
-                ),
+                shadow_only: (shadow_only_first, shadow_only_quads),
             });
             rt.entity_atlas = self.entity_atlas.clone();
             rt.update(&self.device, &mut encoder, list, entities, &self.indices);
@@ -9918,10 +9915,7 @@ impl Renderer {
                 &self.indices,
                 entity_quads,
                 // The batch ends with them (EntityBatch::update).
-                (
-                    shadow_only_first,
-                    shadow_only_quads,
-                ),
+                (shadow_only_first, shadow_only_quads),
             );
         }
         laps.lap("r_pack_inputs");
@@ -11343,6 +11337,65 @@ impl Renderer {
             ),
             _ => None,
         };
+        // The pack's own terrain motion (its vertex stage at this frame's time and the last
+        // one's) over the objects': swaying leaves and lanterns, waves.
+        if let (Some(target), Some(reproject), Some((_, depth)), Some(native)) = (
+            &taa_motion,
+            self.world_post.taa_reprojection(),
+            &scaled,
+            self.native
+                .as_mut()
+                .filter(|_| !frame.title && !pack_draws_terrain),
+        ) && let Some(motion) = native.material.as_ref().and_then(|m| m.motion.as_ref())
+            && let Some(pipeline) = if flat_frame {
+                motion.flat.as_ref()
+            } else {
+                Some(&motion.instanced)
+            }
+        {
+            let group = motion.group(
+                &self.device,
+                &self.queue,
+                depth,
+                view_proj,
+                reproject * view_proj,
+            );
+            let timed = native
+                .timing
+                .as_mut()
+                .and_then(|t| t.reserve("Terrain motion"));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Terrain motion"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: timed.and_then(|i| Some(native.timing.as_ref()?.stamps(i))),
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.group, &[]);
+            pass.set_bind_group(2, &group, &[]);
+            pass.set_bind_group(horizon_shader_api::stages::GROUP, &native.frame.group, &[]);
+            match self.flat.as_ref().filter(|_| flat_frame) {
+                Some(flat) => flat.draw(
+                    &mut pass,
+                    &flat.calls[..flat.solid_calls],
+                    flat_vertices(&self.arena, self.translucent_arena.as_ref()),
+                ),
+                None => {
+                    pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(1, self.instances.slice(..));
+                    self.draw_sections(&mut pass, &self.indirect, 0, 0, solid_draws);
+                }
+            }
+        }
         if let Some((color, depth)) = &scaled
             && pack_post
             && let Some((dimension, Some(mut post))) = self.pack_post.take()

@@ -333,6 +333,49 @@ pub struct NativeMaterial {
     pub grid: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// The solid terrain as a depth pre-pass and a material pass after it.
     pub prepass: Prepass,
+    /// The motion of the corners the pack's vertex stage moves, for TAA and DLSS.
+    pub motion: Option<Motion>,
+}
+
+/// The pack's terrain motion (`MOTION_ENTRIES`): drawn over frame generation's object motion
+/// (frame_gen/motion.rs), instanced and flat.
+pub struct Motion {
+    pub instanced: wgpu::RenderPipeline,
+    pub flat: Option<wgpu::RenderPipeline>,
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+}
+
+impl Motion {
+    /// Group 2 for this frame: the unjittered `current` and last frame's `previous` clip
+    /// spaces, and the world's `depth`.
+    pub fn group(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        depth: &wgpu::TextureView,
+        current: glam::Mat4,
+        previous: glam::Mat4,
+    ) -> wgpu::BindGroup {
+        let mut data = [0f32; 32];
+        data[..16].copy_from_slice(&current.to_cols_array());
+        data[16..].copy_from_slice(&previous.to_cols_array());
+        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&data));
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Native shader pack terrain motion"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+            ],
+        })
+    }
 }
 
 /// The depth pre-pass of the solid terrain: `depth*` draw its depth alone (no colour), then the
@@ -392,6 +435,87 @@ fn horizon_material_displace(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: v
         select(0u, high & 7u, fluid), u32(fluid)));
 }
 ";
+
+/// The pack's terrain motion for TAA and DLSS (`Motion`): its vertex stage run at this frame's
+/// time and at the last one's (`frame.time` reads `horizon_motion_shift` earlier), and the
+/// pixels the world shows a moved corner at get the vector between, as frame_gen/motion.wgsl.
+const MOTION_ENTRIES: &str = "
+struct HorizonMotionParams {
+    current: mat4x4<f32>,
+    previous: mat4x4<f32>,
+}
+@group(2) @binding(0) var<uniform> horizon_motion: HorizonMotionParams;
+@group(2) @binding(1) var horizon_motion_depth: texture_2d<f32>;
+struct HorizonMotionOut {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) current: vec4<f32>,
+    @location(1) previous: vec4<f32>,
+    @location(2) moved: f32,
+}
+fn horizon_motion_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
+    light: vec2<u32>, origin: vec4<f32>) -> HorizonMotionOut {
+    let base = position + origin.xyz;
+    horizon_motion_shift = 0.0;
+    let now = horizon_material_displace(base, uv, layer, color, light);
+    horizon_motion_shift = frame.delta_time;
+    let then = horizon_material_displace(base, uv, layer, color, light);
+    horizon_motion_shift = 0.0;
+    var out: HorizonMotionOut;
+    out.clip = horizon_terrain_globals.view_proj * vec4(now, 1.0);
+    out.current = horizon_motion.current * vec4(now, 1.0);
+    out.previous = horizon_motion.previous * vec4(then, 1.0);
+    out.moved = select(0.0, 1.0, any(now != then));
+    return out;
+}
+@vertex fn horizon_motion_vs(
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> HorizonMotionOut {
+    return horizon_motion_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
+        color, light, origin);
+}
+@vertex fn horizon_motion_vs_flat(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
+) -> HorizonMotionOut {
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 8u]];
+    return horizon_motion_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
+        color, light, origin);
+}
+@fragment fn horizon_motion_fs(in: HorizonMotionOut) -> @location(0) vec4<f32> {
+    let stored = textureLoad(horizon_motion_depth, vec2<i32>(in.clip.xy), 0).r;
+    if in.moved < 0.5 || in.previous.w <= 0.0
+        || abs(in.clip.z - stored) > stored * 1e-3 + 1e-7 {
+        discard;
+    }
+    let now = in.current.xy / in.current.w;
+    let then = in.previous.xy / in.previous.w;
+    return vec4((then - now) * vec2(0.5, -0.5), 1.0, 0.0);
+}
+";
+
+/// `source` with every `frame.time` read as `horizon_motion_shift` seconds earlier (0 but in
+/// `MOTION_ENTRIES`' second call).
+fn shifted_time(source: &str) -> String {
+    let key = "frame.time";
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(source.len() + 256);
+    let mut rest = source;
+    while let Some(i) = rest.find(key) {
+        let before = rest[..i].chars().last().or_else(|| out.chars().last());
+        let after = rest[i + key.len()..].chars().next();
+        out.push_str(&rest[..i]);
+        if before.is_some_and(ident) || after.is_some_and(ident) {
+            out.push_str(key);
+        } else {
+            out.push_str("(frame.time - horizon_motion_shift)");
+        }
+        rest = &rest[i + key.len()..];
+    }
+    out.push_str(rest);
+    out + "\nvar<private> horizon_motion_shift: f32;\n"
+}
 
 /// The material prelude's `ray_occluded`, where the device has ray queries.
 pub(super) const RAYS: &str = "
@@ -1004,8 +1128,13 @@ fn shader_source(
     api: horizon_shader_api::Api,
     rays: bool,
 ) -> String {
-    let source = if source.contains("fn ray_hit(") {
+    let source = if vertex {
+        shifted_time(source)
+    } else {
         source.to_owned()
+    };
+    let source = if source.contains("fn ray_hit(") {
+        source
     } else {
         format!(
             "{source}\n{}\n@group(3) @binding(5) var<storage, read> material_ids: array<u32>;\n",
@@ -1030,6 +1159,11 @@ fn shader_source(
             String::new()
         }
     );
+    let terrain = if vertex {
+        terrain + MOTION_ENTRIES
+    } else {
+        terrain
+    };
     let extra = if rays {
         RAYS.to_owned() + FILTERED_MATERIAL_RAYS
     } else {
@@ -1341,6 +1475,102 @@ impl NativeMaterial {
             solid: after?,
             flat: after_flat?,
         };
+        let motion = if vertex {
+            let group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Native shader pack terrain motion"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let motion_layout = |flat: Option<&wgpu::BindGroupLayout>| {
+                let mut groups: [Option<&wgpu::BindGroupLayout>; GROUP as usize + 1] =
+                    Default::default();
+                groups[0] = Some(shape.globals);
+                groups[1] = flat;
+                groups[2] = Some(&group);
+                groups[GROUP as usize] = Some(&frame.layout);
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Native shader pack terrain motion"),
+                    bind_group_layouts: &groups,
+                    ..Default::default()
+                })
+            };
+            let pipeline =
+                |layout: &wgpu::PipelineLayout,
+                 entry: &str,
+                 buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
+                    let options = wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    };
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("Native shader pack terrain motion"),
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some(entry),
+                            compilation_options: options.clone(),
+                            buffers,
+                        },
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: Some(wgpu::Face::Back),
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some("horizon_motion_fs"),
+                            compilation_options: options,
+                            targets: &[Some(super::frame_gen::MOTION_FORMAT.into())],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+                };
+            let instanced_layout = motion_layout(None);
+            let instanced =
+                checked(&|| pipeline(&instanced_layout, "horizon_motion_vs", &buffers))?;
+            let flat_layout = shape.flat.map(|g| motion_layout(Some(g)));
+            let flat = match &flat_layout {
+                Some(layout) => Some(checked(&|| {
+                    pipeline(layout, "horizon_motion_vs_flat", &flat_vertices)
+                })?),
+                None => None,
+            };
+            Some(Motion {
+                instanced,
+                flat,
+                layout: group,
+                params: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Native shader pack terrain motion"),
+                    size: 128,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+            })
+        } else {
+            None
+        };
         Ok(Self {
             solid,
             translucent,
@@ -1348,6 +1578,7 @@ impl NativeMaterial {
             displaced,
             grid,
             prepass,
+            motion,
         })
     }
 }
@@ -1465,7 +1696,7 @@ mod tests {
         let material = "fn material(input: MaterialInput) -> Surface {\n    \
                 return Surface(input.albedo * input.tint * vec4(input.colored_light, 1.0));\n}\n";
         let vertex = "fn vertex(input: VertexInput) -> vec3<f32> {\n    \
-                return input.position + input.tint.rgb;\n}\n";
+                return input.position + input.tint.rgb * sin(frame.time);\n}\n";
         let files = [
             (MANIFEST, manifest),
             ("material.wgsl", material),
@@ -1482,6 +1713,18 @@ mod tests {
         )
         .validate(&module)
         .unwrap();
+        // The motion pass: the vertex stage again, a frame earlier.
+        for entry in ["horizon_motion_vs", "horizon_motion_vs_flat", "horizon_motion_fs"] {
+            assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn only_frame_time_reads_shift() {
+        let s = shifted_time("a(frame.time) + frame.time_of_day + myframe.time + frame.timer");
+        assert!(s.starts_with(
+            "a((frame.time - horizon_motion_shift)) + frame.time_of_day + myframe.time + frame.timer"
+        ));
     }
 
     #[test]
