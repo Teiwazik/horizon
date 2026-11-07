@@ -1372,6 +1372,8 @@ pub struct Renderer {
     /// Per-frame scratch, kept to avoid allocating every frame.
     visible: Vec<resident::Visible>,
     visible_lods: Vec<lod::Visible>,
+    /// When `HORIZON_SHADER_PACK_TIMING`'s distant-terrain line was last logged.
+    lod_logged: std::time::Instant,
     /// The sections a shader pack's shadow camera sees (`pack_post::ShadowView`).
     shadow_visible: Vec<resident::Visible>,
     translucent_draws: Vec<(u64, usize, [u32; 5], (u32, Option<u32>))>,
@@ -4995,6 +4997,7 @@ impl Renderer {
             multi_draw,
             visible: Vec::new(),
             visible_lods: Vec::new(),
+            lod_logged: std::time::Instant::now(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
             origins: Vec::new(),
@@ -8652,6 +8655,30 @@ impl Renderer {
                     }
                 }
             }
+        }
+        // What distant terrain costs (`HORIZON_SHADER_PACK_TIMING`): tiles drawn, and whether
+        // occlusion culling saw them (it is off in GPU-culled frames and under a water mirror).
+        if pack_timing::PassTiming::logging() && self.lod_logged.elapsed().as_secs() >= 1 {
+            let quads: u64 = visible_lods
+                .iter()
+                .filter_map(|v| self.lods.get(&v.key))
+                .map(|t| u64::from(t.drawn().solid))
+                .sum();
+            log::info!(
+                "lod: {} resident tiles, {} in view ({quads} solid quads), occlusion {}",
+                self.lods.len(),
+                visible_lods.len(),
+                if cull.is_some() {
+                    "on"
+                } else if gpu_frame {
+                    "off (GPU-culled frame)"
+                } else if mirror.is_some() {
+                    "off (mirror)"
+                } else {
+                    "off"
+                },
+            );
+            self.lod_logged = now;
         }
         // Phase 2's draws are tested where grouping left them.
         let runs = self
