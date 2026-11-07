@@ -189,6 +189,8 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
 }
 var<private> horizon_material_face_normal: vec3<f32>;
 var<private> horizon_material_albedo: vec3<f32>;
+// The pixel the rays' blue noise is read at.
+var<private> horizon_ray_pixel: vec2<f32>;
 struct HorizonMaterialSolid {
     @location(0) color: vec4<f32>,
     // The world target's surface data: `set_surface`'s, then the fragment's depth, which the
@@ -242,7 +244,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
         discard;
     }
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
-    return HorizonMaterialSolid(vec4(0.0), vec4(0.0), vec4(0.0));
+    return HorizonMaterialSolid(vec4(0.0), vec4(0u), vec4(0.0));
 }
 @fragment fn horizon_material_fs_translucent(in: HorizonMaterialOut) -> @location(0) vec4<f32> {
     let color = horizon_material_color(in, true);
@@ -277,7 +279,7 @@ const DISPLACED_ENTRIES: &str = "
     if length(in.base) >= horizon_displace_distance + 0.05 {
         discard;
     }
-    return HorizonMaterialSolid(vec4(0.0), vec4(0.0), vec4(0.0));
+    return HorizonMaterialSolid(vec4(0.0), vec4(0u), vec4(0.0));
 }
 ";
 

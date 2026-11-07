@@ -404,7 +404,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         h(
                             H::Reflex,
                             None,
-                            "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.",
+                            "NVIDIA Reflex: less input lag by pacing the GPU. Boost also raises its clock.",
                         ),
                     ],
                 ),

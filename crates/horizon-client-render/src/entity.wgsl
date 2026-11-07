@@ -46,6 +46,10 @@ struct Globals {
 // The armour layers' GlintSampler: vanilla samples enchanted_glint_armor with
 // the same repeating, linearly filtered sampler as the item glint.
 @group(0) @binding(7) var glint_armor_tex: texture_2d<f32>;
+// pack2x16snorm by hand: GLSL 330 has no packSnorm2x16.
+fn snorm16(v: f32) -> u32 {
+    return u32(i32(round(clamp(v, -1.0, 1.0) * 32767.0))) & 0xffffu;
+}
 struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -70,18 +74,18 @@ struct Out {
     @location(11) glint_uv: vec2<f32>,
     // Bit 0 drops the quad's back-facing pixels (Vertex::normal w = 1), like a culling render
     // type. For fs_entity_surface: bit 1 entity_light shaded the colour, bit 2 the back takes the
-    // reversed normal's shade, bit 3 unlit, bit 4 no normal.
+    // reversed normal's shade, bit 3 unlit, bit 4 no normal. Bits 8..15: the HDR tier of a
+    // light-giving particle (mesher::hdr_tier), from the overlay's high bits (particles.rs):
+    // fs_hdr_mark marks the frame with it. One flat u32 keeps the stage within GL's 15 inputs.
     @location(12) @interpolate(flat) cull: u32,
-    // HDR tier of a light-giving particle (mesher::hdr_tier), from the overlay's
-    // high bits (particles.rs): fs_hdr_mark marks the frame with it.
-    @location(13) @interpolate(flat) tier: u32,
     // For the ray-traced surface pass (fs_entity_surface): xy the vertex normal (octahedral, y
     // up), z the block light and w the sky light, 0..1, smooth across the face. `cull` holds
     // its flags.
-    @location(15) surface_normal: vec4<f32>,
+    @location(13) surface_normal: vec4<f32>,
     // HDR lighting (`hdr_scene`), 0 for what isn't lit.
     @location(14) scene: f32,
 }
+fn entity_tier(in: Out) -> u32 { return (in.cull >> 8u) & 0xffu; }
 // Shipped light.glsl; normals are already transformed and RGBA8_SNORM packed.
 fn entity_light(normal: vec3<f32>, nether: bool) -> f32 {
     let l0 = normalize(vec3(0.2, 1.0, -0.7));
@@ -189,7 +193,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
     var out = entity_vertex(position, uv, overlay & 0xffffu, color, light, normal);
     out.glint_uv = glint_uv;
-    out.tier = (overlay >> 16u) & 0xffu;
+    out.cull |= ((overlay >> 16u) & 0xffu) << 8u;
     return out;
 }
 // Retained bolt-local geometry, translated using the same f64 camera
@@ -199,7 +203,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>, @location(5) normal: vec4<f32>,
     @location(7) offset: vec3<f32>) -> Out {
     var out = entity_vertex(offset + position, uv, overlay & 0xffffu, color, light, normal);
-    out.tier = (overlay >> 16u) & 0xffu;
+    out.cull |= ((overlay >> 16u) & 0xffu) << 8u;
     return out;
 }
 struct CloudInfo {
@@ -406,7 +410,7 @@ struct EntitySurface {
     }
     var out: EntitySurface;
     // Data: 300 + the block light in 150ths, + the sky light as the fraction.
-    out.surface = vec4(bitcast<f32>(pack2x16snorm(e)), 0.0,
+    out.surface = vec4(bitcast<f32>(snorm16(e.x) | (snorm16(e.y) << 16u)), 0.0,
         300.0 + round(in.surface_normal.z * 150.0) + min(in.surface_normal.w, 0.999), in.clip.z);
     out.albedo = vec4(min(color.rgb / max(shade, 0.4), vec3(1.0)), 1.0);
     return out;
@@ -444,12 +448,12 @@ fn shadow_color(in: Out) -> vec4<f32> {
     // Fog hides a light source and the light on a surface as it hides everything else.
     let fogged = max(linear_fog(in.fog_distance.x, globals.fog.x, globals.fog.y),
         linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
-    if in.tier == 0u {
+    if entity_tier(in) == 0u {
         return vec4(0.0, 0.0, 0.0, hdr_scene_alpha(mix(in.scene, globals.hdr_light.y, fogged)));
     }
     // A layer that fades (the warden's) shines by what's left of it.
     let y = brightness(texel.rgb * in.color.rgb) * in.color.a * (1.0 - fogged);
-    return vec4(0.0, 0.0, 0.0, hdr_mark(in.tier, y));
+    return vec4(0.0, 0.0, 0.0, hdr_mark(entity_tier(in), y));
 }
 fn brightness(c: vec3<f32>) -> f32 {
     let l = pow(max(c, vec3(0.0)), vec3(2.2));
@@ -501,9 +505,9 @@ fn celestial_color(in: Out) -> vec4<f32> {
 @fragment fn fs_sky_celestial(in: Out) -> @location(0) vec4<f32> {
     let color = celestial_color(in);
     let added = color.rgb * color.a;
-    // The sun at the brightest tier, the moon at its own (in.tier); geometry that sets
+    // The sun at the brightest tier, the moon at its own (entity_tier(in)); geometry that sets
     // none (the End sky, the End flash) stays brightest.
-    let tier = select(in.tier, 4u, in.tier == 0u);
+    let tier = select(entity_tier(in), 4u, entity_tier(in) == 0u);
     let y = brightness(added);
     // Only what's past the tier's window takes the mark: a soft edge keeps the sky's light,
     // or it would come out darker than the sky around it.

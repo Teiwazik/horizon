@@ -16,6 +16,6 @@ struct StaticEntityUniform {
     var out = entity_vertex(camera_relative,
         uv, overlay & 0xffffu, color, light, normal);
     out.glint_uv = glint_uv;
-    out.tier = (overlay >> 16u) & 0xffu;
+    out.cull |= ((overlay >> 16u) & 0xffu) << 8u;
     return out;
 }

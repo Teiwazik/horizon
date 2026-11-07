@@ -740,7 +740,7 @@
   "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.",
   "NVIDIA Reflex": "NVIDIA Reflex",
   "On + Boost": "On + Boost",
-  "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.": "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.",
+  "NVIDIA Reflex: less input lag by pacing the GPU. Boost also raises its clock.": "NVIDIA Reflex: less input lag by pacing the GPU. Boost also raises its clock.",
   "horizon.extras.header.world": "World",
   "horizon.extras.pregen": "Chunk pregeneration",
   "horizon.extras.pregen.tooltip": "Enables /pregen in your single-player and LAN worlds. With cheats enabled, use /pregen start to generate an area before exploring it. Does not enable the command on servers you join.",

@@ -239,7 +239,7 @@
   "Which upscaler rebuilds the picture: FSR (TAA) or NVIDIA DLSS.": "Восстановление изображения: FSR (TAA) или NVIDIA DLSS.",
   "NVIDIA Reflex": "NVIDIA Reflex",
   "On + Boost": "Вкл. + Boost",
-  "NVIDIA Reflex: reduces input latency by pacing GPU work. On + Boost increases GPU clock.": "NVIDIA Reflex: снижает задержку ввода, оптимизируя очередь кадров GPU. Режим On + Boost удерживает повышенные частоты GPU.",
+  "NVIDIA Reflex: less input lag by pacing the GPU. Boost also raises its clock.": "NVIDIA Reflex: меньше задержка ввода за счёт очереди кадров GPU. Boost повышает частоты GPU.",
   "Shader Packs...": "Шейдерпаки...",
   "Installed": "Установленные",
   "Apply": "Применить",
