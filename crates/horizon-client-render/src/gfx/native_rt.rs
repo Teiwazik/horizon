@@ -103,6 +103,11 @@ pub struct RayScene {
     used: usize,
     logged: std::time::Instant,
     builds: usize,
+    /// Since the last log: entity structures made, and the last frame's visible sections and
+    /// light count (`HORIZON_SHADER_PACK_TIMING`'s once-a-second line).
+    entity_builds: usize,
+    visible: usize,
+    lights_used: usize,
 }
 
 fn sizes(quads: u32, opaque: bool) -> wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -278,6 +283,9 @@ impl RayScene {
             used: 0,
             logged: std::time::Instant::now(),
             builds: 0,
+            entity_builds: 0,
+            visible: 0,
+            lights_used: 0,
         })
     }
 
@@ -434,6 +442,7 @@ impl RayScene {
             position: [lights.len() as f32, origin.x, origin.y, origin.z],
             color: [0.0; 4],
         }];
+        self.lights_used = lights.len();
         out.extend(lights.into_iter().map(|l| l.2));
         queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&out));
         queue.write_buffer(&self.light_cells, 0, bytemuck::cast_slice(&self.light_grid));
@@ -450,6 +459,7 @@ impl RayScene {
         indices: &wgpu::Buffer,
     ) {
         let near = |o: [f32; 3]| o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
+        self.visible = sections.len();
         sections.retain(|s| s.solid + s.translucent > 0 && near(s.origin) <= RADIUS * RADIUS);
         sections.sort_by(|a, b| near(a.origin).total_cmp(&near(b.origin)));
         let mut seen = crate::fast_hash::FxHashMap::default();
@@ -584,6 +594,7 @@ impl RayScene {
                     )
                 })
             });
+        self.entity_builds += usize::from(entity_blas.is_some());
         if let (Some(e), Some(s), Some(b)) = (&entities, &entity_sizes, &entity_blas) {
             let mut geometry = Vec::new();
             if e.quads > 0 {
@@ -644,7 +655,24 @@ impl RayScene {
         }
         self.used = count;
         encoder.build_acceleration_structures(entries.iter(), std::iter::once(&self.tlas));
-        if self.logged.elapsed().as_secs() >= 5 {
+        let timing = super::pack_timing::PassTiming::logging();
+        if timing && self.logged.elapsed().as_secs() >= 1 {
+            let free: u64 = self.free.iter().map(|f| f.1).sum();
+            let hole = self.free.iter().map(|f| f.1).max().unwrap_or(0);
+            log::info!(
+                "ray scene/s: {} builds, {} entity structures, {} built, {} visible sections, \
+                 {} lights, {} free ranges, largest {hole} of {free} free vertices",
+                self.builds,
+                self.entity_builds,
+                self.built.len(),
+                self.visible,
+                self.lights_used,
+                self.free.len(),
+            );
+            self.logged = std::time::Instant::now();
+            self.builds = 0;
+            self.entity_builds = 0;
+        } else if !timing && self.logged.elapsed().as_secs() >= 5 {
             let free: u64 = self.free.iter().map(|f| f.1).sum();
             log::info!(
                 "ray scene: {count} instances, {} sections, {} structures built in 5 s, vertices {} MiB of {} MiB",
