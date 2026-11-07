@@ -5635,7 +5635,7 @@ impl Renderer {
             self.section_uploaded.insert(key, now);
             self.newest_upload = Some(now);
         }
-        self.release_section(key);
+        self.replace_section(key);
         let section = self
             .upload_mesh(mesh)
             .map(|section| SectionGpu { fading, ..section });
@@ -5903,6 +5903,16 @@ impl Renderer {
             .any(|(_, sorted)| sorted.is_some())
         {
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        }
+    }
+    /// A section's mesh is replaced: as `release_section`, but the ray scene keeps tracing the
+    /// old structures until the new ones are built.
+    fn replace_section(&mut self, key: SectionKey) {
+        if let Some(rt) = self.native.as_mut().and_then(|n| n.frame.rays.as_mut()) {
+            rt.retire(key);
+        }
+        if let Some(s) = self.sections.remove(key) {
+            self.release_mesh(s);
         }
     }
     fn release_section(&mut self, key: SectionKey) {

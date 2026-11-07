@@ -115,6 +115,9 @@ pub struct RayScene {
     light_cell_lists: Vec<Vec<(f32, u16)>>,
     light_out: Vec<Light>,
     built: crate::fast_hash::FxHashMap<SectionKey, Built>,
+    /// Sections whose mesh changed: their old structures, still traced (and their data still
+    /// held) until the new ones are built, so a remesh never leaves a hole in the rays.
+    stale: crate::fast_hash::FxHashMap<SectionKey, Built>,
     /// Free ranges of `data`, in vertices, in order.
     free: Vec<(u64, u64)>,
     used: usize,
@@ -323,6 +326,7 @@ impl RayScene {
             light_cell_lists: Vec::new(),
             light_out: Vec::new(),
             built: Default::default(),
+            stale: Default::default(),
             free: vec![(0, DATA_VERTICES)],
             used: 0,
             logged: std::time::Instant::now(),
@@ -361,6 +365,21 @@ impl RayScene {
     /// A section's mesh went away.
     pub fn forget(&mut self, key: SectionKey) {
         if let Some(b) = self.built.remove(&key) {
+            self.release(b.data, b.count);
+        }
+        self.drop_stale(key);
+    }
+
+    /// A section's mesh is being replaced: its structures stay traced until rebuilt.
+    pub fn retire(&mut self, key: SectionKey) {
+        if let Some(b) = self.built.remove(&key) {
+            self.drop_stale(key);
+            self.stale.insert(key, b);
+        }
+    }
+
+    fn drop_stale(&mut self, key: SectionKey) {
+        if let Some(b) = self.stale.remove(&key) {
             self.release(b.data, b.count);
         }
     }
@@ -528,6 +547,7 @@ impl RayScene {
         let gone: Vec<SectionKey> = self
             .built
             .keys()
+            .chain(self.stale.keys())
             .filter(|key| !seen.contains_key(*key))
             .copied()
             .collect();
@@ -554,10 +574,15 @@ impl RayScene {
                 break;
             }
             let count = u64::from(s.solid + s.translucent) * 4;
+            self.drop_stale(s.key);
             // Full: the farthest sections give way to a nearer one.
             let data = loop {
                 if let Some(data) = self.alloc(count) {
                     break Some(data);
+                }
+                if let Some(&key) = self.stale.keys().next() {
+                    self.drop_stale(key);
+                    continue;
                 }
                 let farther = sections[i + 1..]
                     .iter()
@@ -716,7 +741,7 @@ impl RayScene {
             if s.visibility < 0.5 {
                 continue;
             }
-            let Some(b) = self.built.get(&s.key) else {
+            let Some(b) = self.built.get(&s.key).or_else(|| self.stale.get(&s.key)) else {
                 continue;
             };
             let [x, y, z] = s.origin;
