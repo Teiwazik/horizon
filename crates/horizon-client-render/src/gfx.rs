@@ -1374,6 +1374,8 @@ pub struct Renderer {
     visible_lods: Vec<lod::Visible>,
     /// When `HORIZON_SHADER_PACK_TIMING`'s distant-terrain line was last logged.
     lod_logged: std::time::Instant,
+    /// Last `state:` line logged (`HORIZON_SHADER_PACK_TIMING`), to log only changes.
+    state_logged: String,
     /// The sections a shader pack's shadow camera sees (`pack_post::ShadowView`).
     shadow_visible: Vec<resident::Visible>,
     translucent_draws: Vec<(u64, usize, [u32; 5], (u32, Option<u32>))>,
@@ -4998,6 +5000,7 @@ impl Renderer {
             visible: Vec::new(),
             visible_lods: Vec::new(),
             lod_logged: std::time::Instant::now(),
+            state_logged: String::new(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
             origins: Vec::new(),
@@ -8674,6 +8677,32 @@ impl Renderer {
                 .filter_map(|v| self.lods.get(&v.key))
                 .map(|t| u64::from(t.drawn().solid))
                 .sum();
+            let state = format!(
+                "window {}x{}, world scale {:.2}, upscale ratio {:.2}, taa {}, upscaler {}, dlss requested {}, frame generation {} ({}), antialias {}, lod tiles resident {} / in view {}, mirror {}, underwater {}, fov {:.0}, present {:?}",
+                self.config.width,
+                self.config.height,
+                self.world_post.scale,
+                self.world_post.upscale,
+                self.world_post.taa,
+                self.upscaler_label().unwrap_or_else(|| "off".into()),
+                self.world_post.use_dlss,
+                if self.frame_gen.on { "on" } else { "off" },
+                self.frame_gen.label(),
+                self.world_post.antialias,
+                self.lods.len(),
+                visible_lods.len(),
+                mirror.is_some(),
+                frame.underwater,
+                frame.fov_degrees,
+                self.config.present_mode,
+            );
+            // Log a change at once; resident/in-view counts alone don't count as one.
+            let key = state.split(", lod tiles").next().unwrap_or("").to_owned()
+                + &(self.lods.is_empty()).to_string();
+            if key != self.state_logged {
+                log::info!("state changed: {state}");
+                self.state_logged = key;
+            }
             log::info!(
                 "lod: {} resident tiles, {} in view ({quads} solid quads), occlusion {}",
                 self.lods.len(),
