@@ -353,7 +353,7 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
 // depth, so that the pack lights it as it lights terrain. The surface's data is 300 + the block
 // light in 150ths + the sky light (0..0.999); unlit parts (beams, portals, clouds) leave nothing.
 struct EntitySurface {
-    @location(0) surface: vec4<f32>,
+    @location(0) surface: vec4<u32>,
     @location(1) albedo: vec4<f32>,
 }
 @fragment fn fs_entity_surface(in: Out, @builtin(front_facing) front: bool) -> EntitySurface {
@@ -410,8 +410,9 @@ struct EntitySurface {
     }
     var out: EntitySurface;
     // Data: 300 + the block light in 150ths, + the sky light as the fraction.
-    out.surface = vec4(bitcast<f32>(snorm16(e.x) | (snorm16(e.y) << 16u)), 0.0,
-        300.0 + round(in.surface_normal.z * 150.0) + min(in.surface_normal.w, 0.999), in.clip.z);
+    // The surface target holds the bits of the floats (SURFACE_FORMAT is Rgba32Uint).
+    out.surface = bitcast<vec4<u32>>(vec4(bitcast<f32>(snorm16(e.x) | (snorm16(e.y) << 16u)), 0.0,
+        300.0 + round(in.surface_normal.z * 150.0) + min(in.surface_normal.w, 0.999), in.clip.z));
     out.albedo = vec4(min(color.rgb / max(shade, 0.4), vec3(1.0)), 1.0);
     return out;
 }
