@@ -224,8 +224,8 @@ mod narrator;
 mod native_biome_colors;
 pub mod native_block_entity_draw;
 mod native_block_sprites;
-mod native_chunk_snapshot;
 mod native_bots;
+mod native_chunk_snapshot;
 mod native_chunk_tickets;
 mod native_claimed_items;
 mod native_client_entities;
@@ -268,10 +268,10 @@ mod native_packets;
 mod native_panel;
 mod native_panel_recipes;
 mod native_permissions;
+mod native_player_fx;
 mod native_player_reads;
 mod native_player_state;
 mod native_profiles;
-mod native_player_fx;
 mod native_projectiles;
 mod native_quick_move;
 mod native_recipes;
@@ -280,8 +280,8 @@ mod native_scene;
 mod native_server;
 mod native_shaders;
 mod native_structures;
-pub mod native_text_field;
 mod native_terrain_model;
+pub mod native_text_field;
 mod native_ticks;
 mod native_travel;
 mod native_view_distance;
@@ -9266,7 +9266,8 @@ impl Game<'_> {
         // the sleep overlay, debug screen and open screens still draw.
         let spectator = self.spectator();
         let (wi, hi) = (w as i32, h as i32);
-        let show_hud = !self.ui.hide_gui && !(self.screen == Screen::Options && self.ui.options.preview);
+        let show_hud =
+            !self.ui.hide_gui && !(self.screen == Screen::Options && self.ui.options.preview);
         if show_hud {
             self.draw_spyglass(&mut batch);
             // Hud.extractCrosshair / extractItemHotbar / extractPlayerHealth /

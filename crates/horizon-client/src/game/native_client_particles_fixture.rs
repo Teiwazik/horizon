@@ -128,6 +128,7 @@ impl Game<'_> {
             0.0,
             1.0,
             &|_| 15,
+            false,
             &mut vertices,
         );
         assert_eq!(
@@ -170,6 +171,7 @@ impl Game<'_> {
             0.0,
             1.0,
             &|_| 15,
+            false,
             &mut vertices,
         );
         assert_eq!(vertices.len(), 4);

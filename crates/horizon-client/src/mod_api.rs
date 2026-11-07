@@ -56,9 +56,9 @@ pub use crate::mobs::{Mob, MobWorld};
 pub use crate::music::{Music, MusicLayer};
 pub use crate::particles::{ParticleOptions, ParticleType};
 pub use crate::recipe_book::RecipeBookCategory;
+pub use crate::sound_engine::SoundPlayback;
 /// A named step of the server tick and its wall and CPU milliseconds (`native_server_tick_timed`).
 pub use crate::spans::Span as TickSpan;
-pub use crate::sound_engine::SoundPlayback;
 pub use crate::terrain_model::{
     NativeModelMaterial, NativeModelRenderOptions, NativeModelShade, NativeModelUvShift,
 };

@@ -7865,8 +7865,6 @@ mod stand_fall_save_tests {
         }
     }
 
-
-
     /// `Entity.saveWithoutId`'s common fields are filled in when a raw compound
     /// (a marker's) lacks them, and explicit values win.
     #[test]

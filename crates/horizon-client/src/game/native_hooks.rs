@@ -998,7 +998,10 @@ use crate::mod_api::NativeTextField;
 use horizon_assets::item_model::StackView;
 use horizon_client::mod_api::EntityDataValue;
 use horizon_client::mod_api::{
-    self, BlockProperties, NativeBossBar, NativeCamera, NativeCommand, NativeDispensed, NativeFluidAction, NativeFluidDrain, NativeFluidStack, NativeFluidTankView, NativeLifecycleContext, NativeNoteBlockChange, NativeServerPlayer, RecipeBookCategory, ServerTickPhase, TickSpan, WorldPhase,
+    self, BlockProperties, NativeBossBar, NativeCamera, NativeCommand, NativeDispensed,
+    NativeFluidAction, NativeFluidDrain, NativeFluidStack, NativeFluidTankView,
+    NativeLifecycleContext, NativeNoteBlockChange, NativeServerPlayer, RecipeBookCategory,
+    ServerTickPhase, TickSpan, WorldPhase,
 };
 use horizon_client::mod_api::{AttachmentResult, Attachments, Holder, LayerDefinition, Suggestion};
 pub(crate) use horizon_client::mod_api::{
@@ -7332,6 +7335,15 @@ impl Game<'_> {
         collide: &mut bool,
     ) {
         mod_api::dispatch_projectile_world_border(
+            mod_api::mods(),
+            dimension,
+            entity,
+            kind,
+            pos,
+            velocity,
+            collide,
+        );
+    }
     /// A play packet the server is about to send `player`'s client (ProtocolLib's and
     /// PacketEvents' outgoing packet listener; there is no NeoForge or Bukkit event): every
     /// packet the server sends a guest in play, a broadcast once for each of its players, in
@@ -7455,9 +7467,9 @@ impl Game<'_> {
             dimension,
             entity,
             kind,
-            pos,
-            velocity,
-            collide,
+            target,
+            target_mob,
+            cancel,
         );
     }
     /// A guest is about to throw `stack` (a snowball, an egg, an ender pearl,
@@ -7607,11 +7619,6 @@ impl Game<'_> {
             kind,
             from,
             to,
-            cancel,
-        );
-    }
-            target,
-            target_mob,
             cancel,
         );
     }

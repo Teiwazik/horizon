@@ -618,12 +618,12 @@ impl Game<'_> {
     pub(super) fn post_game_event(&mut self, event: &'static str, pos: [f64; 3], ctx: Context) {
         #[cfg(test)]
         {
-        TEST_POSTED_EVENTS.with(|events| {
-            if let Some(events) = events.borrow_mut().as_mut() {
-                events.push((event, pos, ctx.source));
-            }
-        });
-        super::item_use::interact_vibration_tests::record_event(event, pos, ctx.source);
+            TEST_POSTED_EVENTS.with(|events| {
+                if let Some(events) = events.borrow_mut().as_mut() {
+                    events.push((event, pos, ctx.source));
+                }
+            });
+            super::item_use::interact_vibration_tests::record_event(event, pos, ctx.source);
         }
         self.post_game_event_with(event, pos, |_| ctx);
     }

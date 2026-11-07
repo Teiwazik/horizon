@@ -175,8 +175,24 @@ fn entry(path: &Path) -> Option<Entry> {
         // name: picking it says why in the chat.
         let manifest = horizon_shader_api::Pack::read_manifest(path).ok();
         let (key, title, options, pages, presets) = manifest.map_or_else(
-            || (file.clone(), file.clone(), Vec::new(), Vec::new(), Vec::new()),
-            |m| (format!("horizon:{}", m.id), m.name, m.options, m.pages, m.presets),
+            || {
+                (
+                    file.clone(),
+                    file.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            },
+            |m| {
+                (
+                    format!("horizon:{}", m.id),
+                    m.name,
+                    m.options,
+                    m.pages,
+                    m.presets,
+                )
+            },
         );
         return Some(Entry {
             key,

@@ -2735,15 +2735,28 @@ impl Game<'_> {
         w: f32,
         h: f32,
     ) {
-        let (background, border_top, border_bottom) =
-            (rgba(0x10, 0x00, 0x10, 0xf0), rgba(0x50, 0x00, 0xff, 0x50), rgba(0x28, 0x00, 0x7f, 0x50));
+        let (background, border_top, border_bottom) = (
+            rgba(0x10, 0x00, 0x10, 0xf0),
+            rgba(0x50, 0x00, 0xff, 0x50),
+            rgba(0x28, 0x00, 0x7f, 0x50),
+        );
         batch.fill(atlas, x - 3.0, y - 4.0, w + 6.0, 1.0, background);
         batch.fill(atlas, x - 3.0, y + h + 3.0, w + 6.0, 1.0, background);
         batch.fill(atlas, x - 4.0, y - 3.0, w + 8.0, h + 6.0, background);
         batch.fill(atlas, x - 3.0, y - 3.0, w + 6.0, 1.0, border_top);
         batch.fill(atlas, x - 3.0, y + h + 2.0, w + 6.0, 1.0, border_bottom);
-        batch.fill_gradient(atlas, (x - 3.0, y - 2.0, 1.0, h + 4.0), border_top, border_bottom);
-        batch.fill_gradient(atlas, (x + w + 2.0, y - 2.0, 1.0, h + 4.0), border_top, border_bottom);
+        batch.fill_gradient(
+            atlas,
+            (x - 3.0, y - 2.0, 1.0, h + 4.0),
+            border_top,
+            border_bottom,
+        );
+        batch.fill_gradient(
+            atlas,
+            (x + w + 2.0, y - 2.0, 1.0, h + 4.0),
+            border_top,
+            border_bottom,
+        );
     }
     pub(super) fn tooltip_text(
         batch: &mut HudBatch,
