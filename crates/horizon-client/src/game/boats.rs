@@ -476,14 +476,14 @@ impl Game<'_> {
         Some(plane)
     }
     /// Whether a native pack draws the waterline itself: its mirror is on and the eye is
-    /// within 0.3 blocks below the surface, so neither the engine's nor the pack's
+    /// within 0.6 blocks below the surface, so neither the engine's nor the pack's
     /// whole-screen under-water look applies.
     pub(super) fn pack_waterline(&self, eye: glam::DVec3) -> bool {
-        let w = self.eye_water_line(eye);
-        // The pack's split view reaches 0.6 blocks under the surface (`eye_water_line`'s
-        // scale is 1.5 blocks per unit).
-        w > 0.5
-            && w < 0.9
+        // The pack's split view reaches 0.6 blocks under the surface. Read in blocks, not
+        // from `eye_water_line`'s f32: an eye a hair under the surface rounds to 0.5 there
+        // and would fall to the whole-screen under-water look.
+        self.eye_surface_depth(eye)
+            .is_some_and(|rel| (0.0..0.6).contains(&rel))
             && self
                 .renderer
                 .as_ref()
@@ -493,6 +493,12 @@ impl Game<'_> {
     /// water's surface in the camera's own column lies within 0.75 blocks of the eye, else 0.
     /// Read from the column itself, never the remembered mirror plane.
     pub(super) fn eye_water_line(&self, eye: glam::DVec3) -> f32 {
+        self.eye_surface_depth(eye)
+            .map_or(0.0, |rel| (0.5 + rel / 1.5).clamp(0.001, 0.999) as f32)
+    }
+    /// The water's surface in the eye's column minus the eye's height, in blocks (positive:
+    /// the eye is under it), when it lies within 0.75 blocks.
+    fn eye_surface_depth(&self, eye: glam::DVec3) -> Option<f64> {
         let (x, y, z) = (
             eye.x.floor() as i32,
             eye.y.floor() as i32,
@@ -502,17 +508,25 @@ impl Game<'_> {
             if let Some((h, _)) = self.fluid_height_of(x, by, z, Some(Fluid::Water)) {
                 if h >= 1.0 {
                     // Water above it as well: the surface is higher still.
-                    return 0.0;
+                    return None;
                 }
                 let rel = f64::from(by) + f64::from(h) - eye.y;
-                return if rel.abs() < 0.75 {
-                    (0.5 + rel / 1.5).clamp(0.001, 0.999) as f32
-                } else {
-                    0.0
-                };
+                return (rel.abs() < 0.75).then_some(rel);
             }
         }
-        0.0
+        None
+    }
+    /// `Camera.getFluidInCamera` for the view: in the band where a native pack draws the
+    /// waterline itself the camera counts as in the air, so neither the engine's water fog
+    /// and overlay nor its narrower under-water FOV land on the pack's split view.
+    pub(super) fn view_fog_type(&self, at: [f64; 3]) -> horizon_client::fog::FogType {
+        use horizon_client::fog::FogType;
+        match horizon_client::fog::fog_type(&self.world, self.res.facts(), at, &self.near_plane()) {
+            FogType::Water if self.pack_waterline(glam::DVec3::from_array(at)) => {
+                FogType::Atmospheric
+            }
+            other => other,
+        }
     }
     /// `FluidState.getHeight` and whether it is a source, for `fluid` or,
     /// with `None`, any fluid (`ClipContext.Fluid.ANY`).

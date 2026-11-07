@@ -108,7 +108,7 @@ impl Game<'_> {
     ) -> FogData {
         let forward = self.forward();
         let at = [camera.x, camera.y, camera.z];
-        let fog_type = fog_type(&self.world, self.res.facts(), at, &self.near_plane());
+        let fog_type = self.view_fog_type(at);
         let (rain, thunder) = self.view_weather(self.clock.fraction() as f32);
         let title_fog = horizon_client::fog::FogTables::default();
         let tables = if self.title.is_some() {
@@ -322,8 +322,7 @@ impl Game<'_> {
                 }
             }
         }
-        let in_water =
-            fog_type(&self.world, self.res.facts(), eye, &self.near_plane()) == FogType::Water;
+        let in_water = self.view_fog_type(eye) == FogType::Water;
         let water =
             (in_water && !spectator).then(|| (self.eye_brightness(eye), self.yaw, self.pitch));
         // Hud.extractCameraOverlays; the spyglass scope (and its easing) is
@@ -404,8 +403,7 @@ impl Game<'_> {
             let nausea = self.potions.effects.get("nausea").map(nausea_has_effect);
             self.screen_fx.tick_spinning(nausea);
             // LocalPlayer water vision and AtmosphericFogEnvironment rain fog.
-            let in_water =
-                fog_type(&self.world, self.res.facts(), e, &self.near_plane()) == FogType::Water;
+            let in_water = self.view_fog_type(e) == FogType::Water;
             self.fog.tick(in_water);
             let b = [
                 e[0].floor() as i32,
