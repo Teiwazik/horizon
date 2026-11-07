@@ -303,12 +303,24 @@ pub fn trust_and_capabilities(
     id: &str,
     instance: Option<&crate::instances::Instance>,
 ) -> Vec<String> {
+    let (mut lines, fit) = trust_and_fit(id, instance);
+    lines.extend(fit.map(|(_, line)| line));
+    lines
+}
+
+/// [`trust_and_capabilities`] apart from how a native mod fits, when that is known: the fit and
+/// its line come back on their own, for the browser's badge.
+pub fn trust_and_fit(
+    id: &str,
+    instance: Option<&crate::instances::Instance>,
+) -> (Vec<String>, Option<(crate::native_fit::Fit, String)>) {
     let Ok(index) = index() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let Some(p) = index.project(id) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
+    let mut fit = None;
     let mut lines = vec![if official(p) {
         "Made by Horizon".to_owned()
     } else {
@@ -327,16 +339,14 @@ pub fn trust_and_capabilities(
         );
         if let Some(v) = p.versions.iter().find(|v| v.game == GAME) {
             let pin = v.api.split('/').nth(1).unwrap_or_default();
-            lines.push(
-                instance
-                    .and_then(|i| crate::native_fit::line(i, &p.id, v.hooks, pin, &v.broken_on))
-                    .unwrap_or_else(|| {
-                        format!(
-                            "Built by the launcher on Horizon {}",
-                            &pin[..pin.len().min(7)]
-                        )
-                    }),
-            );
+            fit = instance
+                .and_then(|i| crate::native_fit::judge(i, &p.id, v.hooks, pin, &v.broken_on));
+            if fit.is_none() {
+                lines.push(format!(
+                    "Built by the launcher on Horizon {}",
+                    &pin[..pin.len().min(7)]
+                ));
+            }
         }
     }
     if let Some(v) = p.versions.first().filter(|_| p.kind == index::Kind::Mod) {
@@ -349,7 +359,7 @@ pub fn trust_and_capabilities(
             lines.push("Asks for nothing beyond its own log".into());
         }
     }
-    lines
+    (lines, fit)
 }
 
 fn project_of(p: &index::Project) -> Option<Project> {

@@ -9,13 +9,13 @@
 //!   source lists for the kind.
 //! - Icons and gallery images come from the source's image servers at run time, cached on disk;
 //!   a placeholder stands in until one arrives.
-use super::mods_page::{Checking, Event};
+use super::mods_page::{Checking, Event, Tone};
 use super::*;
 use gpui::img;
 use horizon_launcher::browser::{
     self,
     details::{self, Details, Environment, Filters, Image, Sort, Tags},
-    images, java, Kind as PackKind, Project, SourceId, Support, Version,
+    images, java, Kind as PackKind, Project, SourceId, Version,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -668,11 +668,12 @@ impl Launcher {
         let p = o.project.clone();
         let tab = o.tab;
         let shot = o.shot;
-        let support = self.mods.support(&p);
-        let color = match support {
-            Support::Works => t.success,
-            Support::Partial(_) => t.warn,
-            Support::No(_) => t.muted,
+        let status = self.mods.status(&p);
+        let color = match status.tone {
+            Tone::Good => t.success,
+            Tone::Warn => t.warn,
+            Tone::Bad => t.danger,
+            Tone::Off => t.muted,
         };
         let back = button("mods-back", "Back to results", Kind::Ghost, &t).on_click(cx.listener(
             |this, _: &ClickEvent, _, cx| {
@@ -729,20 +730,22 @@ impl Launcher {
         let busy = self.mods.busy.as_ref().map(|b| b.0.clone());
         let installed = self.mods.entry(&p).is_some();
         let checking = self.mods.checking(&p);
-        let mut action = div().flex().items_center().gap(px(8.)).child(
-            caps(if checking {
-                tr("Checking")
-            } else {
-                tr(support.label())
-            })
-            .flex_none()
-            .text_color(color),
-        );
+        let word = if checking {
+            tr("Checking")
+        } else {
+            tr(status.label)
+        };
+        // The glass look's status sits in a pill, legible over any background picture.
+        let word = match t.glass {
+            true => crate::glass_ui::status_pill(word, color),
+            false => caps(word).flex_none().text_color(color),
+        };
+        let mut action = div().flex().items_center().gap(px(8.)).child(word);
         if busy.as_deref() == Some(p.id.as_str()) {
             action = action.child(caps(tr("Installing")).text_color(t.accent));
         } else if installed {
             action = action.child(caps(tr("Installed")).text_color(t.muted));
-        } else if support.installable() && !checking {
+        } else if status.installable() && !checking {
             let label = if p.kind == PackKind::Modpack {
                 "Import"
             } else {
@@ -824,11 +827,14 @@ impl Launcher {
                     })),
             );
         }
-        if let Some(why) = support.reason() {
+        if let Some(why) = &status.reason {
             page = page.child(
                 text(theme::UI)
-                    .text_color(t.ink_soft)
-                    .child(why.to_string()),
+                    .text_color(match status.tone {
+                        Tone::Bad => t.danger,
+                        _ => t.ink_soft,
+                    })
+                    .child(why.clone()),
             );
         }
         if let Some(Checking::Done(c)) = self.mods.checks.get(&(p.source, p.id.clone())) {

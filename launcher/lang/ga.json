@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "San áit ina bhfuil tú, éilítear sraith na mbunaitheoirí trí sheiceáil saor in aisce ar playhorizon.dev. Éiligh ón Siopa í: osclaíonn sé an tseiceáil duit.",
   "The founder set can't be claimed from your country.": "Ní féidir sraith na mbunaitheoirí a éileamh ó do thír.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Update Horizon",
+  "Rebuilds Horizon": "Rebuilds Horizon",
+  "Install anyway": "Install anyway",
+  "Doesn't build": "Doesn't build",
+  "Conflicts": "Conflicts"
 }

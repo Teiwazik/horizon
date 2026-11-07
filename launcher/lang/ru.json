@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "В вашей стране набор основателя получают через бесплатное оформление на playhorizon.dev. Получите его в Магазине: он сам откроет оформление.",
   "The founder set can't be claimed from your country.": "Набор основателя нельзя получить из вашей страны.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Обновите Horizon",
+  "Rebuilds Horizon": "Пересоберёт Horizon",
+  "Install anyway": "Всё равно установить",
+  "Doesn't build": "Не собирается",
+  "Conflicts": "Конфликт"
 }

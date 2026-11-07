@@ -397,10 +397,9 @@ impl Launcher {
             let installed = m.entry(&p).is_some();
             let busy = m.busy.as_ref().is_some_and(|b| b.0 == p.id);
             let checking = m.checking(&p);
-            let can_install =
-                !installed && !checking && m.busy.is_none() && m.support(&p).installable();
-            let action: AnyElement = if installed || busy || checking || m.support(&p).installable()
-            {
+            let status = m.status(&p);
+            let can_install = !installed && !checking && m.busy.is_none() && status.installable();
+            let action: AnyElement = if installed || busy || checking || status.installable() {
                 let label = if installed {
                     tr("Installed")
                 } else if checking {
@@ -432,19 +431,12 @@ impl Launcher {
             } else {
                 div().flex_none().w(px(20.)).into_any_element()
             };
-            // The registry's rows end with downloads, the others' with how they run (`compat`).
-            let right = if p.source == SourceId::Horizon {
+            // The registry's rows end with downloads, or a native mod's fit when it isn't fine;
+            // the others' with how they run (`compat`).
+            let right = if p.source == SourceId::Horizon && status.tone == Tone::Good {
                 ui::text(13., FontWeight::NORMAL, 0.5).child(count(p.downloads).to_uppercase())
             } else {
-                let support = m.support(&p);
-                let tone = match support {
-                    Support::Works => ui::live(),
-                    Support::Partial(_) => ui::warn(),
-                    Support::No(_) => white(0.4),
-                };
-                ui::text(13., FontWeight::MEDIUM, ink::FULL)
-                    .text_color(tone)
-                    .child(tr(support.label()))
+                ui::status_pill(tr(status.label), glass_tone(status.tone))
             };
             let id = p.id.clone();
             list = list.child(
@@ -551,7 +543,7 @@ impl Launcher {
         let p = self.mods_picked()?;
         let icon = self.mods_icon(&p, 64.);
         let m = &self.mods;
-        let support = m.support(&p);
+        let status = m.status(&p);
         let entry = m.entry(&p).cloned();
         let busy = m.busy.as_ref().map(|b| b.0.clone());
         let checking = m.checking(&p);
@@ -565,11 +557,7 @@ impl Launcher {
         if !p.license.is_empty() {
             by.push(p.license.clone());
         }
-        let (tone, reason) = match &support {
-            Support::Works => (ui::live(), None),
-            Support::Partial(_) => (ui::warn(), support.reason()),
-            Support::No(_) => (white(0.55), support.reason()),
-        };
+        let tone = glass_tone(status.tone);
         let about = m
             .about
             .get(&p.id)
@@ -611,7 +599,7 @@ impl Launcher {
             .w_full()
             .opacity(0.6)
             .into_any_element()
-        } else if support.installable() {
+        } else if status.installable() {
             let label = if p.kind == PackKind::Modpack {
                 tr("Import as an instance").to_string()
             } else {
@@ -635,7 +623,7 @@ impl Launcher {
             })
             .into_any_element()
         } else {
-            ui::quiet("mods-detail-cannot", tr(support.label()), 44., &t)
+            ui::quiet("mods-detail-cannot", tr(status.label), 44., &t)
                 .w_full()
                 .opacity(0.5)
                 .into_any_element()
@@ -686,21 +674,23 @@ impl Launcher {
                         .line_height(px(20.))
                         .child(a)
                 }))
-                .child(
-                    div()
-                        .mt(px(16.))
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(tone)
-                        .child(trf(
-                            "{support} in Horizon",
-                            &[("support", tr(support.label()))],
-                        )),
-                )
-                .children(reason.map(|r| {
-                    ui::text(13., FontWeight::NORMAL, 0.55)
-                        .mt(px(4.))
-                        .child(r.to_string())
+                .child(div().flex().mt(px(16.)).child(ui::status_pill(
+                    if status.fit && status.tone != Tone::Good {
+                        tr(status.label).to_string()
+                    } else {
+                        trf("{support} in Horizon", &[("support", tr(status.label))])
+                    },
+                    tone,
+                )))
+                .children(status.reason.clone().map(|r| {
+                    let text = ui::text(13., FontWeight::NORMAL, 0.75)
+                        .mt(px(8.))
+                        .line_height(px(20.));
+                    match status.tone {
+                        Tone::Bad => text.text_color(ui::danger()),
+                        _ => text,
+                    }
+                    .child(r)
                 }))
                 .child(
                     ui::text(13., FontWeight::NORMAL, 0.55)
@@ -726,6 +716,16 @@ impl Launcher {
                     ),
                 ),
         )
+    }
+}
+
+/// A status's colour in the glass look.
+fn glass_tone(tone: Tone) -> Hsla {
+    match tone {
+        Tone::Good => ui::live(),
+        Tone::Warn => ui::warn(),
+        Tone::Bad => ui::danger(),
+        Tone::Off => white(0.55),
     }
 }
 

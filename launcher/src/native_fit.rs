@@ -183,17 +183,19 @@ pub fn pins(home: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The line the registry browser shows for a native mod's version naming `hooks`, or pinning
-/// `pin`, in `instance`; None when it can't be told.
-pub fn line(
+/// How a native mod's version naming `hooks`, or pinning `pin`, fits `instance`, and the line
+/// that says so; None when it can't be told.
+pub fn judge(
     instance: &Instance,
     id: &str,
     hooks: Option<u32>,
     pin: &str,
     broken_on: &[BrokenOn],
-) -> Option<String> {
+) -> Option<(Fit, String)> {
     let plays = plays(instance)?;
-    fit(id, hooks, pin, &plays, &pins(&instance.home), broken_on).map(|fit| describe(&fit, &plays))
+    let fit = fit(id, hooks, pin, &plays, &pins(&instance.home), broken_on)?;
+    let line = describe(&fit, &plays);
+    Some((fit, line))
 }
 
 #[cfg(test)]

@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Эсир пур вырӑнта никӗслекен пуххине playhorizon.dev сайтӑнче тӳлевсӗр тӳлев урлӑ илеҫҫӗ. Ӑна Лавккаран илӗр: вӑл тӳлеве хӑех уҫать.",
   "The founder set can't be claimed from your country.": "Никӗслекен пуххине сирӗн ҫӗршывран илме ҫук.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Update Horizon",
+  "Rebuilds Horizon": "Rebuilds Horizon",
+  "Install anyway": "Install anyway",
+  "Doesn't build": "Doesn't build",
+  "Conflicts": "Conflicts"
 }

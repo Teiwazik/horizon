@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Dêr't do bist, wurdt de oprjochterset oanfrege fia in fergese betelling op playhorizon.dev. Claim him yn de Winkel: dy iepenet de betelling foar dy.",
   "The founder set can't be claimed from your country.": "De oprjochterset kin net út dyn lân claimd wurde.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Update Horizon",
+  "Rebuilds Horizon": "Rebuilds Horizon",
+  "Install anyway": "Install anyway",
+  "Doesn't build": "Doesn't build",
+  "Conflicts": "Conflicts"
 }

@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Tam, gdzie jesteś, zestaw założyciela odbiera się przez bezpłatną płatność na playhorizon.dev. Odbierz go w Sklepie: otworzy płatność za ciebie.",
   "The founder set can't be claimed from your country.": "Zestawu założyciela nie można odebrać z twojego kraju.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Zaktualizuj Horizon",
+  "Rebuilds Horizon": "Przebuduje Horizon",
+  "Install anyway": "Zainstaluj mimo to",
+  "Doesn't build": "Nie zbuduje się",
+  "Conflicts": "Konflikt"
 }

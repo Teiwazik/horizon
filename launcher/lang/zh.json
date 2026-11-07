@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "在你所在的地区，创始者套装需通过 playhorizon.dev 上的免费结账领取。请在商店中领取：商店会为你打开结账页面。",
   "The founder set can't be claimed from your country.": "你所在的国家无法领取创始者套装。",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "请更新 Horizon",
+  "Rebuilds Horizon": "会重新构建 Horizon",
+  "Install anyway": "仍然安装",
+  "Doesn't build": "无法构建",
+  "Conflicts": "冲突"
 }

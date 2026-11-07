@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "იქ, სადაც ხართ, დამფუძნებლების კომპლექტი playhorizon.dev-ზე უფასო გადახდით მიიღება. მიიღეთ ის მაღაზიიდან: ის თქვენთვის გახსნის გადახდას.",
   "The founder set can't be claimed from your country.": "დამფუძნებლების კომპლექტის მიღება თქვენი ქვეყნიდან შეუძლებელია.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Update Horizon",
+  "Rebuilds Horizon": "Rebuilds Horizon",
+  "Install anyway": "Install anyway",
+  "Doesn't build": "Doesn't build",
+  "Conflicts": "Conflicts"
 }

@@ -79,6 +79,32 @@ pub fn danger() -> Hsla {
     })
 }
 
+/// A status in a pill: a word in `tone`, over a backing (the scrim's dark, or white in
+/// light) and an outline in `tone`, so it stays legible over any background picture.
+pub fn status_pill(label: impl Into<SharedString>, tone: Hsla) -> Div {
+    let backing = if light() {
+        gpui::white().opacity(0.85)
+    } else {
+        color(horizon_theme::glass::SCRIM).opacity(0.6)
+    };
+    div().flex().flex_none().rounded_full().bg(backing).child(
+        div()
+            .flex()
+            .items_center()
+            .h(px(24.))
+            .px(px(10.))
+            .rounded_full()
+            .bg(tone.opacity(0.14))
+            .border_1()
+            .border_color(tone.opacity(0.6))
+            .child(
+                text(13., FontWeight::MEDIUM, ink::FULL)
+                    .text_color(tone)
+                    .child(label.into()),
+            ),
+    )
+}
+
 /// Builds `f`'s rows as the mockup's `SettingRow`s, for a Settings card: `index_row` and
 /// `section_title` ask [`flat`].
 pub fn flat_rows<R>(f: impl FnOnce() -> R) -> R {

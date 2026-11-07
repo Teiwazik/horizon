@@ -1225,5 +1225,10 @@
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "ನೀವು ಇರುವಲ್ಲಿ, ಸ್ಥಾಪಕರ ಸೆಟ್ ಅನ್ನು playhorizon.dev ನಲ್ಲಿ ಉಚಿತ ಚೆಕ್‌ಔಟ್ ಮೂಲಕ ಪಡೆಯಲಾಗುತ್ತದೆ. ಅಂಗಡಿಯಿಂದ ಪಡೆಯಿರಿ: ಅದು ನಿಮಗಾಗಿ ಚೆಕ್‌ಔಟ್ ತೆರೆಯುತ್ತದೆ.",
   "The founder set can't be claimed from your country.": "ನಿಮ್ಮ ದೇಶದಿಂದ ಸ್ಥಾಪಕರ ಸೆಟ್ ಪಡೆಯಲು ಸಾಧ್ಯವಿಲ್ಲ.",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
-  "Native and content mod ids differ.": "Native and content mod ids differ."
+  "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "Update Horizon": "Update Horizon",
+  "Rebuilds Horizon": "Rebuilds Horizon",
+  "Install anyway": "Install anyway",
+  "Doesn't build": "Doesn't build",
+  "Conflicts": "Conflicts"
 }
