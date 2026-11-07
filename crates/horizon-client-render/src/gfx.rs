@@ -10299,7 +10299,16 @@ impl Renderer {
             }
             // FeatureRenderDispatcher.PreparedFrame.executeTranslucent: the shadows
             // come before the translucent items, which then cover them (#7026).
-            if shadow_quads > 0 && !oit_on {
+            // Vanilla's round shadow under an entity stands in for the shadows a shader pack
+            // draws itself: under one with a shadow pass, the entity casts its own, and the
+            // round one would be a second, wrong one (OptiFine and Iris drop it the same way).
+            let pack_shadows = self.native_shadow()
+                || self
+                    .pack_post
+                    .as_ref()
+                    .and_then(|p| p.1.as_ref())
+                    .is_some_and(pack_post::PackPost::has_shadow);
+            if shadow_quads > 0 && !oit_on && !pack_shadows {
                 pass.set_pipeline(&self.shadow_blob_pipeline);
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
