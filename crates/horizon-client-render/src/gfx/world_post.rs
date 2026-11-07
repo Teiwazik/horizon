@@ -49,9 +49,7 @@ struct TaaUniform {
     jitter: [f32; 4],
 }
 
-/// TAA's GPU resources, absent when the device cannot compile the shader
-/// (the OpenGL backend's naga GLSL emitter does not support `textureLoad`
-/// from depth textures).
+/// TAA's GPU resources, absent when the device cannot compile the shader.
 struct TaaResources {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
@@ -175,9 +173,6 @@ impl Post {
                 cache: None,
             })
         };
-        // The OpenGL backend's GLSL translator does not support textureLoad
-        // from depth textures: on devices running through OpenGL (such as older
-        // Intel GPUs on Linux), TAA cannot compile its pipeline.
         let taa_resources = {
             let taa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Horizon TAA bindings"),
@@ -190,7 +185,9 @@ impl Post {
                         count: None,
                     },
                     texture(2, float),
-                    texture(3, wgpu::TextureSampleType::Depth),
+                    // A depth view through an unfilterable float binding: the
+                    // texel is the same, and the GLSL backend can read it.
+                    texture(3, wgpu::TextureSampleType::Float { filterable: false }),
                     // What moves on its own (frame generation's object motion): mobs, items,
                     // the boat or cart the player rides.
                     texture(5, wgpu::TextureSampleType::Float { filterable: false }),

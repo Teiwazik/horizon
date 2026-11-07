@@ -178,7 +178,7 @@ using the "Shape" column. What a content pack needs:
 | Accessory slots (what Curios does) | — | Curios users (6 require it, more use it optionally) | **0.4** | built-in slots API |
 | Mod networking between its client and server halves | — | machines and up | **0.4** | `net` interface |
 | Custom recipe types: machine recipes with their own JSON | — | machines and up | **0.4** | recipe-type registry: the mod declares its JSON schema and a display layout for the recipe viewer |
-| Entities: types, attributes, AI goals and brains, spawning | — | deep (87) | 0.5 | `entity` interface, AI in the mod with vanilla goals reusable; thrown item projectiles, and mobs of a zombie's or a villager's class with their own attributes, are already data in 0.2 ([mods.md](mods.md)); a native mod gives a type its own goals with `register_goals` ([native-mods.md](native-mods.md#mob-goals)) |
+| Entities: types, attributes, AI goals and brains, spawning | — | deep (87) | 0.5 | `entity` interface, AI in the mod with vanilla goals reusable; thrown item projectiles, and mobs of a zombie's, a villager's or a wandering trader's class with their own attributes, are already data in 0.2 ([mods.md](mods.md)); a native mod gives a type its own goals with `register_goals` ([native-mods.md](native-mods.md#mob-goals)) |
 | Custom renderers and animated models (block-entity, entity, item; GeckoLib's format) | — | deep | 0.5 | data models (Bedrock geometry + animations), plus a budgeted draw-list interface for the rest |
 | Dimensions: dimension types, levels, chunk generators | — | about 10 (Twilight Forest, Aether, Ad Astra, Undergarden, ...) | 0.5 | JSON part with worldgen; custom generators as mod code |
 | New hooks into vanilla behaviour (what Mixins do) | — | deep | as asked | each becomes a named hook, added for everyone |
@@ -878,7 +878,11 @@ left out (blocks with a class of their own are counted and named, since facts ca
 their extra code); **partial** with the failing checks, the blocks left out and what the
 templates miss; **not yet** with the API tier it waits for, or the dependency; **not needed**
 for libraries, performance mods, pack tooling and what Horizon has built in. Unclassified mods
-(the 20 CurseForge-only rows the reviewed table only guesses) count as not yet.
+(the 20 CurseForge-only rows the reviewed table only guesses) count as not yet. A mod made for
+1.20 or older (its `recipes/` and `loot_tables/` folders named as before 1.21, which 26.3 does
+not read) is not carried, as `check` doesn't carry it either: not yet, and not one Port can
+carry over. Prominence II (Fabric 1.20.1, 445 jars) had 149 such mods counted as come over,
+with 28,948 recipes and 8,784 loot tables that would not load.
 
 Both files open with a plain headline for players, counted from the rows' own status, class and
 tier: how many of the mods that need porting came over (ported or partial, as content: blocks,

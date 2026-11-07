@@ -426,6 +426,14 @@ pub struct Post {
     pub terrain_cutout: Option<PostProgram>,
     /// What draws translucent terrain (water, stained glass) after deferred.
     pub water: Option<PostProgram>,
+    /// The pack has no program for solid and cutout terrain (none of `gbuffers_terrain`'s
+    /// chain, nor `_solid` or `_cutout`), or for translucent terrain (none of
+    /// `gbuffers_water`'s): nothing draws that terrain, into no buffer nor depth. Iris 1.11.7
+    /// drew no terrain with our probe packs having no gbuffers programs, at the root or in a
+    /// dimension's folder (#10455). A program that is there but doesn't load still leaves its
+    /// terrain to the game.
+    pub terrain_undrawn: bool,
+    pub water_undrawn: bool,
     /// What draws the sky (disc, sunset, stars, void) before terrain.
     pub sky: Option<PostProgram>,
     /// What draws the sun and moon, between the sunset and the stars.
@@ -639,6 +647,8 @@ pub fn load_post(
         terrain: None,
         terrain_cutout: None,
         water: None,
+        terrain_undrawn: false,
+        water_undrawn: false,
         sky: None,
         sky_textured: None,
         entities: None,
@@ -939,6 +949,19 @@ pub fn load_post(
         // gbuffers_water falls back to gbuffers_terrain's chain (2.3).
         let water = gbuffers(&WATER, Group::Translucent, terrain);
         loader.post.notes.extend(lone);
+        loader.post.terrain_undrawn = !has_solid && !has_cutout;
+        loader.post.water_undrawn = !WATER.iter().any(|n| loader.has(n));
+        for (undrawn, part) in [
+            (loader.post.terrain_undrawn, "terrain"),
+            (loader.post.water_undrawn, "translucent terrain"),
+        ] {
+            if undrawn {
+                loader
+                    .post
+                    .notes
+                    .push(format!("no program for {part}; nothing draws it"));
+            }
+        }
         loader.post.terrain = solid;
         loader.post.water = water.map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
@@ -1236,6 +1259,12 @@ impl Loader<'_> {
                 return None;
             }
         };
+        notes.extend(
+            program
+                .notes
+                .iter()
+                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
+        );
         self.post.config.read_vertex(&vertex);
         self.post.config.read(&fragment);
         let mut buffers =
@@ -1384,6 +1413,12 @@ impl Loader<'_> {
                     return None;
                 }
             };
+        notes.extend(
+            program
+                .notes
+                .iter()
+                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
+        );
         self.post.config.read_vertex(vertex);
         self.post.config.read(fragment);
         let mut buffers =
@@ -1449,7 +1484,15 @@ impl Loader<'_> {
                 continue;
             }
             match translate_compute(&pp) {
-                Ok(program) => out.push((name, program)),
+                Ok(program) => {
+                    notes.extend(
+                        program
+                            .notes
+                            .iter()
+                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
+                    );
+                    out.push((name, program));
+                }
                 Err(errors) => {
                     notes.extend(
                         errors
@@ -1612,6 +1655,92 @@ fn flips(properties: &Properties, program: &str) -> Vec<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_defaults_are_notes_without_skipping_render_or_compute() {
+        let pack = Pack::from_zip_bytes(
+            "original-default-control",
+            crate::pack::tests::zip(&[
+                ("shaders/composite.vsh", "#version 430\nvoid main() { gl_Position = vec4(0.0); }"),
+                ("shaders/composite.fsh", "#version 430\nuniform double unknown = double(2.0);\nout vec4 color; void main() { color = vec4(1.0); }"),
+                ("shaders/composite.csh", "#version 430\nlayout(local_size_x=1) in; uniform double unknown = double(2.0); void main() {}"),
+            ]),
+        ).unwrap();
+        let post = load_post(
+            &pack,
+            "",
+            &Properties::default(),
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+        let program = post
+            .programs
+            .iter()
+            .find(|p| p.name == "composite")
+            .unwrap();
+        assert!(program.program.is_some());
+        assert_eq!(program.compute.len(), 1);
+        for file in ["composite.fsh", "composite.csh"] {
+            assert!(
+                post.notes
+                    .iter()
+                    .any(|n| n.contains(file) && n.contains("unknown") && n.contains("using zero")),
+                "{:?}",
+                post.notes
+            );
+        }
+        assert!(
+            !post.notes.iter().any(|n| n.contains("skipped")),
+            "{:?}",
+            post.notes
+        );
+    }
+
+    /// #10455, with probe packs of ours in Iris 1.11.7: a pack (or the dimension folder it
+    /// uses) with no gbuffers programs drew no terrain, solid or translucent, into any buffer or
+    /// depth, and the root folder's gbuffers programs didn't draw the Nether's terrain when
+    /// `world-1` had none. A `gbuffers_water` alone draws translucent terrain only (Horizon's
+    /// choice; not measured in Iris).
+    #[test]
+    fn a_folder_without_terrain_programs_draws_no_terrain() {
+        const VSH: &str = "#version 120\nvoid main() { gl_Position = ftransform(); }";
+        const FSH: &str =
+            "#version 120\n/* DRAWBUFFERS:0 */\nvoid main() { gl_FragData[0] = vec4(1.0); }";
+        let pack = Pack::from_zip_bytes(
+            "original-undrawn-terrain",
+            crate::pack::tests::zip(&[
+                ("shaders/gbuffers_basic.vsh", VSH),
+                ("shaders/gbuffers_basic.fsh", FSH),
+                ("shaders/world-1/composite.vsh", VSH),
+                ("shaders/world-1/composite.fsh", FSH),
+                ("shaders/world1/gbuffers_water.vsh", VSH),
+                ("shaders/world1/gbuffers_water.fsh", FSH),
+            ]),
+        )
+        .unwrap();
+        let inputs = GameInputs {
+            terrain: Some(GbuffersInputs::default()),
+            ..Default::default()
+        };
+        let load = |folder: &str| {
+            let post = load_post(
+                &pack,
+                folder,
+                &Properties::default(),
+                &Macros::standard(),
+                &inputs,
+            );
+            (
+                post.terrain.is_some(),
+                post.water.is_some(),
+                post.terrain_undrawn,
+                post.water_undrawn,
+            )
+        };
+        assert_eq!(load(""), (true, true, false, false));
+        assert_eq!(load("world-1"), (false, false, true, true));
+        assert_eq!(load("world1"), (false, true, true, false));
+    }
 
     #[test]
     fn named_dimension_folder_reaches_the_program_loader() {

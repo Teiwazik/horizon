@@ -190,7 +190,7 @@ struct HorizonMaterialSolid {
     @location(0) color: vec4<f32>,
     // The world target's surface data: `set_surface`'s, then the fragment's depth, which the
     // post stage's `surface_at` compares with the final depth.
-    @location(1) surface: vec4<f32>,
+    @location(1) surface: vec4<u32>,
     // The texture and tint before any light, for light the post stage adds.
     @location(2) albedo: vec4<f32>,
 }
@@ -227,7 +227,7 @@ fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     var out: HorizonMaterialSolid;
     let mark = horizon_material_mark(in, texel);
     out.color = horizon_material_fogged(vec4(color.rgb, mark), in.spherical, in.cylindrical);
-    out.surface = vec4(horizon_surface.xyz, in.clip.z);
+    out.surface = bitcast<vec4<u32>>(vec4(horizon_surface.xyz, in.clip.z));
     out.albedo = vec4(horizon_material_albedo, 1.0);
     return out;
 }
@@ -281,7 +281,7 @@ const DISPLACED_ENTRIES: &str = "
 /// The format of the solid terrain's second target, what the post stage reads as
 /// `scene_surface`: x the normal (two snorm16 in its bits), y smoothness, z the pack's data, w
 /// depth.
-pub const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+pub const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 /// The albedo target, for light the post stage adds.
 pub const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -961,6 +961,14 @@ pub(super) fn layer_table(name: &str, table: &[(u32, u32)]) -> String {
 }
 
 fn shader_source(source: &str, vertex: bool, displaced: bool, rays: bool) -> String {
+    let source = if source.contains("fn ray_hit(") {
+        source.to_owned()
+    } else {
+        format!(
+            "{source}\n{}\n@group(3) @binding(5) var<storage, read> material_ids: array<u32>;\n",
+            horizon_shader_api::stages::RT_MATERIAL_HELPERS
+        )
+    };
     format!(
         "{}{source}\n// Horizon's terrain (terrain.wgsl)\n{}{}{ENTRIES}{}{}{}",
         if rays { "enable wgpu_ray_query;\n" } else { "" },

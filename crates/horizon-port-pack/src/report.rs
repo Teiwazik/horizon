@@ -65,6 +65,31 @@ pub struct Row {
     /// The same in plain words for a player. Empty in a `coverage.json` an older build wrote.
     #[serde(default)]
     pub plain: String,
+    /// Unported dependencies, kept apart so the launcher can translate the fixed sentence.
+    #[serde(default)]
+    pub waiting: usize,
+    /// Made for 1.20 or older (data folders named as before 1.21): not carried, and not one
+    /// Port can carry over either.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub old_layout: bool,
+}
+
+impl Row {
+    /// The standalone coverage report stays English, including the dependency count.
+    pub fn plain_text(&self) -> String {
+        let mut plain = self.plain.clone();
+        match self.waiting {
+            0 => {}
+            1 => plain.push_str(" It also waits for 1 mod it depends on that is not ported yet."),
+            n => {
+                let _ = write!(
+                    plain,
+                    " It also waits for {n} mods it depends on that are not ported yet."
+                );
+            }
+        }
+        plain
+    }
 }
 
 /// The licence family of an SPDX id or a `mods.toml` licence text.
@@ -171,6 +196,14 @@ fn plain_not_needed(class: &str) -> &'static str {
         "client-ui" => "Built into Horizon already, so there is nothing to port.",
         _ => "Nothing to port.",
     }
+}
+
+/// Whether the carry found the mod made for 1.20 or older ([`crate::carry::old_layout`]).
+fn old_layout(work: &Path, key: &str) -> bool {
+    std::fs::read(work.join("mods").join(key).join("carry-report.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|c| c["old_layout"] == true)
 }
 
 /// A carried-over mod: ported when its harness passes with nothing left
@@ -282,6 +315,8 @@ fn resource_row(path: &str, outcome: Option<&Outcome>, record: Option<&Record>) 
         } else {
             Status::NotYet
         },
+        waiting: 0,
+        old_layout: false,
         plain: match (shader, outcome.map(|o| o.state)) {
             (true, _) => "Shader packs are not converted yet.",
             (false, Some(State::Available)) => "Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen.",
@@ -310,12 +345,18 @@ pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
             if r.path.starts_with("resourcepacks/") || r.path.starts_with("shaderpacks/") {
                 return resource_row(&r.path, resourcepacks.files.get(&r.path), Some(r));
             }
+            let old = old_layout(work, &r.key);
             let (status, reason) = if r.class == "unknown" {
                 let why =
                     "unclassified: its jar (mods.toml, file census) or a reviewed row decides";
                 (Status::NotYet, why.to_owned())
             } else if r.tier == "none" || matches!(r.class.as_str(), "library" | "performance") {
                 (Status::NotNeeded, not_needed(&r.class).to_owned())
+            } else if old {
+                let why = "made for Minecraft 1.20 or older: its data folders (recipes/, \
+                           loot_tables/, tags/blocks/...) are named as before 1.21, which 26.3 \
+                           does not read; not carried";
+                (Status::NotYet, why.to_owned())
             } else if let Some(c) = carried(work, &r.key) {
                 c
             } else {
@@ -337,7 +378,10 @@ pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
                 license_kind: license_kind(&r.license).to_owned(),
                 status,
                 reason,
+                waiting: 0,
+                old_layout: old,
                 plain: match status {
+                    Status::NotYet if old => crate::carry::OLD_LAYOUT,
                     Status::NotYet => plain_not_yet(r),
                     Status::NotNeeded => plain_not_needed(&r.class),
                     carried => carried.meaning(),
@@ -360,15 +404,7 @@ pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
             .collect();
         if !waiting.is_empty() {
             let _ = write!(row.reason, "; waits on {}", waiting.join(", "));
-            let _ = write!(
-                row.plain,
-                " It also waits for {} it depends on that {} not ported yet.",
-                match waiting.len() {
-                    1 => "1 mod".to_owned(),
-                    n => format!("{n} mods"),
-                },
-                if waiting.len() == 1 { "is" } else { "are" }
-            );
+            row.waiting = waiting.len();
         }
     }
     for (path, outcome) in &resourcepacks.files {
@@ -407,6 +443,8 @@ pub fn summary(rows: &[Row]) -> Summary {
             Status::NotNeeded => continue,
             Status::Ported => s.carried += 1,
             Status::Partial => (s.carried, s.partial) = (s.carried + 1, s.partial + 1),
+            // Not one port can carry over: the 1.20 data would not load.
+            Status::NotYet if r.old_layout => s.later += 1,
             Status::NotYet if r.class == "content" && r.tier == "data" => s.ready += 1,
             Status::NotYet
                 if r.class != "unknown"
@@ -508,7 +546,7 @@ pub fn markdown(pack: &str, rows: &[Row]) -> String {
             r.license.replace('|', "/"),
             r.status.label(),
             r.reason.replace('|', "/"),
-            r.plain.replace('|', "/")
+            r.plain_text().replace('|', "/")
         );
     }
     out

@@ -161,6 +161,47 @@ impl Imported {
     }
 }
 
+/// A row's plain explanation in the launcher's language. Unknown sentences from older or
+/// newer reports keep their text; technical details remain untouched.
+pub fn row_plain(row: &Row) -> String {
+    use crate::i18n::{tr, trf};
+    let plain = match row.plain.as_str() {
+        "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run." => tr("Its blocks and items came over and passed Horizon's checks; the mod's own code is not run."),
+        "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what." => tr("Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what."),
+        "It does not come over yet." => tr("It does not come over yet."),
+        "Nothing to port: Horizon has it built in or does not need it." => tr("Nothing to port: Horizon has it built in or does not need it."),
+        "Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over." => tr("Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over."),
+        "It joins other mods together, so it waits until those are ported." => tr("It joins other mods together, so it waits until those are ported."),
+        "Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet." => tr("Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet."),
+        "Content only (blocks, items, structures). It can come over once its jar is here." => tr("Content only (blocks, items, structures). It can come over once its jar is here."),
+        "Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over." => tr("Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over."),
+        "Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over." => tr("Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over."),
+        "Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over." => tr("Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over."),
+        "Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet." => tr("Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet."),
+        "Horizon has not worked out what this mod needs yet." => tr("Horizon has not worked out what this mod needs yet."),
+        "A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port." => tr("A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port."),
+        "It makes the game faster. Horizon's own engine does that, so there is nothing to port." => tr("It makes the game faster. Horizon's own engine does that, so there is nothing to port."),
+        "Pack tooling or a game feature that Horizon already has, so there is nothing to port." => tr("Pack tooling or a game feature that Horizon already has, so there is nothing to port."),
+        "Built into Horizon already, so there is nothing to port." => tr("Built into Horizon already, so there is nothing to port."),
+        "Nothing to port." => tr("Nothing to port."),
+        "Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later." => tr("Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later."),
+        "Shader packs are not converted yet." => tr("Shader packs are not converted yet."),
+        "Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen." => tr("Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen."),
+        "Not downloaded yet; Port gets it." => tr("Not downloaded yet; Port gets it."),
+        "Horizon could not use this resource pack yet; the technical detail says why." => tr("Horizon could not use this resource pack yet; the technical detail says why."),
+        other => other,
+    };
+    let waiting = match row.waiting {
+        0 => return plain.to_owned(),
+        1 => tr("It also waits for 1 mod it depends on that is not ported yet.").to_owned(),
+        n => trf(
+            "It also waits for {count} mods it depends on that are not ported yet.",
+            &[("count", &n.to_string())],
+        ),
+    };
+    format!("{plain} {waiting}")
+}
+
 /// Reads the pack in `work`.
 pub fn load(work: &Path) -> Result<Imported, String> {
     let pack: Pack = pipeline::read_json(&work.join("pack.json"))?;
@@ -195,6 +236,16 @@ pub fn load(work: &Path) -> Result<Imported, String> {
         .iter()
         .filter(|f| f.kind() == "resourcepacks" && f.client != "unsupported")
         .count();
+    // A mod the carry found made for 1.20 or older is not one the port step can carry over.
+    let old: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter(|r| r.old_layout)
+        .map(|r| r.key.as_str())
+        .collect();
+    let portable = records
+        .iter()
+        .filter(|r| pipeline::portable(r) && !old.contains(r.key.as_str()))
+        .count();
     Ok(Imported {
         resourcepacks,
         indexed_resources,
@@ -208,7 +259,7 @@ pub fn load(work: &Path) -> Result<Imported, String> {
         fetched,
         mods,
         left_off,
-        portable: records.iter().filter(|r| pipeline::portable(r)).count(),
+        portable,
     })
 }
 
@@ -513,6 +564,51 @@ mod tests {
         assert!(!p.can_play());
         assert_eq!(p.portable, 0);
         assert_eq!(p.indexed_resources, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Prominence II (Fabric 1.20.1): of its 29 data-tier content mods the port found 24 made
+    /// for 1.20 or older. Those are not carried, so the pack does not list them as portable.
+    #[test]
+    fn mods_made_for_1_20_are_not_portable() {
+        let root = std::env::temp_dir().join(format!(
+            "horizon-launcher-old-layout-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        pipeline::write_json(&root.join("pack.json"), &Pack::default()).unwrap();
+        let record = |key: &str| horizon_port_pack::inventory::Record {
+            key: key.into(),
+            class: "content".into(),
+            tier: "data".into(),
+            ..Default::default()
+        };
+        pipeline::write_json(
+            &root.join("inventory.json"),
+            &vec![record("old"), record("new")],
+        )
+        .unwrap();
+        let row = |key: &str, old_layout: bool| Row {
+            key: key.into(),
+            name: key.into(),
+            class: "content".into(),
+            tier: "data".into(),
+            license: String::new(),
+            license_kind: "unknown".into(),
+            status: Status::NotYet,
+            reason: String::new(),
+            plain: String::new(),
+            waiting: 0,
+            old_layout,
+        };
+        pipeline::write_json(
+            &root.join("coverage.json"),
+            &vec![row("old", true), row("new", false)],
+        )
+        .unwrap();
+        let p = load(&root).unwrap();
+        assert_eq!(p.portable, 1);
+        assert!(p.can_port());
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -160,8 +160,9 @@ pub fn check(pack: &Pack) -> Result<Report, Vec<Problem>> {
         .map(|s| (StageKind::Sky, s))
         .chain(m.vertex.iter().map(|s| (StageKind::Vertex, s)))
         .chain(m.material.iter().map(|s| (StageKind::Material, s)))
+        .chain(m.weather.iter().map(|s| (StageKind::Weather, s)))
         .chain(m.post.iter().map(|s| (StageKind::Post, s)))
-        .chain(m.weather.iter().map(|s| (StageKind::Weather, s)));
+        .chain(m.tonemap.iter().map(|s| (StageKind::Tonemap, s)));
     let (mut checked, mut problems) = (Vec::new(), Vec::new());
     for (kind, stage) in stages {
         match check_stage(pack, kind, &stage.file) {
@@ -229,7 +230,11 @@ pub fn check_stage(pack: &Pack, kind: StageKind, file: &str) -> Result<CheckedSt
     // The material prelude's `block_texture` calls into the renderer: a stand-in here.
     let module = if kind == StageKind::Material {
         let mut checked = own.clone();
-        checked.text += crate::stages::BLOCK_SAMPLING_STUB;
+        checked.text += if own.text.contains("fn ray_hit(") {
+            crate::stages::BLOCK_SAMPLING_STUB
+        } else {
+            crate::stages::PBR_STUB
+        };
         parse(&checked)?
     } else if kind == StageKind::Post {
         let mut checked = own.clone();
@@ -420,7 +425,11 @@ fn api_rules(module: &naga::Module, own: &Composed) -> Vec<Problem> {
     // The material prelude calls into the renderer (`block_texture`): its stand-in is ours too.
     let mut text = own.text[own.parts[0].1.clone()].to_owned();
     if text.contains("fn block_texture(") {
-        text += crate::stages::BLOCK_SAMPLING_STUB;
+        text += if text.contains("fn ray_hit(") {
+            crate::stages::BLOCK_SAMPLING_STUB
+        } else {
+            crate::stages::PBR_STUB
+        };
     } else if text.contains("fn ray_hit(") {
         text += crate::stages::POST_RAY_STUB;
     }

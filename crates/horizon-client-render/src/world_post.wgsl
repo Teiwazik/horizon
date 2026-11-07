@@ -91,7 +91,11 @@ struct Taa {
     jitter: vec4<f32>,
 };
 @group(0) @binding(2) var history: texture_2d<f32>;
-@group(0) @binding(3) var depth: texture_depth_2d;
+// The world's depth as an unfilterable float texture: naga's GLSL backend
+// cannot emit `textureLoad` from a depth texture, and a depth view bound as
+// `TextureSampleType::Float { filterable: false }` gives the same texel on
+// every backend.
+@group(0) @binding(3) var depth: texture_2d<f32>;
 @group(0) @binding(4) var<uniform> taa: Taa;
 // What moves on its own, at the world's size: xy where the pixel was last frame (in UV, from
 // here), z 1 where set. 1×1 and empty without it.
@@ -171,7 +175,7 @@ fn clip_box(c: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
             hi = max(hi, c);
             m1 += c;
             m2 += c * c;
-            near = max(near, textureLoad(depth, q, 0));
+            near = max(near, textureLoad(depth, q, 0).r);
         }
     }
     let ndc = vec2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);

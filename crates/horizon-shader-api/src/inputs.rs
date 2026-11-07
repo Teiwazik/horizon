@@ -54,16 +54,20 @@ wgsl_types! {
     [[f32; 4]; 8] => "array<vec4<f32>, 8>",
 }
 
-/// A uniform struct: the Rust type the renderer uploads, and its WGSL.
+/// A uniform struct: the Rust type the renderer uploads, and its WGSL. `pad` names a trailing
+/// field in Rust only, which fills the struct out to WGSL's size (a multiple of its 16-byte
+/// alignment), since `Pod` allows no implicit padding.
 macro_rules! uniform {
     ($(#[doc = $doc:literal])* $name:ident {
         $($(#[doc = $fdoc:literal])* $field:ident: $ty:ty,)*
-    }) => {
+    } $(pad $pad:ident: $pad_ty:ty)?) => {
         $(#[doc = $doc])*
         #[repr(C)]
         #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct $name {
             $($(#[doc = $fdoc])* pub $field: $ty,)*
+            $(/// Not in the WGSL: zeros up to its size.
+            pub $pad: $pad_ty,)?
         }
 
         impl $name {
@@ -144,11 +148,50 @@ uniform! {
         frame_index: u32,
         /// 1 while F1 hides the HUD, else 0.
         hide_gui: u32,
-        /// The y of the horizontal water plane the renderer mirrored the world
-        /// about this frame, in world blocks, when `has_reflection` is 1.
+        /// What falls in the biome at the camera while it rains: 0 nothing, 1 rain, 2 snow.
+        precipitation: u32,
+        /// The biome at the camera's temperature (vanilla's, -0.7..2.0; it snows below 0.15).
+        temperature: f32,
+        /// The biome at the camera's downfall, 0..1.
+        downfall: f32,
+        /// `rain`, smoothed: rises over about 30 seconds and dries over about 10, 0..1.
+        wetness: f32,
+        /// Last frame's camera-relative world to clip space (its `projection * view`); a point
+        /// at camera-relative `p` now was at `p + camera_motion` relative to last frame's camera.
+        /// This frame's on the first frame and after a gap of over half a second (a pause, a
+        /// world load), when last frame's camera says nothing about this one.
+        previous_view_projection: [[f32; 4]; 4],
+        /// How far the camera moved since last frame, in blocks (0 after such a gap).
+        camera_motion: [f32; 3],
+        /// Seconds since last frame (0 on the first and after such a gap).
+        delta_time: f32,
+        /// `eye_light` eased with a half-life of 2 seconds: it follows the light levels' steps
+        /// without stepping itself (for exposure and indoor fog).
+        eye_light_smooth: [f32; 2],
+        /// 1 while the camera is in water (`eye_in` 1), eased with a half-life of a quarter
+        /// second in and out.
+        in_water: f32,
+        /// The same for lava (`eye_in` 2).
+        in_lava: f32,
+        /// The y of the horizontal water plane `reflection` mirrors the world about, in world
+        /// blocks, while `has_reflection` is 1.
         water_plane: f32,
-        /// 1 while `reflection` holds this frame's planar reflection buffer.
+        /// 1 while the material stage's `reflection` holds this frame's water mirror, else 0.
         has_reflection: u32,
+        /// The size of `reflection`, in pixels: half the world's picture.
+        reflection_resolution: [f32; 2],
+        /// Eight values a native mod hands its own pack each frame (`native_shader_params`,
+        /// docs/native-mods.md): what they mean is that mod's, such as where and when
+        /// something happened in the world. All 0 when no mod sets them.
+        mods: [[f32; 4]; 8],
+        /// Unit vector toward the body casting this frame's shadows: the sun by day, the moon
+        /// by night.
+        light_direction: [f32; 3],
+        /// 1 while `shadow_map` holds this frame's shadow map, else 0.
+        has_shadow: u32,
+        /// Camera-relative world to the shadow camera's clip space, before the distortion
+        /// (orthographic, looking along `-light_direction`; z 0 at the light, 1 away from it).
+        shadow_view_proj: [[f32; 4]; 4],
         /// Half the side of the square the shadow map covers, in blocks (the manifest's
         /// `[shadow] distance`); 0 without a shadow map.
         shadow_distance: f32,
@@ -156,45 +199,50 @@ uniform! {
         /// shadow clip `xy` is stored at `xy / (length(xy) * k + 1 - k)`, so texels near the
         /// camera cover less ground (`shadow_position` applies it).
         shadow_distortion: f32,
-        /// Unit vector toward the body casting this frame's shadows: the sun by day, the moon
-        /// by night.
-        light_direction: [f32; 3],
-        /// 1 while `shadow_map` holds this frame's shadow map.
-        has_shadow: u32,
-        /// Camera-relative world to the shadow camera's clip space, before the distortion
-        /// (orthographic, looking along `-light_direction`; z 0 at the light, 1 away from it).
-        shadow_view_proj: [[f32; 4]; 4],
-        /// Last frame's camera-relative world to clip space (its `projection * view`); a point
-        /// at camera-relative `p` now was at `p + camera_motion` relative to last frame's camera.
-        previous_view_projection: [[f32; 4]; 4],
-        /// How far the camera moved since last frame, in blocks (0 after a gap of over half a
-        /// second: a pause, a world load).
-        camera_motion: [f32; 3],
-        /// Seconds since last frame (0 on the first and after such a gap).
-        delta_time: f32,
-        /// Rain that lingers: `rain` followed with a half-life of 30 seconds as it starts and
-        /// 10 as it stops (Iris's `wetness`).
-        wetness: f32,
-        /// 1 while the biome at the camera has rain (not snow, not dry), eased with a
-        /// half-life of 20 seconds in and 10 out (Complementary's `inRainy`).
+        /// The shadow map's side, in texels; 0 without a shadow map.
+        shadow_resolution: f32,
+        /// The ground one shadow texel covers at the map's centre, in blocks (for a bias that
+        /// scales with it); 0 without a shadow map.
+        shadow_center_texel: f32,
+        /// 1 while the output is HDR, else 0.
+        hdr: u32,
+        /// The peak over paper white: the brightest value the display shows (Apple's EDR
+        /// headroom, Android's HDR/SDR ratio). 1 in SDR. It changes while the game runs (the
+        /// system's SDR white, a calibration, another display), so read it every frame.
+        headroom: f32,
+        /// Paper white in nits; a nominal 80 in SDR.
+        paper_white: f32,
+        /// The peak brightness in nits; a nominal 80 in SDR, as `paper_white`.
+        peak: f32,
+        /// The display's black in nits (HDR's Black Level); 0 in SDR.
+        black_level: f32,
+        /// Rain-biome participation eased for weather effects.
         biome_rain: f32,
-        /// The same for a biome with snow (`inSnowy`).
+        /// Snow-biome participation eased for weather effects.
         biome_snow: f32,
-        /// The moon's phase, 0 (full) to 7.
+        /// The moon's phase, 0 (full) through 7.
         moon_phase: u32,
-        /// `eye_light` eased with a half-life of 2 seconds (Iris's `eyeBrightnessSmooth`):
-        /// it follows the light levels' steps without stepping itself.
-        eye_light_smooth: [f32; 2],
-        /// 1 while the camera is in water (`eye_in` 1), eased with a half-life of a
-        /// quarter second in and out.
-        in_water: f32,
-        /// The same for lava (`eye_in` 2).
-        in_lava: f32,
-        /// The renderer's own TAA after the post stage (an upscaling mode is on): z 1 while it
-        /// runs, and then a pack's own TAA should pass its input through; xy this frame's
-        /// sub-pixel jitter in clip space, already in `projection`; w output pixels per
-        /// rendered pixel. All 0 without it.
+        /// Renderer temporal jitter (xy), enabled flag (z), upscale factor (w).
         engine_taa: [f32; 4],
+    } pad padding: [u32; 0]
+}
+
+impl Frame {
+    /// The fields 0.1's prelude declares: the struct up to `shadow_center_texel`, a prefix of
+    /// the buffer the renderer uploads.
+    pub const FIELDS_0_1: usize = 49;
+
+    /// `Frame` as the line's prelude declares it.
+    pub fn line(api: crate::Api) -> Struct {
+        let fields = match api {
+            crate::Api::V0_1 => &Self::WGSL.fields[..Self::FIELDS_0_1],
+            crate::Api::V0_2 => &Self::WGSL.fields[..54],
+            crate::Api::V0_5 => Self::WGSL.fields,
+        };
+        Struct {
+            fields,
+            ..Self::WGSL
+        }
     }
 }
 
@@ -240,10 +288,6 @@ pub const MATERIAL_INPUT: Struct = Struct {
         displaced: "f32" = "How much of the relief `[displacement]` gave this point as geometry, 0..1: 1 near the camera, where the surface already lies where `displacement` put it (`position` is that point; a parallax effect would count its depth twice), easing to 0 at `[displacement] distance`; always 0 without `[displacement]`.",
     },
 };
-
-/// The input of the material stage's `displacement`, under `[displacement]`.
-
-/// The vertex stage's input: one corner of a block's surface.
 
 /// What the material stage returns.
 pub const SURFACE: Struct = Struct {
@@ -307,6 +351,17 @@ pub const WEATHER_INPUT: Struct = Struct {
     },
 };
 
+/// The tonemap stage's input (0.2): one pixel of the window.
+pub const TONEMAP_INPUT: Struct = Struct {
+    name: "TonemapInput",
+    doc: "One pixel of the window, for `fn tonemap(input: TonemapInput) -> vec3<f32>`, which returns its colour for the display: linear light, 1.0 at paper white, from 0 to `frame.headroom` (Horizon clamps it there).",
+    fields: fields! {
+        uv: "vec2<f32>" = "Where the pixel is, 0..1 from the top left.",
+        pixel: "vec2<f32>" = "The pixel's centre, in pixels from the top left of the window.",
+        color: "vec3<f32>" = "The post chain's picture here (the world's without one), linear light, never negative or NaN.",
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,9 +369,18 @@ mod tests {
     #[test]
     fn frame_fields_carry_their_docs() {
         let wgsl = Frame::WGSL;
-        assert_eq!(wgsl.fields.len(), 46);
+        assert_eq!(wgsl.fields.len(), 58);
         assert!(wgsl.fields.iter().all(|f| !f.doc.trim().is_empty()));
-        assert_eq!(std::mem::size_of::<Frame>(), 6 * 64 + 15 * 16);
+        // 0.1's 49 fields, then 0.2's five and the padding to a multiple of 16.
+        assert_eq!(
+            std::mem::size_of::<Frame>(),
+            6 * 64 + 15 * 16 + 8 * 16 + 3 * 16
+        );
+        assert_eq!(Frame::OFFSETS[Frame::FIELDS_0_1], 6 * 64 + 15 * 16 + 8 * 16);
+        assert_eq!(
+            Frame::line(crate::Api::V0_1).fields.len(),
+            Frame::FIELDS_0_1
+        );
         assert!(
             wgsl.wgsl()
                 .contains("    camera_position: vec3<f32>,\n    time: f32,\n")

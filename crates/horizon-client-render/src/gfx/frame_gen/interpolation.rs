@@ -571,37 +571,50 @@ impl Interpolation {
                 })
                 .forget_lifetime()
         });
-        let mut run = |name: &str,
-                       pipeline: &wgpu::ComputePipeline,
-                       group: &wgpu::BindGroup,
-                       (x, y)| {
-            if let Some(pass) = shared.as_mut() {
+        let mut run =
+            |name: &str, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, (x, y)| {
+                if let Some(pass) = shared.as_mut() {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, group, &[]);
+                    pass.dispatch_workgroups(x, y, 1);
+                    return;
+                }
+                let writes = timing.as_deref_mut().and_then(|t| t.compute_writes(name));
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(name),
+                    timestamp_writes: writes,
+                });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(x, y, 1);
-                return;
-            }
-            let writes = timing.as_deref_mut().and_then(|t| t.compute_writes(name));
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(name),
-                timestamp_writes: writes,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(x, y, 1);
-        };
+            };
         run("Interpolation: prepare", &p.prepare, &prepare, (rx, ry));
         run("Interpolation: setup", &p.setup, &setup, (1, 1));
         if !reset {
-            run("Interpolation: previous depth", &p.reconstruct_previous_depth, &reconstruct, (rx, ry));
-            run("Interpolation: game motion field", &p.game_motion_vector_field, &game_field, (rx, ry));
+            run(
+                "Interpolation: previous depth",
+                &p.reconstruct_previous_depth,
+                &reconstruct,
+                (rx, ry),
+            );
+            run(
+                "Interpolation: game motion field",
+                &p.game_motion_vector_field,
+                &game_field,
+                (rx, ry),
+            );
             for (i, (group, size)) in game_pyramid.iter().zip(&r.game_pyramid.sizes).enumerate() {
                 let pipeline = if i == 0 {
                     &p.game_field_pyramid_first
                 } else {
                     &p.game_field_pyramid
                 };
-                run("Interpolation: game motion pyramid", pipeline, group, groups_for(*size));
+                run(
+                    "Interpolation: game motion pyramid",
+                    pipeline,
+                    group,
+                    groups_for(*size),
+                );
             }
             run(
                 "Interpolation: optical flow field",
@@ -609,9 +622,19 @@ impl Interpolation {
                 &flow_field,
                 groups_for(flow_size.map(|v| v as u32)),
             );
-            run("Interpolation: disocclusion", &p.disocclusion_mask, &disocclusion, (rx, ry));
+            run(
+                "Interpolation: disocclusion",
+                &p.disocclusion_mask,
+                &disocclusion,
+                (rx, ry),
+            );
         }
-        run("Interpolation: interpolate", &p.interpolate, &interpolate, (dx, dy));
+        run(
+            "Interpolation: interpolate",
+            &p.interpolate,
+            &interpolate,
+            (dx, dy),
+        );
         for (i, (group, size)) in inpainting_pyramid
             .iter()
             .zip(&self.inpainting_pyramid.sizes)
@@ -622,9 +645,19 @@ impl Interpolation {
             } else {
                 &p.inpainting_pyramid
             };
-            run("Interpolation: inpainting pyramid", pipeline, group, groups_for(*size));
+            run(
+                "Interpolation: inpainting pyramid",
+                pipeline,
+                group,
+                groups_for(*size),
+            );
         }
-        run("Interpolation: inpainting", &p.inpainting, &inpainting, (dx, dy));
+        run(
+            "Interpolation: inpainting",
+            &p.inpainting,
+            &inpainting,
+            (dx, dy),
+        );
         drop(shared);
         encoder.copy_texture_to_texture(
             color.as_image_copy(),

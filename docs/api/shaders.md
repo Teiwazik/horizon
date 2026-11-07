@@ -120,17 +120,51 @@ value). The pack holds only the manifest, the `.wgsl` files it names (each used,
 `README.md`, `LICENSE` (`.md`, `.txt`) and `icon.png`, under plain paths, 8 MiB in all. A `.hshader` is built
 the same way every time (files in path order, fixed dates), so a pack's SHA-256 depends only on its files.
 
+## Shader API 0.2 (experimental)
+
+0.2 is the line for linear light and HDR ([hdr-linear-light.md](../design/hdr-linear-light.md)). A pack opts in with
+`api = "0.2"`. `horizon-shader check` and `pack` take it, but **the game refuses 0.2 packs for now and the registry
+doesn't list them**: the game draws 0.2 in a later step, behind `HORIZON_HDR_FRAME=float` at first. What it changes
+from 0.1:
+
+- **Linear light.** Every colour a stage reads or returns is linear light, 1.0 at paper white and more brighter. Horizon
+  decodes vanilla's values with a 2.2 power and encodes the results the frame stores. Depth, normals, light levels,
+  `emission`, the LabPBR maps and `[[textures]]` stay data. `[[lights]]` and `[[particle_lights]]` colours are still
+  written in vanilla's gamma, and Horizon decodes them. Alpha is coverage only, and a post pass's alpha is ignored.
+- **The display in `Frame`:** `hdr`, `headroom`, `paper_white`, `peak` and `black_level`, after `shadow_center_texel`.
+  Until HDR output is served for 0.2 packs (a later step), a 0.2 pack sees SDR values with HDR on too (`hdr` 0,
+  `headroom` 1, `paper_white` and `peak` 80, `black_level` 0), and its picture is shown at paper white with nothing
+  lifted.
+- **`[tonemap]`**, `fn tonemap(input: TonemapInput) -> vec3<f32>`: the post chain's picture in, the picture for the
+  display out, from 0 to `frame.headroom`, once per pixel of the window. Without it a pack gets Horizon's curve.
+- **`[frame] blend`**: `"gamma"` (the default) or `"linear"`, what the frame stores and so how see-through draws
+  blend. `"linear"` passes the check, but the game doesn't serve it yet.
+
+```toml
+api = "0.2"
+
+[tonemap]                  # optional: the pack's own tone curve
+file = "tonemap.wgsl"
+
+[frame]
+blend = "gamma"            # optional: gamma (default) or linear
+```
+
+0.1 is unchanged: the same prelude, entries and reference, and a 0.1 pack that names `[tonemap]` or `[frame]` is
+refused.
+
 ## Guide, reference and examples
 
 - [shaders-reference.md](shaders-reference.md): every stage's signature, input and output structs, resources and
   helpers, the frame's fields with their units, option types and limits, generated from `crates/horizon-shader-api`.
+  0.2's is [shaders-reference-0.2.md](shaders-reference-0.2.md).
 - [The guide](../shaders.md): making a pack with `horizon-shader new`, `check` and `pack`; the templates and the
   example pack (`crates/horizon-shader-api/packs/golden_hour`).
 
 ## Stability
 
-Not started. The first stages will be experimental (opt-in), then preview once a reference, an example and a test
-pack exist ([stability.md](stability.md)).
+Experimental (API 0.1). The stages ship in the game behind pack selection; see [stability.md](stability.md). API
+0.2 is experimental too, and the game doesn't draw it yet.
 
 ## Not there yet
 
@@ -139,65 +173,66 @@ stages.
 
 ## Changelog
 
-- 2026-11-04: `[weather] after`: the `[[post]]` pass (by its `file`) after which rain and snow
-  draw, over its picture, for a pack whose passes light the terrain again and would paint over
-  streaks drawn with the world; `block_light_colors`' alpha is now the block light reaching the
-  cell (spread from each source, stopped by walls) in place of how near the sources are.
-- 2026-11-03: merged with main: `MaterialInput.tags` (0 on this branch) and `colored_light`
-  (`[[particle_lights]]`, and held or dropped items in their `[[lights]]` colour) join the
-  material stage's input, in main's order, `displaced` last.
-- 2026-10-30: API 0.5 (additions): the water mirror the material stage reads as `reflection`
-  is drawn only for a stage that reads it, and with `[reflection] option` only while that
-  option is not 0 (`has_reflection` is 0 otherwise): a world drawn again saved when unused.
-- 2026-10-30: API 0.5 (additions): `[[post]] output` and `scale`: a pass may write a target
-  of the pack's own (up to 4, read by name by the passes after it, last frame's before it is
-  written) at the world's size, half or a quarter, without breaking the chain of `previous`,
-  so blurs and marches run on a fraction of the pixels.
-- 2026-10-29: API 0.5 (additions): `[displacement]`: within its distance, the solid faces
-  whose resource pack textures have LabPBR heights are drawn as a grid whose corners the
-  material stage's `fn displacement(input: DisplacementInput) -> f32` moves along the normal,
-  measured from the texture's mean height and pinned at the face's edges (relief that is
-  geometry, with its depth and self-occlusion); `MaterialInput.displaced` says how much of it
-  a point has, for a parallax effect to step aside.
-- 2026-10-29: API 0.5 (additions): the material prelude's `block_texture`, `block_texture_size`
-  and `block_texture_lod` (the surface's own sprite, for normals and detail generated from it);
-  `[[pages]]` for the settings screen; `[sky] sun` and `stars`; `[shadow] solid_materials`; in
-  first person the player's model casts into the shadow map; the `[weather]` stage
-  (`fn weather(input: WeatherInput) -> vec4<f32>`) colours rain and snow streaks; under a pack
-  that fogs its terrain itself, entities mark the frame's alpha 0 for its post stage to fog them;
-  `block_texture_level` (the sprite at a chosen mip level); `[[materials]] blocks` (ids by block,
-  as block.properties writes them, for the textures no `sprites` pattern names), up to 1024
-  entries; a stage's `files` (more WGSL files of the pack, joined after the shared ones).
-- 2026-10-29: API 0.5 (additions): the material prelude's `set_surface(normal, smoothness, data)`
-  and the post stage's `scene_surface` with `surface_at` (the solid terrain's normal, smoothness
-  and a value of the pack's own, where the picture still shows that terrain), for reflections
-  and other deferred effects; a pack may chain 12 post passes.
-- 2026-10-29: API 0.5 (additions): the frame's `wetness`, `biome_rain`, `biome_snow` (eased, as
-  Iris's `wetness` and Complementary's `inRainy`/`inSnowy`) and `moon_phase`.
-- 2026-10-29: API 0.5 (additions): `[[materials]] translucent = true` draws that id's textures in
-  the translucent pass, clear texels included (Iris's `layer.translucent`).
-- 2026-10-29: API 0.5 (additions): the material stage's `opaque_color` (the world before
-  translucent terrain, for screen-space reflections on glass), `input.tangent`, and the
-  resource packs' LabPBR maps: `block_pbr_maps`, `block_normal_map`, `block_specular_map` and
-  their `_level` forms, and `block_pbr_size`.
-- 2026-10-29: API 0.5 (additions): the frame's `eye_light_smooth` (Iris's
-  `eyeBrightnessSmooth`), `in_water` and `in_lava` (eased).
-- 2026-10-28: API 0.5: `[[materials]]` (texture globs to the material stage's `material` id),
-  the `[vertex]` stage (terrain and shadow positions), `[[textures]]` (PNGs bound for every
-  stage), the material stage's `emission` and `opaque_depth`, the post stage's `history` and the
-  frame's `previous_view_projection`, `camera_motion` and `delta_time`; `[sky] clouds = false`
-  hides Minecraft's clouds for a pack that draws its own; the water plane is looked for 24
-  blocks around and below the camera; entities cast into the shadow map.
-- 2026-10-28: API 0.4: `[shadow]`: the engine draws the solid terrain the light sees into a
-  distorted depth map each frame (the shadow camera of `shaders/` packs), which the material and
-  post stages read as `shadow_map` with `shadow_sampler` and the prelude's `shadow_position`; the
-  frame's `light_direction`, `shadow_view_proj`, `shadow_distance`, `shadow_distortion` and
-  `has_shadow`; the material stage's `normal`; `[material] fog = false` turns Horizon's fog off
-  for a pack that fogs its surfaces itself.
-- 2026-10-28: API 0.3: the material stage's `screen` input and the frame's `reflection` buffer
-  (`water_plane`, `has_reflection`): the engine renders the world as a camera mirrored about the
-  water plane into a half-res target, and the material stage samples it (a planar water mirror;
-  an analytic sky stands in at the target's edges and far away).
+- 2026-11-05: API 0.2 (new line, experimental): linear light, `Frame`'s display fields, `[tonemap]` and
+  `[frame] blend`, with its own reference. `horizon-shader` checks and packs it; the game and the registry refuse it
+  for now. API 0.1 is unchanged: the uploaded `Frame` buffer grows by 32 bytes after the fields 0.1 declares.
+- 2026-11-04: API 0.1 (change, experimental): the post stage's `scene_surface` is `texture_2d<u32>`, the bits of
+  the stored floats (RGBA32F is not renderable on OpenGL). Read it through `surface_at`, or
+  `bitcast<vec4<f32>>(textureLoad(scene_surface, p, 0))`; a `textureLoad` as `vec4<f32>` no longer validates.
+- 2026-11-03: API 0.1 (no change to packs): float and int `[[options]]` are sliders on the options page, on their
+  `step`; the value is saved, and the pack rebuilt, when the slider is let go.
+- 2026-11-03: API 0.1 (additions): `[shadow] option`, `resolution_option` and `distance_option`: a pack's
+  options can turn its shadow map off (no map, no shadow pass, `has_shadow` 0) and pick its size, so
+  one pack offers its own quality levels. The options sizing the map need no `override`.
+- 2026-11-03: API 0.1 (additions): with `[shadow]`, `[displacement]`'s grid casts into the shadow map in
+  the flat faces' place, so the relief shadows itself.
+- 2026-11-03: API 0.1 (additions): `[displacement]` draws: near the camera the faces with LabPBR relief are a
+  grid moved by `displacement`, and `MaterialInput.displaced` says how much of it a point has.
+- 2026-11-03: API 0.1 (additions): the manifest's `[displacement]`, the material stage's
+  `fn displacement(input: DisplacementInput) -> f32` and `MaterialInput.displaced`.
+- 2026-11-02: API 0.1 (additions): with dynamic lights on, held and dropped items light
+  `MaterialInput.colored_light` in their block's `[[lights]]` colour.
+- 2026-11-02: API 0.1 (additions): `[[particle_lights]]` and `MaterialInput.colored_light`.
+- 2026-11-01: API 0.1 (additions): `[[materials]]` and `MaterialInput.material`, an id by sprite,
+  and `[shadow] solid_materials`.
+- 2026-11-01: API 0.1 (additions): entities cast into `shadow_map`, the player's own model in first person too, and the round
+  blob under entities is left out in the Overworld while a pack draws a shadow map, so under a
+  roof they have no shadow but what the pack gives them. Only entities the camera's culling keeps
+  cast: one off screen or behind a wall leaves the map, and its shadow with it.
+- 2026-11-01: API 0.1 (additions): `[sky] clouds`, `sun` and `stars`: a sky can replace Minecraft's.
+- 2026-11-01: API 0.1 (additions): `[[pages]]`, the layout of a pack's options page.
+- 2026-11-01: API 0.1 (additions): the `[weather]` stage
+  (`fn weather(input: WeatherInput) -> vec4<f32>`) colours rain and snow streaks.
+- 2026-11-01: API 0.1 (additions): `[[textures]]`, PNGs bound for every stage.
+- 2026-11-01: API 0.1 (additions): `[[lights]]` and the material stage's `block_light_color`.
+- 2026-10-31: API 0.1 (additions): translucent terrain in the shadow pass: `shadow_map_translucent`
+  and `shadow_color`, so a pack can tint the light that passes through water and stained glass.
+- 2026-10-31: API 0.1 (additions): `Frame.mods`, eight `vec4<f32>` a native mod hands the pack it bundles each
+  frame (`native_shader_params` in docs/native-mods.md), all 0 when no mod sets them.
+- 2026-10-31: API 0.1 (additions): `[shadow]`: the engine draws the solid terrain the light sees
+  into a distorted depth map each frame, which the material and post stages read as `shadow_map`
+  with `shadow_sampler` and the prelude's `shadow_position`; the frame's `light_direction`,
+  `has_shadow`, `shadow_view_proj`, `shadow_distance`, `shadow_distortion`, `shadow_resolution`
+  and `shadow_center_texel`.
+- 2026-10-30: API 0.1 (additions): the manifest's `[reflection] option`, which draws the water
+  mirror only while that option is on, and the mirror's own eye in facing culling.
+- 2026-10-30: API 0.1 (additions): the material stage's `reflection` and
+  `reflection_sampler`, the world mirrored about the water plane around the camera, drawn
+  only for a pack whose material reads it; `Frame.water_plane`, `has_reflection` and
+  `reflection_resolution`.
+- 2026-10-30: API 0.1 (additions): `MaterialInput.face`, `fluid`, `emission`, `normal` and
+  `tangent`: which fluid and face a point is on, how strongly its block shines, and the
+  surface's frame for normal maps and lighting.
+- 2026-10-30: API 0.1 (additions): the post stage's `history`, last frame's input to the last
+  pass, so a temporal pass second to last reads its own previous output (TAA, denoising).
+- 2026-10-30: API 0.1 (additions): `Frame.previous_view_projection`, `camera_motion` and
+  `delta_time` for temporal passes (reprojection, motion blur); `eye_light_smooth`, `in_water`
+  and `in_lava`, eased so exposure and underwater fog fade instead of stepping.
+- 2026-10-30: sprite tags (`[[tags]]`, `MaterialInput.tags`) and the frame's `precipitation`, `temperature`,
+  `downfall` and `wetness`.
+- 2026-10-30: API 0.1 (additions): the material stage's `MaterialInput.screen` and its
+  `opaque_depth` and `opaque_color`, the world as it was before translucent terrain drew, so
+  water and glass can see what lies behind them (depth under water, refraction).
 - 2026-10-26: the material stage in the game: terrain's surfaces through the pack's `material`.
 - 2026-10-26: the sky stage in the game: the pack's `sky` gets vanilla's colour along each ray.
 - 2026-10-26: the post stage in the game (`HORIZON_SHADER_PACK`, hot reload with the last good pack kept).

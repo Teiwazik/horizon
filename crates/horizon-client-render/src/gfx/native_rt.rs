@@ -478,7 +478,9 @@ impl RayScene {
             if self.built.contains_key(&s.key) {
                 continue;
             }
-            if new.len() >= BUILDS_PER_FRAME * 2 || (!new.is_empty() && started.elapsed() > BUILD_BUDGET) {
+            if new.len() >= BUILDS_PER_FRAME * 2
+                || (!new.is_empty() && started.elapsed() > BUILD_BUDGET)
+            {
                 break;
             }
             let count = u64::from(s.solid + s.translucent) * 4;

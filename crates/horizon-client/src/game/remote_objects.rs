@@ -123,6 +123,7 @@ impl Game<'_> {
                 yaw: super::cushions::snap_yaw(yaw),
                 color: 0,
                 check_interval: 0,
+                custom_name: None,
             });
         } else if kind == "minecraft:lightning_bolt" {
             self.spawn_remote_bolt(id, position);
@@ -331,7 +332,7 @@ impl Game<'_> {
     pub(super) fn turn_remote_object(&mut self, id: i32, yaw: Option<f32>, on_ground: bool) {
         let id = id as u32;
         // The boat the player drives turns here (isLocalInstanceAuthoritative).
-        let driven = self.riding;
+        let driven = self.riding.filter(|&id| self.controls_boat(id));
         if let Some(b) = self.boats.iter_mut().find(|b| b.id == id) {
             if Some(id) == driven {
                 return;
@@ -389,7 +390,7 @@ impl Game<'_> {
             }
         }
         // The boat the player drives moves here, not where the server says.
-        let driven = self.riding;
+        let driven = self.riding.filter(|&id| self.controls_boat(id));
         for b in &mut self.boats {
             if Some(b.id) == driven {
                 continue;

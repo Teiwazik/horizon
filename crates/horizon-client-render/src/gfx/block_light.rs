@@ -107,7 +107,10 @@ impl BlockLight {
             .to_array()
             .map(|v| v * STEP);
         // A grid filled since: into the texture, which then stands at its corner.
-        if self.pending.as_ref().is_some_and(|(_, job)| job.is_finished())
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(_, job)| job.is_finished())
             && let Some((at, job)) = self.pending.take()
         {
             if let Ok(cells) = job.join() {
@@ -130,7 +133,10 @@ impl BlockLight {
             self.built = Some((origin, revision));
             let sources = sources(&self.table, origin, camera, sections);
             let walls = near_walls(origin, walls);
-            self.pending = Some((origin, std::thread::spawn(move || build_cells(&sources, &walls))));
+            self.pending = Some((
+                origin,
+                std::thread::spawn(move || build_cells(&sources, &walls)),
+            ));
         }
         let at = self.shown.unwrap_or(origin);
         let corner = (glam::IVec3::from(at).as_dvec3() - camera).as_vec3();
@@ -173,9 +179,12 @@ fn near_walls(origin: [i32; 3], walls: &FxHashMap<SectionKey, Box<[u16; 256]>>) 
         .iter()
         .filter_map(|(key, rows)| {
             let key = [key.0, key.1 + crate::chunk::MIN_Y.div_euclid(16), key.2];
-            (0..3)
-                .all(|i| key[i] >= lo[i] && key[i] <= hi[i])
-                .then(|| (glam::IVec3::from(key) * 16 - glam::IVec3::from(origin), **rows))
+            (0..3).all(|i| key[i] >= lo[i] && key[i] <= hi[i]).then(|| {
+                (
+                    glam::IVec3::from(key) * 16 - glam::IVec3::from(origin),
+                    **rows,
+                )
+            })
         })
         .collect()
 }
@@ -207,7 +216,10 @@ fn sources(
             };
             let pos = glam::IVec3::from(pos);
             let center = pos.as_dvec3() + 0.5;
-            sources.push(((pos - corner, color, level), center.distance_squared(camera)));
+            sources.push((
+                (pos - corner, color, level),
+                center.distance_squared(camera),
+            ));
         }
     }
     if sources.len() > MAX_SOURCES {
@@ -307,7 +319,8 @@ fn flood(sources: &[Source], walls: &Walls) -> Vec<f32> {
     // The steps: each neighbour, what the step costs and the face and edge neighbours it
     // passes, which must be open too.
     let mut steps: Vec<(isize, u8, Vec<isize>)> = Vec::new();
-    let offset = |d: [i32; 3]| d[0] as isize + w as isize * (d[1] as isize + w as isize * d[2] as isize);
+    let offset =
+        |d: [i32; 3]| d[0] as isize + w as isize * (d[1] as isize + w as isize * d[2] as isize);
     for dz in -1..=1 {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -430,7 +443,10 @@ fn colors(sources: &[Source]) -> Vec<[f32; 4]> {
         let at = pos.as_vec3() + 0.5;
         let reach = f32::from(level);
         let first = ((at - reach) / cell).floor().max(Vec3::ZERO).as_ivec3();
-        let last = ((at + reach) / cell).ceil().min(Vec3::splat(n as f32 - 1.0)).as_ivec3();
+        let last = ((at + reach) / cell)
+            .ceil()
+            .min(Vec3::splat(n as f32 - 1.0))
+            .as_ivec3();
         for z in first.z..=last.z {
             for y in first.y..=last.y {
                 for x in first.x..=last.x {
@@ -457,7 +473,12 @@ mod tests {
     use super::*;
 
     /// A torch of level 14 at world (8, 64, 8), its section's key, and the grid's corner.
-    fn torch() -> (LightTable, FxHashMap<SectionKey, Vec<([i32; 3], u32)>>, [i32; 3], SectionKey) {
+    fn torch() -> (
+        LightTable,
+        FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+        [i32; 3],
+        SectionKey,
+    ) {
         let mut table = LightTable::default();
         table.insert(7, ([2.0, 1.0, 0.0], 14));
         let mut sections = FxHashMap::default();
@@ -481,17 +502,29 @@ mod tests {
         let at = |p| cell(&cells, origin, p);
         let near = at([8, 64, 8]);
         // The colour over 4, whatever the weight: (2, 1, 0) / 4.
-        assert!((near[0] - 0.5).abs() < 0.01 && (near[1] - 0.25).abs() < 0.01, "{near:?}");
+        assert!(
+            (near[0] - 0.5).abs() < 0.01 && (near[1] - 0.25).abs() < 0.01,
+            "{near:?}"
+        );
         assert!((near[3] - 14.0 / 15.0).abs() < 0.01);
         // A step costs its length: four blocks along an axis or diagonally, both near 10.
         assert!((at([12, 64, 8])[3] * 15.0 - 10.0).abs() < 0.1);
         let diagonal = at([11, 67, 8])[3] * 15.0;
-        assert!((diagonal - (14.0 - 3.0 * 23.0 / 16.0)).abs() < 0.1, "{diagonal}");
+        assert!(
+            (diagonal - (14.0 - 3.0 * 23.0 / 16.0)).abs() < 0.1,
+            "{diagonal}"
+        );
         assert_eq!(at([8, 64, 40]), [0.0; 4], "past its level, nothing");
         assert!(
-            build(&LightTable::default(), origin, camera, &sections, &FxHashMap::default())
-                .iter()
-                .all(|&b| b == 0)
+            build(
+                &LightTable::default(),
+                origin,
+                camera,
+                &sections,
+                &FxHashMap::default()
+            )
+            .iter()
+            .all(|&b| b == 0)
         );
     }
 
@@ -516,7 +549,11 @@ mod tests {
         let open = build(&table, origin, camera, &sections, &FxHashMap::default());
         let open_at = |p| cell(&open, origin, p)[3] * 15.0;
         // Behind the wall, the long way round (out to z = 12 and back): darker than in the open.
-        assert!(at([11, 64, 8]) < open_at([11, 64, 8]) - 4.0, "{}", at([11, 64, 8]));
+        assert!(
+            at([11, 64, 8]) < open_at([11, 64, 8]) - 4.0,
+            "{}",
+            at([11, 64, 8])
+        );
         assert!(at([11, 64, 8]) > 0.0);
         // On the torch's side, as in the open.
         assert_eq!(at([9, 64, 8]), open_at([9, 64, 8]));

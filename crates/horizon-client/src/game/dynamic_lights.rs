@@ -97,6 +97,8 @@ impl Game<'_> {
     /// Fills `dynamic_lights` for the frame from [`Self::dynamic_light_sources`], the nearest
     /// [`dynamic_light::MAX`] of them.
     pub(super) fn gather_dynamic_lights(&mut self, camera: DVec3, alpha: f64) {
+        let _span = horizon_client::spans::guard("pr_light_gather");
+        let mut laps = horizon_client::spans::laps();
         let mut out = std::mem::take(&mut self.dynamic_lights);
         out.clear();
         self.dynamic_states.clear();
@@ -109,9 +111,11 @@ impl Game<'_> {
                 ..s
             })
             .collect();
+        laps.lap("pr_light_sources");
         let mut states = std::mem::take(&mut self.dynamic_states);
         dynamic_light::select(&sources, camera, &mut out, &mut states);
         self.dynamic_states = states;
         self.dynamic_lights = out;
+        laps.lap("pr_light_select");
     }
 }
