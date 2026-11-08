@@ -8778,11 +8778,7 @@ impl Renderer {
                     profile::gauge("gpu_mb.allocated", allocated as f64 / 1048576.0);
                     profile::gauge("gpu_mb.reserved", reserved as f64 / 1048576.0);
                 }
-                for (name, ms) in self
-                    .shader_pass_times()
-                    .into_iter()
-                    .chain(self.own_pass_times())
-                {
+                for (name, ms) in self.shader_pass_times().into_iter().chain(self.own_pass_times()) {
                     profile::gauge(format!("gpu_ms.{name}"), f64::from(ms));
                 }
                 if !self.gpu_times.is_empty() {
