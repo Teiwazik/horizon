@@ -1374,6 +1374,8 @@ pub struct Renderer {
     visible_lods: Vec<lod::Visible>,
     /// When `HORIZON_SHADER_PACK_TIMING`'s distant-terrain line was last logged.
     lod_logged: std::time::Instant,
+    /// Time `upload_lods` took since the last `lod:` log line: (total, worst, calls).
+    lod_upload_stats: (std::time::Duration, std::time::Duration, u32),
     /// Last `state:` line logged (`HORIZON_SHADER_PACK_TIMING`), to log only changes.
     state_logged: String,
     /// The sections a shader pack's shadow camera sees (`pack_post::ShadowView`).
@@ -5000,6 +5002,7 @@ impl Renderer {
             visible: Vec::new(),
             visible_lods: Vec::new(),
             lod_logged: std::time::Instant::now(),
+            lod_upload_stats: Default::default(),
             state_logged: String::new(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
@@ -8708,7 +8711,7 @@ impl Renderer {
                 self.state_logged = key;
             }
             log::info!(
-                "lod: {} resident tiles, {} in view ({quads} solid quads), occlusion {}",
+                "lod: {} resident tiles, {} in view ({quads} solid quads), occlusion {}, upload {:.2} ms total / {:.2} ms worst over {} calls, pending {}",
                 self.lods.len(),
                 visible_lods.len(),
                 if cull.is_some() {
@@ -8718,7 +8721,12 @@ impl Renderer {
                 } else {
                     "off"
                 },
+                self.lod_upload_stats.0.as_secs_f64() * 1e3,
+                self.lod_upload_stats.1.as_secs_f64() * 1e3,
+                self.lod_upload_stats.2,
+                self.lod_pending.is_some(),
             );
+            self.lod_upload_stats = Default::default();
             self.lod_logged = now;
         }
         // Phase 2's draws are tested where grouping left them.

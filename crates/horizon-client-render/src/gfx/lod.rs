@@ -319,6 +319,16 @@ impl Renderer {
     /// Uploads queued tile meshes for about `budget` (at least one), then,
     /// once all are in, fades them in over the tiles they replace.
     pub fn upload_lods(&mut self, budget: Duration) {
+        let started = Instant::now();
+        self.upload_lods_inner(budget);
+        let took = started.elapsed();
+        let stats = &mut self.lod_upload_stats;
+        stats.0 += took;
+        stats.1 = stats.1.max(took);
+        stats.2 += 1;
+    }
+
+    fn upload_lods_inner(&mut self, budget: Duration) {
         let start = Instant::now();
         if self.lod_pending.is_some() {
             // Far tiles fill the arenas too: large translucent pages wait for them.
