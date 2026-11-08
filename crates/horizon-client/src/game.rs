@@ -20090,6 +20090,8 @@ impl Game<'_> {
                             ]);
                             self.frame_stats
                                 .record_block_entities(r.static_block_entity_frame_stats());
+                            self.frame_stats
+                                .record_made_share(r.frame_generation_share());
                         }
                         self.frame_stats.record_gpu(&r.gpu_times);
                         r.gpu_times.clear();

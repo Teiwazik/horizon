@@ -537,6 +537,9 @@ pub struct FrameStats {
     static_bytes_uploaded: u64,
     static_entities_drawn: u64,
     dynamic_entities_drawn: u64,
+    /// Frame generation's made frames per real frame, summed over recorded frames.
+    made_share_sum: f64,
+    made_share_frames: u64,
 }
 
 /// The parts of a frame's CPU time: world streaming and uploads, game ticks,
@@ -613,6 +616,13 @@ impl FrameStats {
         self.static_entities_drawn += stats.static_entities_drawn;
         self.dynamic_entities_drawn += stats.dynamic_entities_drawn;
     }
+    /// Frame generation's made frames per real frame (none while it is off).
+    pub fn record_made_share(&mut self, share: Option<f32>) {
+        if let Some(share) = share {
+            self.made_share_sum += f64::from(share);
+            self.made_share_frames += 1;
+        }
+    }
     /// Every recorded frame time, in milliseconds, in order.
     pub fn frame_millis(&self) -> &[f32] {
         &self.millis
@@ -635,6 +645,8 @@ impl FrameStats {
         self.static_bytes_uploaded = 0;
         self.static_entities_drawn = 0;
         self.dynamic_entities_drawn = 0;
+        self.made_share_sum = 0.0;
+        self.made_share_frames = 0;
     }
     pub fn summary(&self) -> serde_json::Value {
         let mut sorted = self.millis.clone();
@@ -685,6 +697,9 @@ impl FrameStats {
             "dynamic_entities_drawn": self.dynamic_entities_drawn,
             "static_entities_drawn_avg_per_frame": self.static_entities_drawn as f64 / n as f64,
             "dynamic_entities_drawn_avg_per_frame": self.dynamic_entities_drawn as f64 / n as f64,
+            // Frames shown: real frames plus the ones frame generation made.
+            "presented_fps": n as f64 * 1000.0 / total
+                * (1.0 + self.made_share_sum / self.made_share_frames.max(1) as f64),
         })
     }
 }
