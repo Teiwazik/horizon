@@ -566,7 +566,11 @@ mod tests {
             solid: vec![vertex(0.0); 4],
             ..SectionMesh::default()
         };
-        assert_eq!(mesh_hash(&mesh), mesh_hash(&same), "the same mesh keeps its upload");
+        assert_eq!(
+            mesh_hash(&mesh),
+            mesh_hash(&same),
+            "the same mesh keeps its upload"
+        );
         let mut moved = same;
         moved.solid[2] = vertex(1.0);
         let mut translucent = SectionMesh::default();
@@ -576,8 +580,16 @@ mod tests {
             ..SectionMesh::default()
         };
         lit.lights.push(([1, 2, 3], 15));
-        for (what, other) in [("a vertex", &moved), ("its pass", &translucent), ("a light", &lit)] {
-            assert_ne!(mesh_hash(&mesh), mesh_hash(other), "{what} changed: uploads");
+        for (what, other) in [
+            ("a vertex", &moved),
+            ("its pass", &translucent),
+            ("a light", &lit),
+        ] {
+            assert_ne!(
+                mesh_hash(&mesh),
+                mesh_hash(other),
+                "{what} changed: uploads"
+            );
         }
     }
 

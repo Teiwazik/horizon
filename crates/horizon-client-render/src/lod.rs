@@ -21,6 +21,8 @@ use std::{
 };
 
 const CELLS: usize = 16;
+/// Shortest time between two meshes of one tile that already has one.
+const REMESH_GAP: std::time::Duration = std::time::Duration::from_millis(300);
 const MAX_SAVED: usize = 1024;
 /// How many resident chunks may wait for the worker's summary at once
 /// (`Lod::observing`).
@@ -1268,6 +1270,10 @@ pub struct Lod {
     dirty: FxHashMap<TileKey, u64>,
     /// The newest revision of each active tile's mesh.
     mesh_version: FxHashMap<TileKey, u64>,
+    /// When each active tile last went to the mesh pool. A tile remeshed
+    /// again within [`REMESH_GAP`] waits, so a burst of neighbours and
+    /// descendants finishing costs one rebuild instead of one each.
+    meshed_at: FxHashMap<TileKey, std::time::Instant>,
     /// The newest revision accepted by the renderer for each active tile.
     /// Older in-flight results can still fill a hole while a newer job waits.
     shown_version: FxHashMap<TileKey, u64>,
@@ -1650,6 +1656,7 @@ impl Lod {
             active: FxHashSet::default(),
             dirty: FxHashMap::default(),
             mesh_version: FxHashMap::default(),
+            meshed_at: FxHashMap::default(),
             shown_version: FxHashMap::default(),
             mesh_cancel: FxHashMap::default(),
             next_version: 1,
@@ -1703,11 +1710,7 @@ impl Lod {
         if !due(1) {
             return;
         }
-        let observed = self
-            .shared
-            .observed
-            .lock()
-            .map_or(0, |o| o.len());
+        let observed = self.shared.observed.lock().map_or(0, |o| o.len());
         for (name, n) in [
             ("observed", observed),
             ("plan_nodes", self.plan.nodes.len()),
@@ -1735,7 +1738,10 @@ impl Lod {
             ("full", self.full.len()),
             ("retiring", self.retiring.len()),
             ("cutout", self.cutout.as_ref().map_or(0, |c| c.len())),
-            ("cutout_pending", self.cutout_pending.as_ref().map_or(0, |c| c.len())),
+            (
+                "cutout_pending",
+                self.cutout_pending.as_ref().map_or(0, |c| c.len()),
+            ),
             ("cutout_waiting", self.cutout_waiting.len()),
             ("wanted", self.wanted.len()),
             ("saved", self.saved.len()),
@@ -2608,6 +2614,7 @@ impl Lod {
             }
         }
         self.mesh_version.retain(|key, _| self.active.contains(key));
+        self.meshed_at.retain(|key, _| self.active.contains(key));
         self.shown_version
             .retain(|key, _| self.active.contains(key));
         self.dirty.retain(|key, _| self.active.contains(key));
@@ -2903,11 +2910,27 @@ impl Lod {
         if self.outstanding_meshes >= self.mesh_workers * 4 {
             return;
         }
-        let keys: Vec<(TileKey, u64)> = self
-            .dirty
-            .drain()
-            .filter(|(key, _)| self.active.contains(key) && self.ready.contains_key(key))
-            .collect();
+        let now = std::time::Instant::now();
+        let mut keys: Vec<(TileKey, u64)> = Vec::new();
+        let meshed_at = &self.meshed_at;
+        let active = &self.active;
+        let ready = &self.ready;
+        self.dirty.retain(|key, version| {
+            if !active.contains(key) || !ready.contains_key(key) {
+                return false;
+            }
+            let recent = meshed_at
+                .get(key)
+                .is_some_and(|at| now.saturating_duration_since(*at) < REMESH_GAP);
+            if recent {
+                return true;
+            }
+            keys.push((*key, *version));
+            false
+        });
+        for (key, _) in &keys {
+            self.meshed_at.insert(*key, now);
+        }
         if keys.is_empty() {
             return;
         }
@@ -5797,6 +5820,47 @@ mod tests {
         lod.finish_any_sample(key, holed, true);
         assert_eq!(lod.ready[&key][0], samples(70)[0]);
         assert!(lod.retry.contains_key(&key));
+    }
+
+    /// A tile remeshed again right after its last mesh waits for the gap, so
+    /// a burst of changes rebuilds it once; a tile with no mesh yet goes now.
+    #[test]
+    fn a_tile_remeshed_within_the_gap_waits_and_goes_once() {
+        let mut lod = Lod::scheduler_for_test();
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 3,
+        };
+        lod.plan.nodes.insert(key);
+        lod.active.insert(key);
+        lod.ready.insert(key, Arc::new(samples(70)));
+        let jobs = |lod: &Lod| lod.shared.mesh_jobs.lock().unwrap().len();
+        lod.mark_mesh(key);
+        lod.dispatch_meshes([0, 0]);
+        assert_eq!(jobs(&lod), 1, "a first mesh is not delayed");
+        for _ in 0..5 {
+            lod.mark_mesh(key);
+            lod.dispatch_meshes([0, 0]);
+        }
+        assert_eq!(jobs(&lod), 1, "changes within the gap wait");
+        assert!(lod.dirty.contains_key(&key), "and are not lost");
+        let newest = lod.mesh_version[&key];
+        // The gap has passed.
+        let back = std::time::Instant::now() - REMESH_GAP;
+        lod.meshed_at.insert(key, back);
+        lod.dispatch_meshes([0, 0]);
+        assert_eq!(jobs(&lod), 2, "one rebuild for the whole burst");
+        assert!(lod.dirty.is_empty());
+        let last = lod
+            .shared
+            .mesh_jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.job.version)
+            .max();
+        assert_eq!(last, Some(newest), "it carries the newest revision");
     }
 
     /// A tile refreshed while its sample is in flight is sampled once more:
