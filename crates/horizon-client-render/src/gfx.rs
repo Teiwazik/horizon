@@ -11470,7 +11470,11 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: None,
+                    stencil_ops: None,
+                }),
                 timestamp_writes: timed.and_then(|i| Some(native.timing.as_ref()?.stamps(i))),
                 ..Default::default()
             });

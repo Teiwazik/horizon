@@ -1573,7 +1573,20 @@ impl NativeMaterial {
                             cull_mode: Some(wgpu::Face::Back),
                             ..Default::default()
                         },
-                        depth_stencil: None,
+                        // Read-only world depth: early-Z skips hidden fragments (the fragment
+                        // stage still compares with its own tolerance). The bias keeps the
+                        // surface itself in front of its stored depth.
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: wgpu::TextureFormat::Depth32Float,
+                            depth_write_enabled: Some(false),
+                            depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                            stencil: Default::default(),
+                            bias: wgpu::DepthBiasState {
+                                constant: 16,
+                                slope_scale: 1.0,
+                                clamp: 0.0,
+                            },
+                        }),
                         multisample: Default::default(),
                         fragment: Some(wgpu::FragmentState {
                             module: &module,
