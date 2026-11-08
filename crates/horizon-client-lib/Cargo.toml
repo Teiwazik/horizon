@@ -185,6 +185,10 @@ name = "resource_memory"
 path = "../horizon-client/examples/resource_memory.rs"
 
 [[example]]
+name = "server_terrain_world"
+path = "../horizon-client/examples/server_terrain_world.rs"
+
+[[example]]
 name = "save_batch_bench"
 path = "../horizon-client/examples/save_batch_bench.rs"
 
