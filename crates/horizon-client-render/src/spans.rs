@@ -58,13 +58,13 @@ pub fn record_here(on: bool) {
 /// Whether this thread records spans: all of them on, or [`record_here`].
 #[inline]
 pub fn recording_here() -> bool {
-    ENABLED.load(Ordering::Relaxed) || HERE.with(Cell::get) || trace::on()
+    ENABLED.load(Ordering::Relaxed) || HERE.with(Cell::get) || trace::on() || profile::on()
 }
 /// The thread's CPU time when spans are on for every thread (`HORIZON_SPIKES`): only they
 /// print it.
 #[inline]
 fn cpu_if_enabled() -> Option<Duration> {
-    if ENABLED.load(Ordering::Relaxed) {
+    if ENABLED.load(Ordering::Relaxed) || profile::on() {
         thread_cpu()
     } else {
         None
@@ -107,6 +107,9 @@ impl Drop for Guard {
             .map_or(ms, |(end, start)| (end - start).as_secs_f32() * 1000.0);
         DEPTH.with(|d| d.set(depth));
         trace::span(name, started, ms);
+        if profile::on() {
+            profile::span(name, ms, cpu_ms);
+        }
         push(Span {
             name,
             ms,
@@ -194,6 +197,9 @@ impl Laps {
             .map_or(ms, |(end, start)| (end - start).as_secs_f32() * 1000.0);
         let depth = DEPTH.with(Cell::get);
         trace::span(name, *started, ms);
+        if profile::on() {
+            profile::span(name, ms, cpu_ms);
+        }
         push(Span {
             name,
             ms,
@@ -449,6 +455,235 @@ pub mod trace {
         if now.duration_since(sink.flushed) >= FLUSH_EVERY {
             let _ = sink.file.flush();
             sink.flushed = now;
+        }
+    }
+}
+
+/// The run profiler: `HORIZON_PROFILE=1` writes one JSON line a second to
+/// `HORIZON_PROFILE_FILE` (default `$HORIZON_HOME/logs/profile.jsonl`): every
+/// thread's spans (wall and CPU ms, count), counters ([`profile::add`]),
+/// gauges ([`profile::gauge`]: cache sizes, GPU pass times, set by their owners
+/// once a second, [`profile::due`]), each OS thread's CPU time, resident set,
+/// threads and open files. Off, a span costs one relaxed load.
+pub mod profile {
+    use crate::fast_hash::FxHashMap;
+    use std::{
+        cell::RefCell,
+        collections::BTreeMap,
+        io::Write as _,
+        sync::{
+            Mutex, OnceLock, PoisonError,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    type SpanSums = FxHashMap<(String, &'static str), [f64; 3]>;
+    static SPANS: Mutex<Option<SpanSums>> = Mutex::new(None);
+    static COUNTERS: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
+    static GAUGES: Mutex<BTreeMap<String, f64>> = Mutex::new(BTreeMap::new());
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    const FLUSH: Duration = Duration::from_millis(200);
+
+    struct Local {
+        thread: String,
+        sums: FxHashMap<&'static str, [f64; 3]>,
+        flushed: Instant,
+    }
+    impl Local {
+        fn flush(&mut self) {
+            let mut all = SPANS.lock().unwrap_or_else(PoisonError::into_inner);
+            let all = all.get_or_insert_with(Default::default);
+            for (name, s) in self.sums.drain() {
+                let e = all.entry((self.thread.clone(), name)).or_default();
+                for (a, b) in e.iter_mut().zip(s) {
+                    *a += b;
+                }
+            }
+            self.flushed = Instant::now();
+        }
+    }
+    impl Drop for Local {
+        fn drop(&mut self) {
+            self.flush();
+        }
+    }
+    thread_local! {
+        static LOCAL: RefCell<Option<Local>> = const { RefCell::new(None) };
+    }
+
+    #[inline]
+    pub fn on() -> bool {
+        ON.load(Ordering::Relaxed)
+    }
+
+    /// Starts the profiler when `HORIZON_PROFILE` is set. Call once, early.
+    pub fn init() {
+        if std::env::var_os("HORIZON_PROFILE").is_none_or(|v| v.is_empty() || v == "0") {
+            return;
+        }
+        let path = std::env::var_os("HORIZON_PROFILE_FILE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HORIZON_HOME")
+                    .map(|h| std::path::Path::new(&h).join("logs/profile.jsonl"))
+            })
+            .unwrap_or_else(|| "profile.jsonl".into());
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let Ok(file) = std::fs::File::create(&path) else {
+            return;
+        };
+        ORIGIN.get_or_init(Instant::now);
+        // Lets the rig's debugger attach for stack samples (ptrace_scope 1).
+        horizon_threads::allow_any_tracer();
+        ON.store(true, Ordering::Relaxed);
+        let _ = std::thread::Builder::new()
+            .name("Profiler".into())
+            .spawn(move || writer(file));
+    }
+
+    /// A span of `name` on this thread ended.
+    pub(super) fn span(name: &'static str, ms: f32, cpu_ms: f32) {
+        let _ = LOCAL.try_with(|l| {
+            let mut l = l.borrow_mut();
+            let l = l.get_or_insert_with(|| Local {
+                thread: std::thread::current().name().unwrap_or("unnamed").to_string(),
+                sums: FxHashMap::default(),
+                flushed: Instant::now(),
+            });
+            let e = l.sums.entry(name).or_default();
+            e[0] += f64::from(ms);
+            e[1] += f64::from(cpu_ms);
+            e[2] += 1.0;
+            if l.flushed.elapsed() >= FLUSH {
+                l.flush();
+            }
+        });
+    }
+
+    /// Adds `n` to the counter `name` (bytes, calls); counters restart each second.
+    #[inline]
+    pub fn add(name: &'static str, n: u64) {
+        if on() {
+            *COUNTERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(name)
+                .or_default() += n;
+        }
+    }
+
+    /// Sets the gauge `name` (a size, a GPU time), kept until set again.
+    pub fn gauge(name: impl Into<String>, value: f64) {
+        if on() {
+            GAUGES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(name.into(), value);
+        }
+    }
+
+    /// Whether gauges' owners should set them now: true once a second, for
+    /// each `slot` (one per owner, below 64).
+    pub fn due(slot: u32) -> bool {
+        every(slot, 1)
+    }
+
+    /// [`due`] once every `secs` seconds.
+    pub fn every(slot: u32, secs: u64) -> bool {
+        if !on() {
+            return false;
+        }
+        static SECOND: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+        let now = ORIGIN.get().map_or(0, |o| o.elapsed().as_secs()) / secs.max(1) + 1;
+        let cell = &SECOND[slot as usize % 64];
+        let last = cell.load(Ordering::Relaxed);
+        now > last
+            && cell
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+    }
+
+    /// Each OS thread's `name#tid` and CPU time in ms (utime + stime).
+    fn thread_cpu() -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+            return out;
+        };
+        for task in dir.flatten() {
+            let Ok(stat) = std::fs::read_to_string(task.path().join("stat")) else {
+                continue;
+            };
+            let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+                continue;
+            };
+            let name = format!(
+                "{}#{}",
+                &stat[open + 1..close],
+                task.file_name().to_string_lossy()
+            );
+            let fields: Vec<&str> = stat.get(close + 2..).unwrap_or("").split(' ').collect();
+            // utime and stime are stat fields 14 and 15: 11 and 12 after the state.
+            let tick = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            out.push((name, (tick(11) + tick(12)) * 10.0));
+        }
+        out
+    }
+
+    fn status_kb(status: &str, key: &str) -> f64 {
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    }
+
+    fn writer(file: std::fs::File) {
+        let mut file = std::io::BufWriter::new(file);
+        let origin = ORIGIN.get().copied().unwrap_or_else(Instant::now);
+        let mut last_cpu: FxHashMap<String, f64> = FxHashMap::default();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let spans = SPANS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .unwrap_or_default();
+            let counters =
+                std::mem::take(&mut *COUNTERS.lock().unwrap_or_else(PoisonError::into_inner));
+            let gauges = GAUGES.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let mut by_thread: BTreeMap<String, BTreeMap<&str, [f64; 3]>> = BTreeMap::new();
+            for ((thread, name), s) in spans {
+                by_thread.entry(thread).or_default().insert(name, s);
+            }
+            let mut cpu = serde_json::Map::new();
+            for (name, ms) in thread_cpu() {
+                let d = ms - last_cpu.get(&name).copied().unwrap_or(ms);
+                if d > 0.0 {
+                    cpu.insert(name.clone(), d.into());
+                }
+                last_cpu.insert(name, ms);
+            }
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let fds = std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count());
+            let line = serde_json::json!({
+                "t": origin.elapsed().as_secs_f64(),
+                "spans": by_thread,
+                "counters": counters,
+                "gauges": gauges,
+                "thread_cpu_ms": cpu,
+                "proc": {
+                    "rss_mb": status_kb(&status, "VmRSS:") / 1024.0,
+                    "threads": status_kb(&status, "Threads:"),
+                    "fds": fds,
+                },
+            });
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
         }
     }
 }

@@ -658,3 +658,14 @@ mod junction_tests {
         assert!(super::mount_point_buffer(&[0; 100]).is_ok());
     }
 }
+
+/// Lets any process of this user attach a debugger to this one (Linux
+/// `PR_SET_PTRACER_ANY`), for a profiling rig's stack samples under
+/// `ptrace_scope` 1. Elsewhere it does nothing.
+pub fn allow_any_tracer() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_PTRACER takes one integer argument and touches no memory.
+    unsafe {
+        libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY);
+    }
+}

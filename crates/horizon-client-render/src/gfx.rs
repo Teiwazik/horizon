@@ -8615,6 +8615,7 @@ impl Renderer {
         }
         // Distant terrain tiles are occlusion tested as sections are, with their meshes'
         // bounds, but for those fading or with a stand-in (`lod::Tile::cull_bounds`).
+        let mut lod_draws = 0usize;
         for (i, v) in visible_lods.iter().enumerate() {
             let tile = &self.lods[&v.key];
             let s = tile.drawn();
@@ -8636,6 +8637,7 @@ impl Renderer {
                 facing_runs_from(&s.sides, eye, mirror_low, v.origin, part, |first, quads| {
                     indices += quads * 6;
                     let base = s.solid_base() + first * 4;
+                    lod_draws += 1;
                     draws.push([quads * 6, instances, 0, base, index as u32]);
                     pages.push((s.page, None));
                 });
@@ -8729,6 +8731,19 @@ impl Renderer {
             self.lod_upload_stats = Default::default();
             self.lod_logged = now;
         }
+        if crate::spans::profile::on() {
+            use crate::spans::profile;
+            profile::add("bytes.staged.uploads", self.uploads.take_staged());
+            profile::add("bytes.staged.sections", self.section_uploads.take_staged());
+            profile::add(
+                "bytes.lod_unchanged_skipped",
+                lod::LOD_SKIPPED_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed),
+            );
+            profile::add("frames", 1);
+            profile::add("draws.lod", lod_draws as u64);
+            profile::add("draws.all", self.draws.len() as u64);
+            profile::add("draws.phase2", self.phase2_draws.len() as u64);
+        }
         // Phase 2's draws are tested where grouping left them.
         let runs = self
             .phase2_runs
@@ -8750,6 +8765,29 @@ impl Renderer {
         self.draws.extend_from_slice(&self.phase2_draws);
         self.draw_pages.extend_from_slice(&self.phase2_pages);
         let culling = cull.is_some();
+        if crate::spans::profile::on() {
+            use crate::spans::profile;
+            if profile::due(0) {
+                profile::gauge("lod.tiles_resident", self.lods.len() as f64);
+                profile::gauge("lod.tiles_in_view", visible_lods.len() as f64);
+                profile::gauge("sections.resident", self.sections.len() as f64);
+                for (name, bytes) in self.gpu_census() {
+                    profile::gauge(format!("gpu_mb.{name}"), bytes as f64 / 1048576.0);
+                }
+                if let Some((allocated, reserved, _)) = self.gpu_memory_by_label() {
+                    profile::gauge("gpu_mb.allocated", allocated as f64 / 1048576.0);
+                    profile::gauge("gpu_mb.reserved", reserved as f64 / 1048576.0);
+                }
+                for (name, ms) in self.shader_pass_times().into_iter().chain(self.own_pass_times()) {
+                    profile::gauge(format!("gpu_ms.{name}"), f64::from(ms));
+                }
+                if !self.gpu_times.is_empty() {
+                    let mut t = self.gpu_times.clone();
+                    t.sort_by(f32::total_cmp);
+                    profile::gauge("gpu_ms.frame_median", f64::from(t[t.len() / 2]));
+                }
+            }
+        }
         let solid_draws = self.draws.len() as u32;
         // Phase 2's draws `[phase1_draws..phase2_cutout]` hold opaque quads, the rest
         // cutout ones (without the split, all of them go through one pipeline).

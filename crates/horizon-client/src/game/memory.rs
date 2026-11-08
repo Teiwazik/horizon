@@ -177,3 +177,34 @@ impl Game<'_> {
         })
     }
 }
+
+impl Game<'_> {
+    /// Every 30 s under `HORIZON_PROFILE`, the whole `memory_report` as the
+    /// profiler's `mem.*` gauges (numbers only, keys joined by dots).
+    pub(super) fn profile_memory(&self) {
+        if !horizon_client::spans::profile::every(2, 30) {
+            return;
+        }
+        fn flatten(prefix: &str, v: &Value) {
+            match v {
+                Value::Number(n) => {
+                    if let Some(x) = n.as_f64() {
+                        horizon_client::spans::profile::gauge(prefix.to_string(), x);
+                    }
+                }
+                Value::Object(m) => {
+                    for (k, v) in m {
+                        flatten(&format!("{prefix}.{k}"), v);
+                    }
+                }
+                Value::Array(a) if a.len() <= 64 => {
+                    for (i, v) in a.iter().enumerate() {
+                        flatten(&format!("{prefix}.{i}"), v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        flatten("mem", &self.memory_report());
+    }
+}

@@ -76,13 +76,13 @@ impl Queue {
             .name("Render submit".into())
             .spawn(move || {
                 for job in job_rx {
-                    let commands = job.encoder.finish();
-                    let submission = queue.submit([commands]);
+                    let commands = crate::spans::time("st_finish", || job.encoder.finish());
+                    let submission = crate::spans::time("st_submit", || queue.submit([commands]));
                     if let Some(after) = job.after {
-                        after();
+                        crate::spans::time("st_after", after);
                     }
                     if let Some(surface) = job.surface {
-                        queue.present(surface);
+                        crate::spans::time("st_present", || queue.present(surface));
                     }
                     if done_tx.send(submission).is_err() {
                         break;
@@ -136,6 +136,7 @@ impl Queue {
         }
         if let Some(l) = landing.as_mut() {
             let started = Instant::now();
+            let _span = crate::spans::guard("submit_wait");
             // A thread that died (a wgpu panic on it) panics here, as it would have in place.
             let submission = l
                 .done

@@ -11,6 +11,8 @@ const CHUNK: u64 = 1 << 20;
 pub struct Uploads {
     belt: wgpu::util::StagingBelt,
     chunk: u64,
+    /// Bytes staged since the last `take_staged` (the frame log).
+    staged: u64,
 }
 
 impl Uploads {
@@ -23,7 +25,12 @@ impl Uploads {
         Self {
             belt: wgpu::util::StagingBelt::new(device.clone(), chunk),
             chunk,
+            staged: 0,
         }
+    }
+    /// Bytes staged since the last call.
+    pub fn take_staged(&mut self) -> u64 {
+        std::mem::take(&mut self.staged)
     }
     /// A mapped staging slice of at least `size` bytes. The belt gives a
     /// write larger than its chunk a buffer of exactly that size, keeps it for
@@ -33,6 +40,7 @@ impl Uploads {
     /// to a power of two, the large buffers it keeps are reused, one per
     /// doubling.
     fn allocate(&mut self, size: NonZeroU64, alignment: NonZeroU64) -> wgpu::BufferSlice<'_> {
+        self.staged += size.get();
         let size = if size.get() > self.chunk {
             size.checked_next_power_of_two().unwrap_or(size)
         } else {

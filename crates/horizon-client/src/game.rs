@@ -16719,6 +16719,7 @@ impl Game<'_> {
     }
     fn render(&mut self) -> Result<bool> {
         let prepare = spans::guard("prepare");
+        self.profile_memory();
         let mut pr = spans::laps();
         // The window's GPU holds the atlas: its copy in memory is kept
         // compressed (a no-op once it is).
@@ -18536,6 +18537,8 @@ impl Game<'_> {
                 let meshes = horizon_client::spans::time("lod_update", || {
                     lod.update(camera, detail, lod_distance, covered, lod_aim)
                 });
+                horizon_client::spans::profile::add("lod.meshes_queued", meshes.len() as u64);
+                lod.profile_gauges();
                 renderer.queue_lods(meshes, lod.removed(), lod.take_cutout());
                 // A finished job can hold hundreds of tiles: spread them
                 // over frames rather than stall one.

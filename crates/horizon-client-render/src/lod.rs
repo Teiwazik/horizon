@@ -1696,6 +1696,58 @@ impl Lod {
             Some((surface.height, surface.state))
         })
     }
+    /// Sets the profiler's gauges for every map and queue this holds, once a
+    /// second (`spans::profile`).
+    pub fn profile_gauges(&self) {
+        use crate::spans::profile::{due, gauge};
+        if !due(1) {
+            return;
+        }
+        let observed = self
+            .shared
+            .observed
+            .lock()
+            .map_or(0, |o| o.len());
+        for (name, n) in [
+            ("observed", observed),
+            ("plan_nodes", self.plan.nodes.len()),
+            ("pending", self.pending.len()),
+            ("detail_masks", self.detail_masks.len()),
+            ("detail_backlog", self.detail_backlog.len()),
+            ("refreshed", self.refreshed.len()),
+            ("retry", self.retry.len()),
+            ("ready", self.ready.len()),
+            ("ready_columns", self.ready.values().map(|c| c.len()).sum()),
+            ("complete", self.complete.len()),
+            ("stale", self.stale.len()),
+            ("restale", self.restale.len()),
+            ("active", self.active.len()),
+            ("dirty", self.dirty.len()),
+            ("mesh_version", self.mesh_version.len()),
+            ("shown_version", self.shown_version.len()),
+            ("mesh_cancel", self.mesh_cancel.len()),
+            ("outstanding_meshes", self.outstanding_meshes),
+            ("meshed", self.meshed.len()),
+            ("unmeshed", self.unmeshed.len()),
+            ("removed_pending", self.removed_pending.len()),
+            ("removed", self.removed.len()),
+            ("covered", self.covered.len()),
+            ("full", self.full.len()),
+            ("retiring", self.retiring.len()),
+            ("cutout", self.cutout.as_ref().map_or(0, |c| c.len())),
+            ("cutout_pending", self.cutout_pending.as_ref().map_or(0, |c| c.len())),
+            ("cutout_waiting", self.cutout_waiting.len()),
+            ("wanted", self.wanted.len()),
+            ("saved", self.saved.len()),
+            ("reduced", self.reduced.len()),
+            ("saved_order", self.saved_order.len()),
+        ] {
+            gauge(format!("lod.{name}"), n as f64);
+        }
+        // Running totals: the report turns them into rates.
+        gauge("lod.total.mesh_versions", self.next_version as f64);
+        gauge("lod.total.refreshes", self.refreshes as f64);
+    }
     pub fn stats(&self) -> (usize, usize) {
         (self.active.len(), self.ready.len())
     }
