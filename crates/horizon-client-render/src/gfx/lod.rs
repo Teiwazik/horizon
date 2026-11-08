@@ -66,6 +66,27 @@ pub(super) struct Tile {
     /// Its slot in occlusion culling's results (`cull::TILE`), kept while
     /// meshes of the same tile replace one another.
     pub cull_slot: u32,
+    /// [`mesh_hash`] of the mesh it was uploaded from: a job that meshes
+    /// the tile again to the same bytes keeps this upload.
+    hash: u64,
+}
+
+/// Bytes of tile meshes not uploaded again because they were unchanged
+/// (`frame load` log line).
+pub(super) static LOD_SKIPPED_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// A hash of everything an upload of `mesh` puts on the GPU.
+pub(super) fn mesh_hash(mesh: &SectionMesh) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::fast_hash::FxHasher::default();
+    bytemuck::cast_slice::<_, u8>(&mesh.solid).hash(&mut h);
+    bytemuck::cast_slice::<_, u8>(&mesh.translucent).hash(&mut h);
+    bytemuck::cast_slice::<_, u8>(&mesh.packed).hash(&mut h);
+    mesh.visibility.hash(&mut h);
+    mesh.block_entities.hash(&mut h);
+    mesh.lights.hash(&mut h);
+    h.finish()
 }
 
 /// How long a tile takes to fade in over the ones it replaces.
@@ -210,6 +231,19 @@ impl Renderer {
         if let Some(copies) = &mut self.capture_copies {
             copies.tile(key, mesh);
         }
+        let hash = mesh_hash(mesh);
+        if let Some(old) = self.lods.get(&key)
+            && old.dying.is_none()
+            && old.hash == hash
+        {
+            // The same mesh again (a neighbour or the cutout changed and the
+            // tile came out the same): what is drawn stays, nothing uploads.
+            let bytes = (mesh.solid.len() + mesh.translucent.len())
+                * std::mem::size_of::<crate::mesher::TerrainVertex>()
+                + mesh.packed.len() * 24;
+            LOD_SKIPPED_BYTES.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         let old_slot = self.lods.get(&key).map(|tile| tile.cull_slot);
         let (shown, previous) = match self.lods.remove(&key) {
             Some(old) if old.dying.is_none() => match old.previous {
@@ -247,6 +281,7 @@ impl Renderer {
                         alone: false,
                         previous,
                         cull_slot,
+                        hash,
                     },
                 );
             }
@@ -513,6 +548,38 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::mesher::TerrainVertex;
+
+    #[test]
+    fn a_tile_meshed_to_other_bytes_uploads_again() {
+        let vertex = |x: f32| TerrainVertex {
+            pos: [x, 0.0, 0.0],
+            uv: [0, 0],
+            layer: 1,
+            light: 0xf0,
+            color: u32::MAX,
+        };
+        let mesh = SectionMesh {
+            solid: vec![vertex(0.0); 4],
+            ..SectionMesh::default()
+        };
+        let same = SectionMesh {
+            solid: vec![vertex(0.0); 4],
+            ..SectionMesh::default()
+        };
+        assert_eq!(mesh_hash(&mesh), mesh_hash(&same), "the same mesh keeps its upload");
+        let mut moved = same;
+        moved.solid[2] = vertex(1.0);
+        let mut translucent = SectionMesh::default();
+        translucent.translucent = vec![vertex(0.0); 4];
+        let mut lit = SectionMesh {
+            solid: vec![vertex(0.0); 4],
+            ..SectionMesh::default()
+        };
+        lit.lights.push(([1, 2, 3], 15));
+        for (what, other) in [("a vertex", &moved), ("its pass", &translucent), ("a light", &lit)] {
+            assert_ne!(mesh_hash(&mesh), mesh_hash(other), "{what} changed: uploads");
+        }
+    }
 
     #[test]
     fn tiles_fade_in_on_their_own_grid() {
