@@ -2321,8 +2321,19 @@ impl Lod {
         if let Some(visited) = self.saved.get(&key).cloned()
             && !Arc::ptr_eq(&visited, &columns.columns)
         {
-            // Its latest reduction is queued; never restore old edits or seed data.
-            self.apply_fine(key, &visited);
+            // Never restore old edits or seed data: the visited columns stand,
+            // at every level. Applied to the fine tile alone, the level 1-2
+            // tiles' detail bits stayed clear, so the chunk was asked for again
+            // every `request_detail` (250 ms) while it stayed in `saved`: a far
+            // terrain core reducing answers that were thrown away.
+            let reduced = self
+                .reduced
+                .get(&key)
+                .filter(|reduced| Arc::ptr_eq(&reduced.columns, &visited))
+                .cloned()
+                .unwrap_or_else(|| Arc::new(ReducedColumns::new(visited)));
+            self.apply_detail(key, &reduced);
+            self.reduced.insert(key, reduced);
             return;
         }
         self.apply_detail(key, &columns);
@@ -3938,6 +3949,42 @@ mod tests {
         );
         lod.apply_detail(chunk, &columns());
         assert_eq!(lod.shared.detail_widths.load(Ordering::Relaxed), 0b10);
+    }
+    /// A visited chunk answered by a detail request counts as answered in
+    /// every tile over it, from its visited columns: before, only its fine
+    /// tile was, and the coarser tiles asked for it every 250 ms forever.
+    #[test]
+    fn a_visited_chunks_detail_answers_the_coarser_tiles_too() {
+        let mut lod = Lod::scheduler_for_test();
+        let chunk = (1, 2);
+        let coarse = TileKey {
+            x: 0,
+            z: 0,
+            level: 2,
+        };
+        lod.ready
+            .insert(coarse, Arc::new(vec![Column::default(); CELLS * CELLS]));
+        // Visited: one column with a surface, unlike the generated answer.
+        let mut visited: [Column; 256] = std::array::from_fn(|_| Column::default());
+        visited[0] = Column::from_surface(Some(Surface {
+            height: 70,
+            state: BlockStateId(1),
+            water: None,
+            biome: 0,
+        }));
+        let visited = Arc::new(visited);
+        lod.saved.insert(chunk, visited.clone());
+        let generated = ReducedColumns::new(Arc::new(std::array::from_fn(|_| Column::default())));
+        lod.finish_detail(chunk, generated);
+        // Chunk (1, 2) in a 64-block tile of 4-block cells: cells x 4..8,
+        // z 8..12, 16 bits.
+        assert_eq!(lod.detail_masks.get(&coarse).map(detail_count), Some(16));
+        // And the visited columns, not the generated ones, are what it shows.
+        let index = 8 * 16 + 4;
+        assert_eq!(
+            lod.ready[&coarse][index],
+            Column::reduced(&visited, 0, 0, 4)
+        );
     }
     /// Detail read before a refresh over its chunk is dropped (asked
     /// again); elsewhere, or read after, it is kept.
