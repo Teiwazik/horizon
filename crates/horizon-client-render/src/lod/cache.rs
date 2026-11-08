@@ -29,12 +29,23 @@ struct Region {
     index: FxHashMap<(i32, i32), (u64, u32)>,
 }
 
+/// Regions kept open (a file handle and an index each). Flying far used to
+/// open every region passed, missing ones too, and keep them all.
+const MAX_OPEN: usize = 256;
+
+#[derive(Default)]
+struct Regions {
+    /// Each region looked up: when last used, and the region (none: no file).
+    map: FxHashMap<(i32, i32), (u64, Option<Region>)>,
+    clock: u64,
+}
+
 pub struct DiskCache {
     dir: PathBuf,
     key: u64,
     // ponytail: one lock for every region, with file reads under it; per-region
     // locks if the sampling threads ever wait on it.
-    regions: Mutex<FxHashMap<(i32, i32), Option<Region>>>,
+    regions: Mutex<Regions>,
 }
 
 impl DiskCache {
@@ -105,19 +116,38 @@ impl DiskCache {
 
     fn region<'a>(
         &self,
-        regions: &'a mut FxHashMap<(i32, i32), Option<Region>>,
+        regions: &'a mut Regions,
         x: i32,
         z: i32,
         create: bool,
     ) -> Option<&'a mut Region> {
         let at = (x >> 5, z >> 5);
-        if create && matches!(regions.get(&at), Some(None)) {
-            regions.remove(&at);
+        regions.clock += 1;
+        let now = regions.clock;
+        if create && matches!(regions.map.get(&at), Some((_, None))) {
+            regions.map.remove(&at);
         }
-        regions
+        if !regions.map.contains_key(&at) && regions.map.len() >= MAX_OPEN {
+            let oldest = regions
+                .map
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(&key, _)| key);
+            if let Some(oldest) = oldest {
+                regions.map.remove(&oldest);
+            }
+        }
+        let entry = regions
+            .map
             .entry(at)
-            .or_insert_with(|| self.open(at, create))
-            .as_mut()
+            .or_insert_with(|| (now, self.open(at, create)));
+        entry.0 = now;
+        entry.1.as_mut()
+    }
+
+    #[cfg(test)]
+    fn open_regions(&self) -> usize {
+        self.regions.lock().unwrap().map.len()
     }
 
     fn open(&self, (rx, rz): (i32, i32), create: bool) -> Option<Region> {
@@ -343,6 +373,25 @@ mod tests {
         cache.put(5, -40, &columns(3));
         assert!(cache.get(4, -40).is_none());
         assert_eq!(*cache.get(5, -40).unwrap(), columns(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_regions_stay_capped_and_closed_ones_read_again() {
+        let dir = std::env::temp_dir().join(format!("horizon-lod-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = DiskCache::new(dir.clone(), 7);
+        let regions = MAX_OPEN as i32 + 40;
+        // Written regions and looked-up missing ones both count.
+        for r in 0..regions {
+            cache.put(r * 32, 0, &columns(r as u32));
+            assert!(cache.get(r * 32, 64).is_none());
+        }
+        assert!(cache.open_regions() <= MAX_OPEN);
+        for r in 0..regions {
+            assert_eq!(*cache.get(r * 32, 0).unwrap(), columns(r as u32));
+        }
+        assert!(cache.open_regions() <= MAX_OPEN);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
