@@ -129,6 +129,11 @@ impl Launcher {
         let java = self.mods.java_for(self.mods.kind).is_some();
         let registry = self.mods.source == SourceId::Horizon && !java;
         let everything = self.mods.everything;
+        let works_on = self.mods.browse.filters.works_on;
+        let instance_name = self
+            .selected_instance()
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
         let extras = div()
             .flex()
             .flex_col()
@@ -153,6 +158,33 @@ impl Launcher {
                         .child(ui::text(13., FontWeight::NORMAL, 0.7).child(tr("Show everything")))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.mods.everything = !this.mods.everything;
+                            this.mods_search(0);
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(registry, |d| {
+                d.child(
+                    div()
+                        .id("mods-works-on")
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .cursor_pointer()
+                        .child(ui::toggle(
+                            "mods-works-on-switch",
+                            works_on,
+                            ui::look().accent,
+                            ui::look().on_accent,
+                            &t,
+                        ))
+                        .child(ui::text(13., FontWeight::NORMAL, 0.7).child(trf(
+                            "Only what works on {instance}",
+                            &[("instance", &instance_name)],
+                        )))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            let filters = &mut this.mods.browse.filters;
+                            filters.works_on = !filters.works_on;
                             this.mods_search(0);
                             cx.notify();
                         })),
@@ -397,9 +429,10 @@ impl Launcher {
             let installed = m.entry(&p).is_some();
             let busy = m.busy.as_ref().is_some_and(|b| b.0 == p.id);
             let checking = m.checking(&p);
-            let status = m.status(&p);
-            let can_install = !installed && !checking && m.busy.is_none() && status.installable();
-            let action: AnyElement = if installed || busy || checking || status.installable() {
+            let can_install =
+                !installed && !checking && m.busy.is_none() && m.support(&p).installable();
+            let action: AnyElement = if installed || busy || checking || m.support(&p).installable()
+            {
                 let label = if installed {
                     tr("Installed")
                 } else if checking {
@@ -431,12 +464,24 @@ impl Launcher {
             } else {
                 div().flex_none().w(px(20.)).into_any_element()
             };
-            // The registry's rows end with downloads, or a native mod's fit when it isn't fine;
-            // the others' with how they run (`compat`).
-            let right = if p.source == SourceId::Horizon && status.tone == Tone::Good {
-                ui::text(13., FontWeight::NORMAL, 0.5).child(count(p.downloads).to_uppercase())
+            // The registry's rows end with downloads, the others' with how they run (`compat`).
+            let right = if p.source == SourceId::Horizon {
+                ui::text(13., FontWeight::NORMAL, 0.5)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .children(super::mods_page::github_stars(&p.id, &t))
+                    .child(count(p.downloads).to_uppercase())
             } else {
-                ui::status_pill(tr(status.label), glass_tone(status.tone))
+                let support = m.support(&p);
+                let tone = match support {
+                    Support::Works => ui::live(),
+                    Support::Partial(_) => ui::warn(),
+                    Support::No(_) => white(0.4),
+                };
+                ui::text(13., FontWeight::MEDIUM, ink::FULL)
+                    .text_color(tone)
+                    .child(tr(support.label()))
             };
             let id = p.id.clone();
             list = list.child(
@@ -484,6 +529,17 @@ impl Launcher {
                             ui::text(13., FontWeight::NORMAL, 0.6)
                                 .truncate()
                                 .child(p.summary.clone()),
+                        )
+                        .children(
+                            m.works
+                                .get(&p.id)
+                                .filter(|_| p.source == SourceId::Horizon)
+                                .map(|(works, line)| {
+                                    ui::text(12., FontWeight::NORMAL, ink::FULL)
+                                        .truncate()
+                                        .text_color(if *works { ui::live() } else { white(0.4) })
+                                        .child(line.clone())
+                                }),
                         ),
                 )
                 .child(right.flex_none())
@@ -543,7 +599,7 @@ impl Launcher {
         let p = self.mods_picked()?;
         let icon = self.mods_icon(&p, 64.);
         let m = &self.mods;
-        let status = m.status(&p);
+        let support = m.support(&p);
         let entry = m.entry(&p).cloned();
         let busy = m.busy.as_ref().map(|b| b.0.clone());
         let checking = m.checking(&p);
@@ -557,7 +613,11 @@ impl Launcher {
         if !p.license.is_empty() {
             by.push(p.license.clone());
         }
-        let tone = glass_tone(status.tone);
+        let (tone, reason) = match &support {
+            Support::Works => (ui::live(), None),
+            Support::Partial(_) => (ui::warn(), support.reason()),
+            Support::No(_) => (white(0.55), support.reason()),
+        };
         let about = m
             .about
             .get(&p.id)
@@ -599,7 +659,7 @@ impl Launcher {
             .w_full()
             .opacity(0.6)
             .into_any_element()
-        } else if status.installable() {
+        } else if support.installable() {
             let label = if p.kind == PackKind::Modpack {
                 tr("Import as an instance").to_string()
             } else {
@@ -623,7 +683,7 @@ impl Launcher {
             })
             .into_any_element()
         } else {
-            ui::quiet("mods-detail-cannot", tr(status.label), 44., &t)
+            ui::quiet("mods-detail-cannot", tr(support.label()), 44., &t)
                 .w_full()
                 .opacity(0.5)
                 .into_any_element()
@@ -674,23 +734,21 @@ impl Launcher {
                         .line_height(px(20.))
                         .child(a)
                 }))
-                .child(div().flex().mt(px(16.)).child(ui::status_pill(
-                    if status.fit && status.tone != Tone::Good {
-                        tr(status.label).to_string()
-                    } else {
-                        trf("{support} in Horizon", &[("support", tr(status.label))])
-                    },
-                    tone,
-                )))
-                .children(status.reason.clone().map(|r| {
-                    let text = ui::text(13., FontWeight::NORMAL, 0.75)
-                        .mt(px(8.))
-                        .line_height(px(20.));
-                    match status.tone {
-                        Tone::Bad => text.text_color(ui::danger()),
-                        _ => text,
-                    }
-                    .child(r)
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tone)
+                        .child(trf(
+                            "{support} in Horizon",
+                            &[("support", tr(support.label()))],
+                        )),
+                )
+                .children(reason.map(|r| {
+                    ui::text(13., FontWeight::NORMAL, 0.55)
+                        .mt(px(4.))
+                        .child(r.to_string())
                 }))
                 .child(
                     ui::text(13., FontWeight::NORMAL, 0.55)
@@ -716,16 +774,6 @@ impl Launcher {
                     ),
                 ),
         )
-    }
-}
-
-/// A status's colour in the glass look.
-fn glass_tone(tone: Tone) -> Hsla {
-    match tone {
-        Tone::Good => ui::live(),
-        Tone::Warn => ui::warn(),
-        Tone::Bad => ui::danger(),
-        Tone::Off => white(0.55),
     }
 }
 

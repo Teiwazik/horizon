@@ -550,7 +550,10 @@ pub mod profile {
         let _ = LOCAL.try_with(|l| {
             let mut l = l.borrow_mut();
             let l = l.get_or_insert_with(|| Local {
-                thread: std::thread::current().name().unwrap_or("unnamed").to_string(),
+                thread: std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .to_string(),
                 sums: FxHashMap::default(),
                 flushed: Instant::now(),
             });
@@ -627,7 +630,12 @@ pub mod profile {
             );
             let fields: Vec<&str> = stat.get(close + 2..).unwrap_or("").split(' ').collect();
             // utime and stime are stat fields 14 and 15: 11 and 12 after the state.
-            let tick = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let tick = |i: usize| {
+                fields
+                    .get(i)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            };
             out.push((name, (tick(11) + tick(12)) * 10.0));
         }
         out
@@ -655,7 +663,10 @@ pub mod profile {
                 .unwrap_or_default();
             let counters =
                 std::mem::take(&mut *COUNTERS.lock().unwrap_or_else(PoisonError::into_inner));
-            let gauges = GAUGES.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let gauges = GAUGES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             let mut by_thread: BTreeMap<String, BTreeMap<&str, [f64; 3]>> = BTreeMap::new();
             for ((thread, name), s) in spans {
                 by_thread.entry(thread).or_default().insert(name, s);

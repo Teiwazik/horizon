@@ -105,6 +105,7 @@ pub struct Post {
     pub use_dlss: bool,
     /// Whether DLSS made last frame's picture.
     pub dlss_ran: bool,
+    light_key: Option<(bool, [f32; 4], [f32; 4], [[f32; 4]; 2])>,
 }
 
 impl Post {
@@ -321,6 +322,28 @@ impl Post {
             dlss: None,
             use_dlss: true,
             dlss_ran: false,
+            light_key: None,
+        }
+    }
+
+    // History stores baked light, so a change must reject it before jitter records the next frame.
+    pub(super) fn baked_light(
+        &mut self,
+        gain: bool,
+        settings: [f32; 4],
+        shares: [f32; 4],
+        windows: [[f32; 4]; 2],
+    ) {
+        // These uniforms do not change baked colour without gain. Keep compatibility
+        // history stable when only its final display settings change.
+        let key = Some(if gain {
+            (true, settings, shares, windows)
+        } else {
+            (false, [0.0; 4], [0.0; 4], [[0.0; 4]; 2])
+        });
+        if self.light_key != key {
+            self.taa_previous = None;
+            self.light_key = key;
         }
     }
 
@@ -331,12 +354,21 @@ impl Post {
 
     /// The world's rendered size and the size it is shown at (TAA's history).
     fn sizes(&self, window: [u32; 2]) -> ([u32; 2], [u32; 2]) {
-        let output = window.map(|v| ((v as f32 * self.scale).round() as u32).clamp(1, 8192));
         let upscale = if self.taa_on { self.upscale } else { 1.0 };
+        self.sizes_with_upscale(window, upscale)
+    }
+
+    fn sizes_with_upscale(&self, window: [u32; 2], upscale: f32) -> ([u32; 2], [u32; 2]) {
+        let output = window.map(|v| ((v as f32 * self.scale).round() as u32).clamp(1, 8192));
         (
             output.map(|v| ((v as f32 / upscale).round() as u32).max(1)),
             output,
         )
+    }
+
+    /// The next TAA frame's input size, even before its first jitter or resize.
+    pub(super) fn taa_render_size(&self, window: [u32; 2]) -> [u32; 2] {
+        self.sizes_with_upscale(window, self.upscale).0
     }
 
     /// TAA's sub-pixel jitter this frame, as a clip-space matrix to multiply into the
@@ -877,13 +909,91 @@ mod tests {
 
     #[test]
     fn jitter_stays_inside_the_pixel() {
-        for i in 1..=8 {
+        for i in 1..=128 {
             let (x, y) = (halton(i, 2), halton(i, 3));
             assert!((0.0..1.0).contains(&x) && (0.0..1.0).contains(&y));
         }
         assert_eq!(
             [halton(1, 2), halton(2, 2), halton(3, 2)],
             [0.5, 0.25, 0.75]
+        );
+    }
+
+    #[test]
+    fn culling_uses_the_next_taa_size_before_the_first_jitter_or_resize() {
+        let Some((device, _)) = test_device() else {
+            return;
+        };
+        let mut post = Post::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(!post.taa_on);
+        assert!(post.size().is_none());
+        for (window, scale, upscale, expected) in [
+            ([1280, 720], 1.0, 1.0, [1280, 720]),
+            ([1281, 721], 0.5, 2.0, [321, 181]),
+            ([3840, 2160], 0.25, 4.0, [240, 135]),
+            ([10000, 10000], 2.0, 4.0, [2048, 2048]),
+            ([0, 0], 0.5, 4.0, [1, 1]),
+        ] {
+            post.scale = scale;
+            post.upscale = upscale;
+            post.taa_on = false;
+            assert_eq!(post.taa_render_size(window), expected);
+            post.taa_on = true;
+            assert_eq!(post.sizes(window).0, expected);
+        }
+    }
+
+    #[test]
+    fn baked_light_changes_and_returning_from_a_pack_reject_taa_history() {
+        let Some((device, _)) = test_device() else {
+            eprintln!("TAA baked-light GPU skipped: no test device");
+            return;
+        };
+        let mut post = Post::new(&device, wgpu::TextureFormat::Rgba16Float);
+        post.taa = true;
+        if !post.supports_taa() {
+            eprintln!("TAA baked-light GPU skipped: TAA unsupported");
+            return;
+        }
+        let key = (
+            [5.0, 4.0, 1.0, 0.0],
+            [0.2, 0.5, 0.6, 1.0],
+            [[0.1; 4], [0.4; 4]],
+        );
+        for gain in [true, false, true] {
+            post.baked_light(gain, key.0, key.1, key.2);
+            post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+            assert_eq!(post.taa_this_frame.jitter[2], 1.0);
+            post.baked_light(gain, key.0, key.1, key.2);
+            post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+            assert_eq!(post.taa_this_frame.jitter[2], 0.0);
+        }
+        for field in 0..16 {
+            let mut changed = key;
+            match field {
+                0..=3 => changed.0[field] += 0.01,
+                4..=7 => changed.1[field - 4] += 0.01,
+                _ => changed.2[(field - 8) / 4][(field - 8) % 4] += 0.01,
+            }
+            post.baked_light(true, changed.0, changed.1, changed.2);
+            post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+            assert_eq!(post.taa_this_frame.jitter[2], 1.0);
+        }
+        post.baked_light(false, key.0, key.1, key.2);
+        post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+        assert_eq!(post.taa_this_frame.jitter[2], 1.0);
+        post.baked_light(false, [0.0; 4], [0.0; 4], [[0.0; 4]; 2]);
+        post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+        assert_eq!(post.taa_this_frame.jitter[2], 0.0);
+        // A pack disables TAA even when the light settings stay the same. Its first
+        // world frame after the pack is dropped must not reuse the pre-pack history.
+        post.jitter([32, 32], false, Mat4::IDENTITY, DVec3::ZERO);
+        post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+        assert_eq!(post.taa_this_frame.jitter[2], 1.0);
+        post.jitter([32, 32], true, Mat4::IDENTITY, DVec3::ZERO);
+        assert_eq!(post.taa_this_frame.jitter[2], 0.0);
+        eprintln!(
+            "TAA baked-light GPU checked gain, all settings/shares/windows and the first frame after a pack"
         );
     }
 

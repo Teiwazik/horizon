@@ -175,8 +175,7 @@ impl Game<'_> {
                     self.last_hurt_by_player.insert(id, self.lan_acting);
                 }
                 if hurt {
-                    let charge = "minecraft:wind_charge";
-                    self.shot_post_attack(p, who, charge, charge);
+                    self.shot_post_attack(p, who, p.kind.id(), "minecraft:wind_charge");
                 }
             }
         }
@@ -475,6 +474,8 @@ impl Game<'_> {
                 let swap = self.world.random.next_int_bound(i as i32).unwrap_or(0) as usize;
                 targets.swap(i - 1, swap);
             }
+            let dimension = self.dim.id();
+            self.native_wind_burst(dimension, center, &mut targets);
             for pos in targets {
                 self.wind_trigger_block(pos)?;
             }
@@ -666,6 +667,9 @@ mod tests {
             velocity: Vec3::ZERO,
             fuse: 80,
             on_ground: false,
+            fall_distance: 0.0,
+            stuck: Vec3::ZERO,
+            in_water: false,
             owner: None,
             guest: None,
             no_gravity: false,

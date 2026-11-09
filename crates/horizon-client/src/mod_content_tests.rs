@@ -15,6 +15,8 @@ fn state_light_compiles_in_final_order_and_relights_across_a_chunk_boundary() {
     use std::collections::HashMap;
     let declaration = r#"{"template":"minecraft:test","item":false,"properties":{"light":3},
       "state_properties":{"mode":{"type":"enum","values":["off","dim","bright"]}},
+      "outline_context_shapes":{"item":{"property":"mode","values":{
+        "dim":[[0,0,0,0.5,1,1]]},"default":[]}},
       "state_light":{"properties":["mode","axis"],"values":{
         "dim,x":8,"dim,y":9,"bright,x":15,"bright,y":12},"default":0}}"#;
     let (base, mods) = block_base_of(
@@ -90,6 +92,11 @@ fn state_light_compiles_in_final_order_and_relights_across_a_chunk_boundary() {
             u64::from(expected)
         );
         assert_eq!(tables.emission(i), expected);
+        let item_outline = &plan.blocks[0].context_shapes["outline_item"][(i - 3) as usize];
+        assert_eq!(
+            item_outline.bounds().map(|bounds| bounds.max(Axis::X)),
+            (key.1 == "dim").then_some(0.5)
+        );
         by_state.insert(key, i);
     }
     let off = by_state[&("x", "off")];
@@ -477,6 +484,7 @@ fn creative_tabs_keep_vanilla_items_missing_from_search() {
         items: Vec::new(),
         vanilla_items: tab.items.iter().cloned().collect(),
         effects: Vec::new(),
+        fluids: Vec::new(),
         entity_types: Vec::new(),
         menu_types: Vec::new(),
         states: 0,
@@ -632,6 +640,9 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
             "minecraft:iron_block":{"protocol_id":11}}},
             "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
             "minecraft:luck":{"protocol_id":25}}},
+            "minecraft:fluid":{"entries":{"minecraft:empty":{"protocol_id":0},
+            "minecraft:flowing_water":{"protocol_id":1},"minecraft:water":{"protocol_id":2},
+            "minecraft:flowing_lava":{"protocol_id":3},"minecraft:lava":{"protocol_id":4}}},
             "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
     )
     .unwrap();
@@ -658,6 +669,10 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
                 "data/ruby/horizon/mob_effect/glow.json",
                 r#"{"category":"beneficial","color":16711680}"#,
             ),
+            (
+                "data/ruby/horizon/fluid/honey.json",
+                r#"{"template":"minecraft:water","still":"ruby:block/h","flowing":"ruby:block/f"}"#,
+            ),
         ],
     );
     let alpha = folder_mod(
@@ -679,6 +694,10 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
             (
                 "data/alpha/horizon/mob_effect/dull.json",
                 r#"{"category":"neutral","color":0}"#,
+            ),
+            (
+                "data/alpha/horizon/fluid/molten/tin.json",
+                r#"{"template":"minecraft:lava","still":"alpha:block/s","flowing":"alpha:block/f"}"#,
             ),
         ],
     );
@@ -715,6 +734,9 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
                 "minecraft:iron_block":{"protocol_id":11}}},
                 "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0},
                 "minecraft:luck":{"protocol_id":25}}},
+                "minecraft:fluid":{"entries":{"minecraft:empty":{"protocol_id":0},
+                "minecraft:flowing_water":{"protocol_id":1},"minecraft:water":{"protocol_id":2},
+                "minecraft:flowing_lava":{"protocol_id":3},"minecraft:lava":{"protocol_id":4}}},
                 "minecraft:block_entity_type":{"entries":{"minecraft:chest":{"protocol_id":1}}}}"#,
         )
         .unwrap();
@@ -745,11 +767,18 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
         assert_eq!(id("minecraft:mob_effect", "alpha:dull"), 26);
         assert_eq!(id("minecraft:mob_effect", "alpha:zap"), 27);
         assert_eq!(id("minecraft:mob_effect", "ruby:glow"), 28);
+        // Each mod fluid after vanilla's, by id: its source, then its flowing form.
+        assert_eq!(id("minecraft:fluid", "minecraft:lava"), 4);
+        assert_eq!(id("minecraft:fluid", "alpha:molten/tin"), 5);
+        assert_eq!(id("minecraft:fluid", "alpha:molten/flowing_tin"), 6);
+        assert_eq!(id("minecraft:fluid", "ruby:honey"), 7);
+        assert_eq!(id("minecraft:fluid", "ruby:flowing_honey"), 8);
 
         // `/effect` and the mob_effect arguments check ids against this table.
         let mut commands: J = serde_json::from_str(
             r#"{"blocks":[],"items":[],"effects":["minecraft:speed"],
-                "by_registry":{"minecraft:mob_effect":{"ids":["minecraft:speed"]}}}"#,
+                "by_registry":{"minecraft:mob_effect":{"ids":["minecraft:speed"]},
+                "minecraft:fluid":{"ids":["minecraft:water"]}}}"#,
         )
         .unwrap();
         plan.json("command-registries.json", &mut commands).unwrap();
@@ -760,6 +789,17 @@ fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {
         assert_eq!(
             commands["by_registry"]["minecraft:mob_effect"]["ids"],
             serde_json::json!(want)
+        );
+        // Fluid tag files and fluid arguments check ids against this table.
+        assert_eq!(
+            commands["by_registry"]["minecraft:fluid"]["ids"],
+            serde_json::json!([
+                "minecraft:water",
+                "alpha:molten/tin",
+                "alpha:molten/flowing_tin",
+                "ruby:honey",
+                "ruby:flowing_honey"
+            ])
         );
         drop(plan);
 
@@ -1157,6 +1197,48 @@ fn builds_past_sixteen_bit_states() {
         m.content.blocks.push(b);
     }
     build(&base, std::slice::from_ref(&m), &scratch.join("out")).unwrap();
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// A plain file reaches the overlay as a copy of the mod's own: the same bytes, not a link
+/// back into the mod's folder; one over the size limit is refused, as reading it was.
+#[test]
+fn plain_files_are_copied_and_size_checked() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-copy-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("ruby");
+    let mut m = ruby_mod(&dir);
+    let recipe = "data/ruby/recipe/ruby_from_stew.json";
+    let out = scratch.join("out");
+    build(&base, std::slice::from_ref(&m), &out).unwrap();
+    let copied = out.join(recipe);
+    assert!(
+        !fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let original = fs::read(dir.join(recipe)).unwrap();
+    assert_eq!(fs::read(&copied).unwrap(), original);
+    fs::write(dir.join(recipe), "{}").unwrap();
+    assert_eq!(
+        fs::read(&copied).unwrap(),
+        original,
+        "the built root keeps its copy"
+    );
+
+    let huge = "assets/ruby/textures/block/huge.png";
+    fs::create_dir_all(dir.join(huge).parent().unwrap()).unwrap();
+    fs::File::create(dir.join(huge))
+        .unwrap()
+        .set_len(horizon_mods::content::MAX_FILE + 1)
+        .unwrap();
+    m.content.files.push(huge.into());
+    let e = build(&base, std::slice::from_ref(&m), &scratch.join("out2")).unwrap_err();
+    assert!(e.to_string().contains("is over"), "{e}");
     fs::remove_dir_all(&scratch).unwrap();
 }
 
@@ -2283,6 +2365,56 @@ fn exploration_maps_skip_the_starts_a_chunk_saved_as_referenced() {
     );
 }
 
+/// A skip check reads each saved chunk's record once: the session keeps every
+/// answer (as vanilla's `StructureCheck` does), so a second map searching past
+/// the same chunks asks the save nothing it asked before (#10255: a chest with
+/// exploration maps took a growing second per open reading them again).
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn a_saved_chunks_record_is_read_once_across_map_searches() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let assets = Assets::load(&base).unwrap();
+    let biomes = crate::biome::Biomes::load(&base).unwrap();
+    let terrain = crate::vanillagen::VanillaTerrain::new(
+        &base.join("worldgen"),
+        assets.registry,
+        &biomes,
+        1234,
+    )
+    .unwrap();
+    let names = ["minecraft:buried_treasure".to_owned()];
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let reads = std::sync::Arc::new(AtomicUsize::new(0));
+    let asked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, i32, i32)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
+    let (reads_of, asked_of) = (reads.clone(), asked.clone());
+    terrain.set_saved_references(std::sync::Arc::new(move |n, x, z| {
+        reads_of.fetch_add(1, Ordering::Relaxed);
+        asked_of.lock().unwrap().insert((n.to_owned(), x, z));
+        0
+    }));
+    terrain
+        .locate_for_map(&names, [0, 64, 0], 50, true)
+        .unwrap();
+    // The same search again, now skipping the start the first pointed at:
+    // it passes every chunk the first search read and may reach new ones,
+    // but no chunk's record is read a second time.
+    terrain
+        .locate_for_map(&names, [0, 64, 0], 50, true)
+        .unwrap();
+    assert!(
+        reads.load(Ordering::Relaxed) > 0,
+        "the searches asked the save at all"
+    );
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        asked.lock().unwrap().len(),
+        "no saved chunk's record is read twice"
+    );
+}
+
 /// `ChunkGenerator.findNearestMapStructure` with `createReference`: an
 /// exploration map that skips known structures points at a start no map
 /// pointed at before, and a reopened world remembers which.
@@ -2409,7 +2541,7 @@ fn content_shapes_drive_outline_and_collision() {
     let facts = BlockFacts::load(&root, registry).unwrap();
     let (named, _) = nbt::read_named(
         &fs::read(root.join("cached-collision.nbt")).unwrap(),
-        Limits::tables(),
+        nbt::Limits::tables(),
     )
     .unwrap();
     let collision = CachedCollisionRegistry::from_nbt(&named.tag, registry).unwrap();
@@ -3945,6 +4077,72 @@ fn biome_modifiers_place_mod_features_in_vanilla_biomes() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+/// A world's data pack that replaces a vanilla biome (Terralith's plains)
+/// keeps the mods' modifier features, and a pack's own biome its tag puts
+/// under the modifier's selector gets them: NeoForge applies modifiers after
+/// every pack. A biome no pack touches stays as the content root has it.
+#[test]
+fn biome_modifiers_apply_over_world_packs() {
+    let base = biome_base("biome-modifiers-packs");
+    let scratch = base.parent().unwrap().to_owned();
+    let m = zinc_mod(
+        &scratch.join("zinc"),
+        &[(
+            "add_zinc",
+            r##"{"type":"neoforge:add_features","biomes":"#minecraft:is_overworld",
+                "features":"zinc:ore_zinc","step":"underground_ores"}"##,
+        )],
+    );
+    let out = scratch.join("out");
+    build(&base, &[m], &out).unwrap();
+    let mut packs = horizon_world::worldgen::overrides::WorldgenOverrides::default();
+    let pack_plains =
+        r#"{"temperature":0.5,"features":[[],[],[],[],[],[],["minecraft:ore_coal"]]}"#;
+    packs.set("biomes", "minecraft:plains", pack_plains.to_owned());
+    packs.set("biomes", "terra:alpine", r#"{"features":[]}"#.to_owned());
+    packs.add_tag(
+        "biome_tags",
+        "minecraft:is_overworld",
+        "file/terra",
+        r#"{"values":["terra:alpine"]}"#.to_owned(),
+    );
+    let after = biome_modifiers_over_packs(&out, &packs)
+        .unwrap()
+        .unwrap_or(packs);
+    let features = |id: &str| -> serde_json::Value {
+        let text = after.entries("biomes").find(|(i, _)| *i == id).unwrap().1;
+        serde_json::from_str::<serde_json::Value>(text).unwrap()["features"].clone()
+    };
+    assert_eq!(
+        features("minecraft:plains"),
+        serde_json::json!([
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            ["minecraft:ore_coal", "zinc:ore_zinc"]
+        ])
+    );
+    assert_eq!(
+        features("terra:alpine"),
+        serde_json::json!([[], [], [], [], [], [], ["zinc:ore_zinc"]])
+    );
+    // The pack's own values stay.
+    let plains = after
+        .entries("biomes")
+        .find(|(i, _)| *i == "minecraft:plains");
+    let plains: serde_json::Value = serde_json::from_str(plains.unwrap().1).unwrap();
+    assert_eq!(plains["temperature"], serde_json::json!(0.5));
+    assert!(
+        after
+            .entries("biomes")
+            .all(|(id, _)| id != "minecraft:desert")
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 /// A mod with features but no modifier leaves vanilla's biome bundle alone.
 #[test]
 fn biome_modifiers_none_keep_the_vanilla_biomes() {
@@ -4776,6 +4974,81 @@ fn a_symlink_file_is_copied_through() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+/// The mods' files land in the overlay as copies, over the base's links, in folders
+/// made real; a path two mods give keeps the later mod's file, as copied one by one.
+/// A mod's own folder copied whole (a clone of the folder where the system has one)
+/// holds the same files, and a file the mod's folder has but the copies don't name
+/// stays out.
+#[test]
+fn copied_files_replace_the_base_links_and_the_last_file_wins() {
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-copyall-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let (base, out) = (scratch.join("base"), scratch.join("out"));
+    fs::create_dir_all(base.join("assets/minecraft/textures")).unwrap();
+    fs::write(base.join("assets/minecraft/textures/stone.png"), b"vanilla").unwrap();
+    fs::write(base.join("assets/minecraft/textures/dirt.png"), b"dirt").unwrap();
+    let mut copies = Vec::new();
+    for (i, name) in ["first", "second"].iter().enumerate() {
+        let root = scratch.join(name);
+        let mut add = |rel: String, bytes: String| {
+            fs::create_dir_all(root.join(&rel).parent().unwrap()).unwrap();
+            fs::write(root.join(&rel), bytes).unwrap();
+            copies.push((rel.clone(), root.join(&rel)));
+        };
+        add("assets/minecraft/textures/stone.png".into(), (*name).into());
+        add(
+            format!("assets/ruby{i}/textures/block/own.png"),
+            format!("own{i}"),
+        );
+        add(format!("assets/ruby{i}/models/block/own.json"), "{}".into());
+    }
+    // Not among the second mod's copies (a refused block's files): they stay out, and so
+    // does a folder only they were in.
+    fs::write(scratch.join("second/assets/ruby1/notes.txt"), "notes").unwrap();
+    let refused = scratch.join("second/assets/ruby1/refused/deep");
+    fs::create_dir_all(&refused).unwrap();
+    fs::write(refused.join("model.json"), "{}").unwrap();
+    let overlay = Overlay::new(&base, &out).unwrap();
+    overlay.copy_all(&copies).unwrap();
+    let stone = out.join("assets/minecraft/textures/stone.png");
+    assert!(
+        !fs::symlink_metadata(&stone)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&stone).unwrap(), b"second");
+    assert_eq!(
+        fs::read(out.join("assets/minecraft/textures/dirt.png")).unwrap(),
+        b"dirt"
+    );
+    for i in 0..2 {
+        let own = out.join(format!("assets/ruby{i}/textures/block/own.png"));
+        assert!(!fs::symlink_metadata(&own).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(own).unwrap(), format!("own{i}").as_bytes());
+        let model = out.join(format!("assets/ruby{i}/models/block/own.json"));
+        assert_eq!(fs::read(model).unwrap(), b"{}");
+    }
+    assert!(!out.join("assets/ruby1/notes.txt").exists());
+    assert!(!out.join("assets/ruby1/refused").exists());
+    // A copy, not the mod's file: editing the mod's leaves the overlay's.
+    fs::write(
+        scratch.join("first/assets/ruby0/textures/block/own.png"),
+        "edited",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out.join("assets/ruby0/textures/block/own.png")).unwrap(),
+        b"own0"
+    );
+    // The base is untouched: its file was linked, never written through.
+    assert_eq!(
+        fs::read(base.join("assets/minecraft/textures/stone.png")).unwrap(),
+        b"vanilla"
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 /// A content mod of recipes, a tag and a name, for vanilla's items: what
 /// switches live (docs/design/mod-hotload.md).
 fn glint_mod(dir: &Path) -> ContentMod {
@@ -4950,12 +5223,23 @@ fn roots_unused_for_a_day_are_removed() {
     let current = root("00000000000000aa", 3 * 86400);
     let recent = root("00000000000000bb", 60);
     let stale = root("00000000000000cc", 2 * 86400);
+    // Built two days ago but reused a minute ago: its `.used` beside it keeps it (#12403).
+    let reused = root("00000000000000dd", 2 * 86400);
+    fs::write(used_path(&reused), b"").unwrap();
+    fs::write(used_path(&stale), b"").unwrap();
+    let file = fs::File::options()
+        .write(true)
+        .open(used_path(&stale))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86400))
+        .unwrap();
+    drop(file);
     // Not a root's name: never touched while the folder has no root of the old layout.
     let other = roots.join("notes");
     fs::create_dir_all(&other).unwrap();
     prune_roots(&roots, &current, KEEP_ROOTS);
-    assert!(current.exists() && recent.exists() && other.exists());
-    assert!(!stale.exists());
+    assert!(current.exists() && recent.exists() && other.exists() && reused.exists());
+    assert!(!stale.exists() && !used_path(&stale).exists());
     // An older game's single root, built straight in the folder, goes.
     fs::write(roots.join(STAMP), b"old").unwrap();
     fs::create_dir_all(roots.join("assets/minecraft")).unwrap();

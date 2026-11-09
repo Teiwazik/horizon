@@ -13,7 +13,6 @@ use horizon_launcher::browser::{
     Support,
 };
 use horizon_launcher::modpacks;
-use horizon_launcher::native_fit::Fit;
 use horizon_launcher::native_status;
 use horizon_port_pack::check::Check;
 use java_instance::Target;
@@ -41,73 +40,6 @@ const PAGE: usize = 20;
 #[path = "glass_mods.rs"]
 mod glass_mods;
 
-/// What a result's status says: the badge's word and colour, and the line under the title.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct Status {
-    pub(super) label: &'static str,
-    pub(super) tone: Tone,
-    pub(super) reason: Option<String>,
-    /// Said by a native mod's fit, not by what the project is made for.
-    pub(super) fit: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Tone {
-    Good,
-    Warn,
-    /// It installs, but won't build as it is: Install asks first.
-    Bad,
-    /// Never offered for install.
-    Off,
-}
-
-impl Status {
-    /// The status of a result that runs as `support` says, and for a native registry mod, how it
-    /// fits the Horizon the instance plays (#11075). A mod made for another game version stays
-    /// as `support` says.
-    pub(super) fn new(support: Support, fit: Option<&(Fit, String)>) -> Status {
-        let reason = |line: &str| Some(line.to_owned());
-        match (support, fit) {
-            (Support::Works, fit @ (Some((Fit::Fits, _)) | None)) => Status {
-                label: "Works",
-                tone: Tone::Good,
-                reason: None,
-                fit: fit.is_some(),
-            },
-            (Support::Works, Some((fit, line))) => {
-                let (label, tone) = match fit {
-                    Fit::Fits | Fit::MovesTo { .. } => ("Rebuilds Horizon", Tone::Warn),
-                    Fit::NeedsNewer { .. } => ("Update Horizon", Tone::Bad),
-                    Fit::Clashes { .. } => ("Conflicts", Tone::Bad),
-                    Fit::Broken { .. } => ("Doesn't build", Tone::Bad),
-                };
-                Status {
-                    label,
-                    tone,
-                    reason: reason(line),
-                    fit: true,
-                }
-            }
-            (support @ Support::Partial(_), _) => Status {
-                label: support.label(),
-                tone: Tone::Warn,
-                reason: support.reason().map(str::to_owned),
-                fit: false,
-            },
-            (support @ Support::No(_), _) => Status {
-                label: support.label(),
-                tone: Tone::Off,
-                reason: support.reason().map(str::to_owned),
-                fit: false,
-            },
-        }
-    }
-
-    pub(super) fn installable(&self) -> bool {
-        self.tone != Tone::Off
-    }
-}
-
 pub(super) enum Event {
     /// A search's answer, for the search it was (stale answers are dropped) at that offset.
     Found(u64, usize, Result<Vec<Project>, String>),
@@ -116,13 +48,10 @@ pub(super) enum Event {
     Updates(HashMap<(SourceId, String), String>),
     /// A Java mod's check: its jar read, or why it couldn't be.
     Checked((SourceId, String), Result<Box<Check>, String>),
-    /// What Horizon registry projects say before install: signed or not, what they may do; and
-    /// for the game folder searched from, how its native mods fit (`native_fit`).
-    About(
-        HashMap<String, Vec<String>>,
-        PathBuf,
-        HashMap<String, (Fit, String)>,
-    ),
+    /// What a Horizon registry project says before install: signed or not, what it may do.
+    About(HashMap<String, Vec<String>>),
+    /// Registry native mods' [`horizon::works_on`] in the selected instance, by id.
+    Works(HashMap<String, (bool, String)>),
     /// Registry files taken down that the launcher turned off.
     TakenDown(Vec<String>),
     /// What the automatic updates did (`horizon::auto`), and the instances (ids) whose native
@@ -159,6 +88,11 @@ pub(super) struct Mods {
     more: bool,
     error: Option<String>,
     pub(super) installed: Vec<installed::Entry>,
+    /// The registry native mods' versions the player picked on their Versions tab, by id
+    /// (`horizon::chosen`), read with `installed`.
+    pub(super) chosen: std::collections::BTreeMap<String, String>,
+    /// The Horizon the selected instance played when its updates were last looked for.
+    pub(super) checked_for: Option<String>,
     loaded: bool,
     /// Whether the page searched for the instance as it is (its version and loader).
     asked: bool,
@@ -185,11 +119,6 @@ pub(super) struct Mods {
     pub(super) shown: Option<Project>,
     /// A native mod's Install waiting for the one-time trust notice (`native_status::NOTICE`).
     native_notice: Option<(SourceId, String, Option<Project>)>,
-    /// An Install of a native mod that won't build as it is, waiting for Install anyway: the
-    /// mod and why.
-    fit_warning: Option<(SourceId, String, Option<Project>, String)>,
-    /// The mod whose warning was answered with Install anyway, until it installs.
-    fit_confirmed: Option<String>,
     /// The selected instance's native build state, and the `native_status::fingerprint` it was
     /// read for: read again only when that changes.
     /// With it, the mods turned on that pin the commit an older build compiled
@@ -200,8 +129,9 @@ pub(super) struct Mods {
     pub(super) checks: HashMap<(SourceId, String), Checking>,
     /// Horizon registry projects' trust and capabilities, by id ([`horizon::trust_and_capabilities`]).
     pub(super) about: HashMap<String, Vec<String>>,
-    /// How native registry mods fit, by id, and the game folder that was read for.
-    fits: (PathBuf, HashMap<String, (Fit, String)>),
+    /// Whether a registry native mod works on the selected instance, and how, by id
+    /// ([`horizon::works_on`]).
+    pub(super) works: HashMap<String, (bool, String)>,
     /// The project page, filters and images.
     pub(super) browse: super::mods_project::Browse,
     pub(super) tx: Sender<Event>,
@@ -216,6 +146,13 @@ impl Mods {
     }
 
     /// The game folder installs go into: the selected instance's, once the page has read it.
+    /// Reads what the browser installed in the game folder again, with the versions picked.
+    pub(super) fn reload_installed(&mut self) {
+        let home = self.home();
+        self.installed = installed::Installed::load(&home).entries;
+        self.chosen = horizon::chosen(&home);
+    }
+
     pub(super) fn home(&self) -> PathBuf {
         self.home.clone().unwrap_or_else(backend::game_home)
     }
@@ -268,6 +205,8 @@ impl Mods {
             more: false,
             error: None,
             installed: Vec::new(),
+            chosen: Default::default(),
+            checked_for: None,
             loaded: false,
             asked: false,
             home: None,
@@ -277,8 +216,6 @@ impl Mods {
             busy: None,
             message: None,
             native_notice: None,
-            fit_warning: None,
-            fit_confirmed: None,
             native_state: Default::default(),
             native_files: Default::default(),
             updates: HashMap::new(),
@@ -289,7 +226,7 @@ impl Mods {
             shown: None,
             checks: HashMap::new(),
             about: HashMap::new(),
-            fits: Default::default(),
+            works: HashMap::new(),
             browse: Default::default(),
             tx,
             rx,
@@ -323,15 +260,6 @@ impl Mods {
             && p.support().installable()
     }
 
-    /// What a result's badge says: [`Mods::support`], and a native registry mod's fit once the
-    /// search read it for this game folder.
-    pub(super) fn status(&self, p: &Project) -> Status {
-        let fit = (p.source == SourceId::Horizon && self.fits.0 == self.home())
-            .then(|| self.fits.1.get(&p.id))
-            .flatten();
-        Status::new(self.support(p), fit)
-    }
-
     /// How well a result runs: a Java mod's from its check once it has one. In a Java
     /// instance, a result was searched for its version and loader: installing checks the file.
     pub(super) fn support(&self, p: &Project) -> Support {
@@ -362,12 +290,13 @@ fn count(n: u64) -> String {
 }
 
 /// A registry project's rating: five pixel stars, the mean's nearest whole number of them lit, the
-/// mean and how many; None while the ratings aren't known.
+/// mean and how many; then its GitHub stars ([`github_stars`]). "No ratings yet" only when it has
+/// neither; None while the ratings aren't known and it has no GitHub stars.
 pub(super) fn stars(id: &str, t: &theme::Theme) -> Option<Div> {
+    let github = github_stars(id, t);
     let row = div().flex().items_center().gap(px(2.));
-    Some(match horizon::rating(id)? {
-        None => row.text_color(t.muted).child(tr("No ratings yet")),
-        Some(r) => {
+    let row = match horizon::rating(id) {
+        Some(Some(r)) => {
             let lit = r.average.round() as usize;
             row.children((0..5).map(|i| {
                 blocks::icon(
@@ -386,7 +315,31 @@ pub(super) fn stars(id: &str, t: &theme::Theme) -> Option<Div> {
                 count(r.count)
             )))
         }
-    })
+        Some(None) if github.is_none() => row.text_color(t.muted).child(tr("No ratings yet")),
+        _ => row,
+    };
+    match github {
+        Some(g) => Some(row.gap(px(8.)).child(g)),
+        None if horizon::rating(id).is_some() => Some(row),
+        None => None,
+    }
+}
+
+/// A registry project's GitHub stars: GitHub's mark, a star and how many, as its repository
+/// shows them; None when it has none (`horizon::github_stars`).
+pub(super) fn github_stars(id: &str, t: &theme::Theme) -> Option<Div> {
+    let n = horizon::github_stars(id)?;
+    Some(
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(4.))
+            .text_color(t.muted)
+            .child(blocks::icon("glass/github", 12., t.muted))
+            .child(blocks::icon("star", 12., t.warn))
+            .child(count(n)),
+    )
 }
 
 /// A checksum as the page shows it: the algorithm and the first and last hex digits.
@@ -471,7 +424,7 @@ impl Launcher {
                         crate::glass_toast::say(said.clone());
                     }
                     m.message = Some(result);
-                    m.installed = installed::Installed::load(&m.home()).entries;
+                    m.reload_installed();
                     m.installed_list.reset();
                     if modpack {
                         // The Modpacks page reads its list again.
@@ -487,26 +440,26 @@ impl Launcher {
                     m.checks.insert(key, state);
                 }
                 Event::Loaded(l) => loaded.push(l),
-                Event::About(about, home, fits) => {
+                Event::About(about) => {
                     // Rows grow by a line: measure them again (`cull`).
                     m.about.extend(about);
-                    if m.fits.0 != home {
-                        m.fits = (home, HashMap::new());
-                    }
-                    m.fits.1.extend(fits);
+                    m.results_list.reset();
+                }
+                Event::Works(works) => {
+                    m.works.extend(works);
                     m.results_list.reset();
                 }
                 Event::AutoUpdated(lines, rebuild) => {
                     m.rebuild.extend(rebuild);
                     if !lines.is_empty() {
                         m.message = Some(Ok(lines.join("\n")));
-                        m.installed = installed::Installed::load(&m.home()).entries;
+                        m.reload_installed();
                         m.installed_list.reset();
                     }
                 }
                 Event::TakenDown(lines) => {
                     m.message = Some(Ok(lines.join("\n")));
-                    m.installed = installed::Installed::load(&m.home()).entries;
+                    m.reload_installed();
                     m.installed_list.reset();
                 }
             }
@@ -581,23 +534,35 @@ impl Launcher {
             Some(_) => SourceId::Modrinth,
             None => m.source,
         };
-        let (tx, search, home) = (m.tx.clone(), m.search, m.home());
+        let (tx, search) = (m.tx.clone(), m.search);
         std::thread::spawn(move || {
             let result = browser::source(source)
                 .ok_or_else(|| trf("{source} isn't set up.", &[("source", source.label())]))
                 .and_then(|s| s.search(&query));
-            let (mut about, mut fits) = (HashMap::new(), HashMap::new());
-            if let (Ok(found), SourceId::Horizon) = (&result, source) {
-                let instance = horizon_launcher::instances::selected();
-                for p in found {
-                    let (lines, fit) = horizon::trust_and_fit(&p.id, Some(&instance));
-                    about.insert(p.id.clone(), lines);
-                    fits.extend(fit.map(|fit| (p.id.clone(), fit)));
+            let instance = horizon_launcher::instances::selected();
+            let about: HashMap<String, Vec<String>> = match (&result, source) {
+                (Ok(found), SourceId::Horizon) => found
+                    .iter()
+                    .map(|p| {
+                        let lines = horizon::trust_and_capabilities(&p.id, Some(&instance));
+                        (p.id.clone(), lines)
+                    })
+                    .collect(),
+                _ => HashMap::new(),
+            };
+            let works = match (&result, source) {
+                (Ok(found), SourceId::Horizon) => {
+                    let ids: Vec<String> = found.iter().map(|p| p.id.clone()).collect();
+                    horizon::works_lines(&ids, &instance)
                 }
-            }
+                _ => HashMap::new(),
+            };
             let _ = tx.send(Event::Found(search, offset, result));
             if !about.is_empty() {
-                let _ = tx.send(Event::About(about, home, fits));
+                let _ = tx.send(Event::About(about));
+            }
+            if !works.is_empty() {
+                let _ = tx.send(Event::Works(works));
             }
         });
     }
@@ -755,6 +720,7 @@ impl Launcher {
         }
         let tx = self.mods.tx.clone();
         let java = self.mods.java.clone();
+        let home = self.mods.home();
         std::thread::spawn(move || {
             let mut found = HashMap::new();
             for e in entries {
@@ -763,7 +729,7 @@ impl Launcher {
                 };
                 let newer = match &java {
                     Some(target) => java_instance::update_for(&*source, target, &e),
-                    None => installed::update_for(&*source, &e),
+                    None => installed::update_for(&*source, &e, &home),
                 };
                 if let Ok(Some(v)) = newer {
                     found.insert((e.source, e.project.clone()), v.number);
@@ -843,26 +809,43 @@ impl Launcher {
         });
     }
 
+    /// Installs version `version` of registry native mod `id` as the player picked it on its
+    /// Versions tab ([`horizon::install_chosen`]). The first native mod goes through the trust
+    /// notice and the recommended version instead.
+    pub(super) fn mods_install_version(&mut self, id: String, version: String) {
+        if self.mods.busy.is_some() {
+            return;
+        }
+        if !self.settings.native_mods_noticed {
+            self.mods_install(SourceId::Horizon, id, None);
+            return;
+        }
+        self.mods.message = None;
+        self.mods.busy = Some((id.clone(), format!("{} {version}", id), 0.));
+        self.mods.updates.remove(&(SourceId::Horizon, id.clone()));
+        let tx = self.mods.tx.clone();
+        let home = self.mods.home();
+        let instance = self
+            .selected_instance()
+            .map_or_else(|| "Horizon".to_string(), |i| i.name.clone());
+        std::thread::spawn(move || {
+            let result = horizon::install_chosen(&id, &version, &home, &|_, _| {}).map(|e| {
+                trf(
+                    "Installed {mods} into {instance}. Build to play with it.",
+                    &[
+                        ("mods", &format!("{} {}", e.title, e.number)),
+                        ("instance", &instance),
+                    ],
+                )
+            });
+            let _ = tx.send(Event::Done(result, false));
+        });
+    }
+
     /// Installs (or updates) a project on a thread: a pack into its folder, a modpack into
     /// Modpacks. `known` is the project when the page has it; else it is asked for first.
     pub(super) fn mods_install(&mut self, source: SourceId, id: String, known: Option<Project>) {
         if self.mods.busy.is_some() {
-            return;
-        }
-        // A native mod that won't build as it is: say why, and install only on Install anyway.
-        self.mods.fit_warning = None;
-        let confirmed = self.mods.fit_confirmed.as_deref() == Some(id.as_str());
-        let status = known.as_ref().map(|p| self.mods.status(p));
-        if let Some(Status {
-            tone: Tone::Bad,
-            reason: Some(reason),
-            ..
-        }) = status.filter(|_| !confirmed)
-        {
-            self.mods.fit_warning = Some((source, id, known, reason));
-            self.content_scroll
-                .handle
-                .set_offset(gpui::point(px(0.), px(0.)));
             return;
         }
         // The first native mod: the trust notice, before anything is installed.
@@ -877,7 +860,6 @@ impl Launcher {
             return;
         }
         self.mods.native_notice = None;
-        self.mods.fit_confirmed = None;
         self.mods.message = None;
         self.mods.busy = Some((id.clone(), format!("Asking {}…", source.label()), 0.));
         self.mods.updates.remove(&(source, id.clone()));
@@ -1109,9 +1091,31 @@ impl Launcher {
             self.mods.asked = false;
         }
         self.mods.java = java;
+        // The instance moved to another Horizon (picked, or an update it follows): the versions
+        // that fit change, so look for updates again.
+        let plays = self
+            .selected_instance()
+            .and_then(|i| i.version.clone())
+            .or_else(|| self.installed.first().cloned());
+        if self.mods.loaded && self.mods.java.is_none() && plays != self.mods.checked_for {
+            self.mods.checked_for = plays.clone();
+            self.mods.updates.clear();
+            self.mods_check_updates();
+        }
         if !self.mods.loaded || (home.is_some() && self.mods.home != home) {
+            // Another instance: what works there, its versions and the last message differ.
+            if self.mods.loaded {
+                self.mods.about.clear();
+                self.mods.works.clear();
+                self.mods.message = None;
+                if let Some(open) = self.mods.browse.open.as_ref().map(|o| o.project.clone()) {
+                    self.mods_open(open);
+                }
+                self.mods_search(0);
+            }
+            self.mods.checked_for = plays;
             self.mods.home = home;
-            self.mods.installed = installed::Installed::load(&self.mods.home()).entries;
+            self.mods.reload_installed();
             self.mods.installed_list.reset();
             self.mods.updates.clear();
             self.mods.confirm_remove = None;
@@ -1120,6 +1124,17 @@ impl Launcher {
             self.mods_taken_down();
             self.mods.loaded = true;
         }
+    }
+
+    /// Find mods from an instance: the registry's mods, only those that work on it, as a list.
+    pub(super) fn mods_find_for_instance(&mut self) {
+        self.mods_set_kind(PackKind::Mod);
+        let m = &mut self.mods;
+        m.source = source_for(PackKind::Mod);
+        m.browse.open = None;
+        m.picked = None;
+        m.browse.filters.works_on = true;
+        self.mods_search(0);
     }
 
     /// Opens a kind's tab: its first source, its own filters, a new search.
@@ -1167,7 +1182,7 @@ impl Launcher {
             crate::glass_toast::say(said.clone());
         }
         self.mods.message = Some(removed.clone());
-        self.mods.installed = installed::Installed::load(&home).entries;
+        self.mods.reload_installed();
         self.mods.installed_list.reset();
         self.mods.confirm_remove = None;
         removed
@@ -1371,12 +1386,7 @@ impl Launcher {
     /// The install under way and the last install's answer.
     /// The one-time notice before the first native mod is installed: native mods aren't
     /// sandboxed, and what the build takes. Its button installs the mod.
-    /// The notice an Install is waiting on: the first native mod's trust notice, or why a native
-    /// mod won't build as it is ([`Mods::fit_warning`]).
     fn native_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if let Some((_, _, _, reason)) = &self.mods.fit_warning {
-            return Some(self.fit_warning(reason, cx));
-        }
         self.mods.native_notice.as_ref()?;
         let t = self.theme;
         Some(
@@ -1410,48 +1420,12 @@ impl Launcher {
                             button("native-notice-cancel", "Cancel", Kind::Secondary, &t).on_click(
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.mods.native_notice = None;
-                                    this.mods.fit_confirmed = None;
                                     cx.notify();
                                 }),
                             ),
                         ),
                 ),
         )
-    }
-
-    fn fit_warning(&self, reason: &str, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        plate(&t)
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .p(px(16.))
-            .text_size(px(theme::UI.px))
-            .text_color(t.ink)
-            .child(div().text_color(t.danger).child(reason.to_owned()))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        button("fit-warning-install", "Install anyway", Kind::Secondary, &t)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                if let Some((source, id, known, _)) = this.mods.fit_warning.take() {
-                                    this.mods.fit_confirmed = Some(id.clone());
-                                    this.mods_install(source, id, known);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        button("fit-warning-cancel", "Cancel", Kind::Primary, &t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.mods.fit_warning = None;
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            )
     }
 
     pub(super) fn mods_busy_plate(&self) -> Vec<Div> {
@@ -1571,6 +1545,30 @@ impl Launcher {
                     }));
                 }
                 right = right.child(update);
+            }
+            if let Some(kept) = self
+                .mods
+                .chosen
+                .get(&e.project)
+                .filter(|_| e.source == SourceId::Horizon)
+            {
+                let mut recommended = button(
+                    SharedString::from(format!("mods-recommended-{}", e.project)),
+                    trf("Use recommended (kept at {version})", &[("version", kept)]),
+                    Kind::Ghost,
+                    &t,
+                );
+                if busy {
+                    recommended = disabled(recommended);
+                } else {
+                    let id = e.project.clone();
+                    recommended =
+                        recommended.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.mods_install(SourceId::Horizon, id.clone(), None);
+                            cx.notify();
+                        }));
+                }
+                right = right.child(recommended);
             }
             let confirming = self.mods.confirm_remove.as_deref() == Some(e.project.as_str());
             let id = e.project.clone();
@@ -1982,16 +1980,15 @@ impl Launcher {
             let p = &project;
             let m = &self.mods;
             let busy = m.busy.as_ref().map(|b| b.0.as_str());
-            let status = m.status(p);
+            let support = m.support(p);
             let checking = m.checking(p);
-            let color = match status.tone {
-                Tone::Good => t.success,
-                Tone::Warn => t.warn,
-                Tone::Bad => t.danger,
-                Tone::Off => t.muted,
+            let color = match support {
+                Support::Works => t.success,
+                Support::Partial(_) => t.warn,
+                Support::No(_) => t.muted,
             };
             let mut right = div().flex().items_center().gap(px(8.)).child(blocks::badge(
-                status.label,
+                support.label(),
                 color,
                 &t,
             ));
@@ -2013,7 +2010,7 @@ impl Launcher {
                 right = right.child(caps(tr("Installed")).text_color(t.muted));
             } else if checking {
                 right = right.child(caps(tr("Checking")).text_color(t.muted));
-            } else if status.installable() {
+            } else if support.installable() {
                 let label = if p.kind == PackKind::Modpack {
                     "Import"
                 } else {
@@ -2057,13 +2054,11 @@ impl Launcher {
                         .then(|| stars(&p.id, &t))
                         .flatten(),
                 )
-                .children(status.reason.map(|r| {
-                    let color = match status.tone {
-                        Tone::Bad => t.danger,
-                        _ => t.ink_soft,
-                    };
-                    div().text_color(color).child(r)
-                }))
+                .children(
+                    support
+                        .reason()
+                        .map(|r| div().text_color(t.ink_soft).child(r.to_string())),
+                )
                 .children(
                     m.about
                         .get(&p.id)
@@ -2144,6 +2139,8 @@ pub(super) fn auto_update(targets: &[AutoTarget]) -> (Vec<String>, Vec<String>) 
             in_pack: horizon::auto::in_pack(&i.home),
             level,
             natives: t.natives,
+            fit: horizon_launcher::native_fit::plays(i)
+                .map(|plays| (plays, horizon_launcher::native_fit::pins(&i.home))),
         };
         if let Some(report) = horizon::auto::run(&i.home, &ctx, &|_, _| {}) {
             lines.extend(report.lines());
@@ -2221,57 +2218,5 @@ mod tests {
         let sum = format!("SHA-512:{}", "ab".repeat(64));
         assert_eq!(short_sum(&sum), "SHA-512 abababababab…abababab");
         assert_eq!(short_sum("SHA-1:abcd"), "SHA-1:abcd");
-    }
-
-    fn fitted(fit: Fit) -> (Fit, String) {
-        (fit, "why".into())
-    }
-
-    #[test]
-    fn a_native_mod_that_wont_build_says_so_in_its_badge_and_asks_before_install() {
-        let needs = fitted(Fit::NeedsNewer { needs: 30, has: 28 });
-        let status = Status::new(Support::Works, Some(&needs));
-        assert_eq!(
-            (status.label, status.tone, status.reason.as_deref()),
-            ("Update Horizon", Tone::Bad, Some("why"))
-        );
-        assert!(status.installable(), "Install anyway stays possible");
-        let clash = fitted(Fit::Clashes {
-            pin: "1da354b".into(),
-            with: vec!["veinminer".into()],
-        });
-        assert_eq!(Status::new(Support::Works, Some(&clash)).tone, Tone::Bad);
-        let broken = fitted(Fit::Broken { code: "E1".into() });
-        assert_eq!(
-            Status::new(Support::Works, Some(&broken)).label,
-            "Doesn't build"
-        );
-    }
-
-    #[test]
-    fn a_pinned_mod_warns_that_it_rebuilds_and_a_fitting_one_just_works() {
-        let moves = fitted(Fit::MovesTo {
-            pin: "1da354b".into(),
-        });
-        let status = Status::new(Support::Works, Some(&moves));
-        assert_eq!(
-            (status.label, status.tone),
-            ("Rebuilds Horizon", Tone::Warn)
-        );
-        let fits = Status::new(Support::Works, Some(&fitted(Fit::Fits)));
-        assert_eq!(
-            (fits.label, fits.tone, fits.reason),
-            ("Works", Tone::Good, None)
-        );
-        assert!(fits.fit && !Status::new(Support::Works, None).fit);
-    }
-
-    #[test]
-    fn a_mod_for_another_game_version_stays_unavailable_whatever_its_fit() {
-        let fits = fitted(Fit::Fits);
-        let status = Status::new(Support::No("Made for Horizon on 26.2.".into()), Some(&fits));
-        assert_eq!(status.tone, Tone::Off);
-        assert!(!status.installable());
-        assert_eq!(status.reason.as_deref(), Some("Made for Horizon on 26.2."));
     }
 }

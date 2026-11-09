@@ -17,7 +17,11 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let (root, src, dst) = (Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3]));
+    let (root, src, dst) = (
+        Path::new(&args[1]),
+        Path::new(&args[2]),
+        Path::new(&args[3]),
+    );
     let registry = horizon_world::level::data::load_registry(root)?;
     let biomes = Biomes::load(root).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::create_dir_all(dst)?;
@@ -32,11 +36,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let positions: Vec<ChunkPos> = input.chunks().map(|(p, _)| p).collect();
         let mut output = RegionFile::open_writable(dst.join(path.file_name().unwrap()), true)?;
         for pos in positions {
-            let Some(record) = input.read(pos)? else { continue };
+            let Some(record) = input.read(pos)? else {
+                continue;
+            };
             let tag = record.nbt(Limits::default())?.tag;
-            let Some(Tag::IntArray(ints)) = tag.get("columns") else { continue };
-            let Some(chunk) = build(pos, ints, registry.len() as u32, &biomes, &mut heights)
-            else {
+            let Some(Tag::IntArray(ints)) = tag.get("columns") else {
+                continue;
+            };
+            let Some(chunk) = build(pos, ints, registry.len() as u32, &biomes, &mut heights) else {
                 eprintln!("bad record {pos:?}");
                 continue;
             };
@@ -55,7 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     heights.sort_unstable();
     let mid = heights.get(heights.len() / 2).copied().unwrap_or_default();
-    println!("chunks {count} bounds chunk x {}..{} z {}..{}", bounds[0], bounds[2], bounds[1], bounds[3]);
+    println!(
+        "chunks {count} bounds chunk x {}..{} z {}..{}",
+        bounds[0], bounds[2], bounds[1], bounds[3]
+    );
     println!("median chunk (x z top) {mid:?}");
     Ok(())
 }
@@ -68,7 +78,10 @@ fn build(
     heights: &mut Vec<(i32, i32, i32)>,
 ) -> Option<Chunk> {
     let mut chunk = Chunk::empty(pos.x, pos.z);
-    let (min_y, max_y) = (chunk.min_y(), chunk.min_y() + chunk.sections.len() as i32 * 16);
+    let (min_y, max_y) = (
+        chunk.min_y(),
+        chunk.min_y() + chunk.sections.len() as i32 * 16,
+    );
     let mut it = ints.iter().copied();
     let mut top = min_y;
     for i in 0..256 {

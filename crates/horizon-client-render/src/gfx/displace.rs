@@ -13,7 +13,7 @@ use wgpu::util::DeviceExt;
 
 /// The solid quads the grid can draw a frame, and the sections they come from.
 const MAX_QUADS: u64 = 1 << 16;
-const MAX_SECTIONS: usize = 64;
+pub(crate) const MAX_SECTIONS: usize = 64;
 /// Bytes of one quad's corners.
 const QUAD_BYTES: u64 = 4 * std::mem::size_of::<TerrainVertex>() as u64;
 /// How far past the flat face the relief may reach, in blocks, for the view test.
@@ -435,6 +435,8 @@ pub struct Displacement {
     pub shadow: Option<Picks>,
     /// Group 1's layout for the grid's pipelines.
     pub draw_layout: wgpu::BindGroupLayout,
+    /// CPU-side section table reused between displacement preparation passes.
+    table: Vec<Section>,
     /// Sections the pick ran over this frame (0: nothing to draw).
     pub drawn: usize,
 }
@@ -647,6 +649,7 @@ impl Displacement {
             view,
             shadow,
             draw_layout,
+            table: Vec::new(),
             drawn: 0,
         }
     }
@@ -659,7 +662,8 @@ impl Displacement {
         near: &[Near<'_>],
         view_proj: glam::Mat4,
     ) {
-        let mut table = Vec::with_capacity(near.len().min(MAX_SECTIONS));
+        self.table.clear();
+        self.table.reserve(near.len().min(MAX_SECTIONS));
         let mut first = 0u64;
         let mut most = 0u32;
         for n in near.iter().take(MAX_SECTIONS) {
@@ -675,7 +679,7 @@ impl Displacement {
                 first * QUAD_BYTES,
                 quads * QUAD_BYTES,
             );
-            table.push(Section {
+            self.table.push(Section {
                 origin: [
                     n.origin[0],
                     n.origin[1],
@@ -689,11 +693,11 @@ impl Displacement {
             first += quads;
             most = most.max(quads as u32);
         }
-        self.drawn = table.len();
-        if table.is_empty() {
+        self.drawn = self.table.len();
+        if self.table.is_empty() {
             return;
         }
-        queue.write_buffer(&self.sections, 0, bytemuck::cast_slice(&table));
+        queue.write_buffer(&self.sections, 0, bytemuck::cast_slice(&self.table));
         let lists = std::iter::once((&self.view, 0)).chain(self.shadow.iter().map(|s| (s, 1)));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Displacement pick"),
@@ -705,7 +709,7 @@ impl Displacement {
                 let params = Params {
                     view_proj: view_proj.to_cols_array_2d(),
                     distance: band.outer,
-                    sections: table.len() as u32,
+                    sections: self.table.len() as u32,
                     margin: RELIEF_MARGIN,
                     capacity: MAX_QUADS as u32,
                     shadow,
@@ -716,7 +720,7 @@ impl Displacement {
                 let vertices = grid_vertices(band.cells, picks.steps);
                 queue.write_buffer(&band.draw, 0, bytemuck::cast_slice(&[vertices, 0, 0, 0]));
                 pass.set_bind_group(0, &band.pick_group, &[]);
-                pass.dispatch_workgroups(most.div_ceil(64), table.len() as u32, 1);
+                pass.dispatch_workgroups(most.div_ceil(64), self.table.len() as u32, 1);
             }
         }
     }

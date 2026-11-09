@@ -274,10 +274,11 @@ impl<'a> Reader<'a, '_> {
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
                     let mut value = self.payload(element_id, depth + 1)?;
-                    if let Tag::Compound(map) = &mut value {
-                        if map.len() == 1 && map.contains_key(&JavaString::default()) {
-                            value = map.remove(&JavaString::default()).unwrap();
-                        }
+                    if let Tag::Compound(map) = &mut value
+                        && map.len() == 1
+                        && map.contains_key(&JavaString::default())
+                    {
+                        value = map.remove(&JavaString::default()).unwrap();
                     }
                     values.push(value);
                 }
@@ -384,10 +385,11 @@ impl ListElements<'_, '_, '_> {
         }
         self.left -= 1;
         let mut value = self.reader.payload(self.element_id, self.depth)?;
-        if let Tag::Compound(map) = &mut value {
-            if map.len() == 1 && map.contains_key(&JavaString::default()) {
-                value = map.remove(&JavaString::default()).unwrap();
-            }
+        if let Tag::Compound(map) = &mut value
+            && map.len() == 1
+            && map.contains_key(&JavaString::default())
+        {
+            value = map.remove(&JavaString::default()).unwrap();
         }
         Ok(Some(value))
     }
@@ -684,6 +686,26 @@ pub fn write_network(tag: &Tag, limits: Limits) -> Result<Vec<u8>, Error> {
     writer.put(&[tag.id()])?;
     writer.payload(tag, 0)?;
     Ok(writer.bytes)
+}
+
+/// `NbtUtils.compareNbt(expected, actual, true)`.
+pub fn compare_nbt(expected: &Tag, actual: Option<&Tag>) -> bool {
+    let Some(actual) = actual else { return false };
+    if std::mem::discriminant(expected) != std::mem::discriminant(actual) {
+        return false;
+    }
+    match (expected, actual) {
+        (Tag::Compound(e), Tag::Compound(a)) => {
+            a.len() >= e.len() && e.iter().all(|(k, v)| compare_nbt(v, a.get(k)))
+        }
+        (Tag::List(e), Tag::List(a)) => {
+            if e.is_empty() {
+                return a.is_empty();
+            }
+            a.len() >= e.len() && e.iter().all(|x| a.iter().any(|y| compare_nbt(x, Some(y))))
+        }
+        _ => expected == actual,
+    }
 }
 
 /// SNBT (`TagParser`): compounds, lists, typed arrays, quoted and bare
