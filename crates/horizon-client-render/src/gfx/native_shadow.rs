@@ -511,7 +511,8 @@ fn shader_source(
          let m = material_ids[min(layer & 0x7fffu, arrayLength(&material_ids) - 1u)];\n    \
          return {solid};\n}}\n{ENTRIES}",
         prefixed(
-            section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)"),
+            &(include_str!("../hdr_light.wgsl").to_owned()
+                + section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)")),
             PREFIX
         ),
         super::native_post::line_helpers(api)
