@@ -40,6 +40,10 @@ const ENTITY: u32 = (1 << 23) - 1;
 const SHADOW_ONLY: u32 = (1 << 23) - 2;
 /// Shadow-only vertices `entity_data` holds; past it they cast solid shadows as before.
 const ENTITY_DATA_VERTICES: u64 = 1 << 16;
+/// The ordinary entities' vertices `entity_data` holds after the shadow-only ones (from
+/// `ENTITY_DATA_VERTICES`, `horizon_ray_texel`'s `65536u`): within it they are cut out by their
+/// texture and particles cast nothing; past it they cast solid shadows.
+const ENTITY_CUT_VERTICES: u64 = 1 << 18;
 /// `mesher::Vertex`'s size, which `horizon_ray_entity_texel` reads in words.
 const ENTITY_VERTEX_BYTES: u64 = 44;
 /// Instance masks: what `ray_light` and `ray_occluded` ask for.
@@ -297,8 +301,8 @@ impl RayScene {
                 )
             },
             entity_data: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Ray traced shadow-only entity vertices"),
-                size: ENTITY_DATA_VERTICES * ENTITY_VERTEX_BYTES,
+                label: Some("Ray traced entity vertices"),
+                size: (ENTITY_DATA_VERTICES + ENTITY_CUT_VERTICES) * ENTITY_VERTEX_BYTES,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -689,7 +693,11 @@ impl RayScene {
             .map(|e| {
                 let mut v = Vec::new();
                 if e.quads > 0 {
-                    v.push((sizes(e.quads, true), 0, MASK_SOLID));
+                    // Cut out by its texture where its vertices fit `entity_data`: drawn
+                    // solid, a particle cast a square shadow.
+                    let cut = u64::from(e.quads) * 4 <= ENTITY_CUT_VERTICES
+                        && e.stride == ENTITY_VERTEX_BYTES;
+                    v.push((sizes(e.quads, !cut), 0, MASK_SOLID));
                 }
                 if e.shadow_only.1 > 0 {
                     // Cut out by its texture where its vertices fit `entity_data`.
@@ -744,6 +752,19 @@ impl RayScene {
                 &self.entity_data,
                 0,
                 u64::from(e.shadow_only.1) * 4 * e.stride,
+            );
+        }
+        if let Some(e) = &entities
+            && e.quads > 0
+            && u64::from(e.quads) * 4 <= ENTITY_CUT_VERTICES
+            && e.stride == ENTITY_VERTEX_BYTES
+        {
+            encoder.copy_buffer_to_buffer(
+                e.vertices,
+                0,
+                &self.entity_data,
+                ENTITY_DATA_VERTICES * e.stride,
+                u64::from(e.quads) * 4 * e.stride,
             );
         }
         if let Some(e) = &entities {

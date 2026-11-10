@@ -571,8 +571,9 @@ struct HorizonRayLight {
 @group(3) @binding(60) var<storage, read> horizon_ray_sources: array<HorizonRayLight>;
 @group(3) @binding(61) var<storage, read> horizon_ray_light_cells: array<u32>;
 @group(3) @binding(62) var<storage, read> horizon_ray_blue_tile: array<u32>;
-// The first-person body and held item (`SHADOW_ONLY` in native_rt.rs), as `mesher::Vertex`
-// (44 bytes, 11 words), and the entity atlas their UVs point into.
+// The first-person body and held item (`SHADOW_ONLY` in native_rt.rs), then from vertex 65536
+// the other entities (`ENTITY`), as `mesher::Vertex` (44 bytes, 11 words), and the entity atlas
+// their UVs point into.
 @group(3) @binding(63) var<storage, read> horizon_ray_entity_vertices: array<u32>;
 @group(3) @binding(64) var horizon_ray_entity_atlas: texture_2d<f32>;
 fn horizon_ray_available() -> bool {
@@ -580,9 +581,12 @@ fn horizon_ray_available() -> bool {
 }
 // A candidate's texel: its section's vertices, as `TerrainVertex` (24 bytes, 6 words).
 fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> vec4<f32> {
-    // The first-person body and held item: cut out by their texture's alpha.
-    if (hit.instance_custom_data & 0x7fffffu) == 0x7ffffeu {
-        let first = (hit.primitive_index / 2u) * 4u;
+    // The first-person body and held item (from vertex 0 of `horizon_ray_entity_vertices`) and
+    // the other entities (from 65536, `ENTITY_DATA_VERTICES`): cut out by their texture's alpha.
+    // Their structure is opaque, with no candidates, past what that buffer holds.
+    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu {
+        let base = select(65536u, 0u, (hit.instance_custom_data & 0x7fffffu) == 0x7ffffeu);
+        let first = base + (hit.primitive_index / 2u) * 4u;
         let second = 1u + (hit.primitive_index & 1u);
         let a = first * 11u;
         let b = (first + second) * 11u;
@@ -594,11 +598,18 @@ fn horizon_ray_texel(hit: RayIntersection, tint: ptr<function, vec3<f32>>) -> ve
         let size = vec2<i32>(textureDimensions(horizon_ray_entity_atlas));
         let texel = clamp(vec2<i32>(floor(fract(uv) * vec2<f32>(size))), vec2<i32>(0), size - 1);
         let alpha = f32(horizon_ray_entity_vertices[a + 6u] >> 24u) / 255.0;
+        // Like the shadow map's entity draw (native_shadow.rs): a particle (normal straight up,
+        // w 0) has no shape to cast, and unlit overlays (sky bodies, clouds, beams) none either.
+        let overlay = horizon_ray_entity_vertices[a + 5u] & 0xffffu;
+        let normal = horizon_ray_entity_vertices[a + 8u];
+        let particle = (normal >> 24u) == 0u && ((normal >> 8u) & 255u) >= 126u
+            && ((normal >> 8u) & 255u) < 128u;
+        let unlit = (overlay >= 2u && overlay <= 4u) || overlay == 6u
+            || (overlay >= 9u && overlay <= 12u);
+        if base != 0u && (particle || unlit) {
+            return vec4<f32>(0.0);
+        }
         return vec4<f32>(1.0, 1.0, 1.0, textureLoad(horizon_ray_entity_atlas, texel, 0).a * alpha);
-    }
-    // Entities: another vertex format, drawn solid.
-    if (hit.instance_custom_data & 0x7fffffu) >= 0x7ffffeu {
-        return vec4<f32>(1.0);
     }
     let first = (hit.instance_custom_data & 0x7fffffu) + (hit.primitive_index / 2u) * 4u;
     let second = 1u + (hit.primitive_index & 1u);
