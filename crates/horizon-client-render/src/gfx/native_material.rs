@@ -752,9 +752,16 @@ fn horizon_ray_wave(world: vec2<f32>) -> HorizonWave {
 fn horizon_ray_seen(origin: vec3<f32>, direction: vec3<f32>, distance: f32, source_at: vec3<f32>, normal: vec3<f32>, salt: f32) -> vec3<f32> {
     // A point of the block, not its middle: a source that size gives soft edges past the water too.
     let target_at = source_at + (vec3<f32>(horizon_ray_noise(83.0 + salt), horizon_ray_noise(89.0 + salt), horizon_ray_noise(97.0 + salt)) - 0.5) * 0.9;
+    // The straight way first: whole, nothing translucent lies on it, and none, something solid
+    // does; either way there is no water to bend at, and the search for its surface (a second
+    // walk through the scene for every source) is left out.
+    let straight = horizon_ray_trace(origin, direction, distance);
+    if all(straight == vec3<f32>(1.0)) || all(straight == vec3<f32>(0.0)) {
+        return straight;
+    }
     let surface_y = horizon_ray_water_surface(origin, direction, distance);
     if surface_y < -1e8 || (origin.y - surface_y) * (target_at.y - surface_y) >= 0.0 {
-        return horizon_ray_trace(origin, direction, distance);
+        return straight;
     }
     let above = origin.y > surface_y;
     let near_h = abs(origin.y - surface_y);
