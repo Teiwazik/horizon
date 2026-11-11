@@ -60,7 +60,7 @@ pub enum Blend {
 /// Full-screen passes a pack may chain.
 pub const MAX_POST_PASSES: usize = 40;
 /// Options a pack may declare.
-pub const MAX_OPTIONS: usize = 64;
+pub const MAX_OPTIONS: usize = 128;
 /// Settings pages a pack may declare, and the items one page may hold.
 pub const MAX_PAGES: usize = 32;
 pub const MAX_PAGE_ITEMS: usize = 64;
