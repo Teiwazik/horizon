@@ -88,6 +88,12 @@ pub struct PackInputs {
     /// camera in world space, of length 100 (`endFlashIntensity`, `endFlashPosition`).
     pub end_flash: f32,
     pub end_flash_direction: Vec3,
+    /// The nearest lightning bolt from the camera and the sky flash's strength, 0..1 (a
+    /// native pack's `frame.lightning`).
+    pub lightning: [f32; 4],
+    /// The biome's waters at the camera: open sea, river, still water, each 0..1 (a native
+    /// pack's `frame.water_body`, eased there).
+    pub water_body: [f32; 3],
     /// The dimension type's `ambient_light` (`ambientLight`).
     pub ambient_light: f32,
     /// The player's cave mood, 0..1 (`BiomeAmbientSoundsHandler`'s moodiness):

@@ -498,6 +498,34 @@ impl Game<'_> {
             status,
             end_flash,
             end_flash_direction,
+            water_body: info.map_or([0.0; 3], |b| {
+                let name = b.name.as_str();
+                let has = |part: &str| name.contains(part);
+                [
+                    if has("ocean") {
+                        1.0
+                    } else if has("beach") || has("shore") {
+                        0.7
+                    } else {
+                        0.0
+                    },
+                    f32::from(u8::from(has("river"))),
+                    f32::from(u8::from(has("swamp"))),
+                ]
+            }),
+            lightning: {
+                // `skyFlashTime` is 2 ticks at a strike and counts down.
+                let flash = (self.flash as f32 / 2.0).min(1.0);
+                let nearest = self
+                    .bolts
+                    .iter()
+                    .map(|b| glam::DVec3::from_array(b.at) - camera)
+                    .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+                match nearest {
+                    Some(at) => [at.x as f32, at.y as f32, at.z as f32, flash],
+                    None => [0.0, 0.0, 0.0, flash],
+                }
+            },
             ambient_light: dimension.map_or(0.0, |d| d.ambient_light),
             mood: self.ambience.moodiness,
             still_ticks: self.clock.still().then(|| self.visual_ticks()),

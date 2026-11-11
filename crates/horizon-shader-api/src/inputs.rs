@@ -224,6 +224,13 @@ uniform! {
         moon_phase: u32,
         /// Renderer temporal jitter (xy), enabled flag (z), upscale factor (w).
         engine_taa: [f32; 4],
+        /// Lightning: where the nearest bolt stands, from the camera (xyz), and how bright
+        /// the sky's flash is, 0..1 (w); all 0 with no storm overhead.
+        lightning: [f32; 4],
+        /// The waters of the biome at the camera, each 0..1 and eased over a few seconds as
+        /// the camera crosses into another: open sea (x: oceans whole, beaches and shores
+        /// part), a river (y), still water (z: swamps); w unused.
+        water_body: [f32; 4],
     } pad padding: [u32; 0]
 }
 

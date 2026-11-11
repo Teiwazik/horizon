@@ -320,6 +320,8 @@ pub struct NativeFrame {
     shadow_terrain: Option<(glam::DVec3, Mat4)>,
     pub shadow_refresh: bool,
     weather: [f32; 3],
+    /// `Frame::water_body`, eased.
+    water_body: [f32; 3],
     /// The solid terrain's second target, the post stage's `scene_surface`.
     pub surface: wgpu::Texture,
     pub surface_view: wgpu::TextureView,
@@ -662,6 +664,7 @@ impl NativeFrame {
             shadow_terrain: None,
             shadow_refresh: true,
             weather: [f32::NAN; 3],
+            water_body: [f32::NAN; 3],
             textures,
             block_light,
             pbr,
@@ -1071,6 +1074,11 @@ impl NativeFrame {
         }
         inputs.biome_rain = self.weather[1];
         inputs.biome_snow = self.weather[2];
+        for (value, target) in self.water_body.iter_mut().zip(frame.pack.water_body) {
+            *value = eased(*value, target, 3.0, dt);
+        }
+        let [sea, river, still] = self.water_body;
+        inputs.water_body = [sea, river, still, 0.0];
         self.frames = self.frames.wrapping_add(1);
         inputs
     }
@@ -1872,6 +1880,8 @@ pub fn frame_inputs(
         biome_snow: 0.0,
         moon_phase: pack.day_time.div_euclid(24000).rem_euclid(8) as u32,
         engine_taa: [0.0; 4],
+        lightning: pack.lightning,
+        water_body: [0.0; 4],
         padding: [],
     }
 }

@@ -1079,5 +1079,7 @@
   "horizon.studio.topbar.clear_keyframes": "🗑 Очистить ключевые кадры",
   "horizon.studio.topbar.timeline_hud": "⏱ Таймлайн",
   "horizon.studio.topbar.split_scene": "Разделить сцену",
-  "horizon.shaders.preview": "Скрыть"
+  "horizon.shaders.preview": "Скрыть",
+  "Style": "Стиль",
+  "Real Life": "Реализм"
 }

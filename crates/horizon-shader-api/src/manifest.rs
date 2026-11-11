@@ -512,9 +512,10 @@ pub enum PageItem {
     Page(usize),
     /// `""`: an empty slot.
     Empty,
-    /// `"presets"`: a button stepping through `Manifest::presets`, naming the one the values
-    /// match (else "Custom").
-    Presets,
+    /// `"presets"` or `"presets:<group>"`: a button stepping through the presets of that
+    /// group (`Preset::group`; plain `"presets"` the ungrouped ones), naming the one the
+    /// values match (else "Custom").
+    Presets(String),
 }
 
 /// `[[presets]]`: a name for a set of option values, e.g. a quality level.
@@ -523,6 +524,9 @@ pub struct Preset {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// The group it is stepped through with (`"presets:<group>"`), "" for plain `"presets"`:
+    /// a quality level and a look are chosen apart, each from its own group.
+    pub group: String,
     /// The options it sets (index into `Manifest::options`) and their constants, as the
     /// values file keeps them: 0 or 1, the number, or a choice's index. The others keep theirs.
     pub values: Vec<(usize, f64)>,
@@ -760,11 +764,13 @@ struct RawPreset {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    group: String,
     values: toml::Table,
 }
 
 /// How many presets a pack may declare.
-pub const MAX_PRESETS: usize = 8;
+pub const MAX_PRESETS: usize = 16;
 
 /// `[[presets]]` checked against the options: each value of its option's type and in range.
 fn check_presets(raw: Vec<RawPreset>, options: &[PackOption]) -> Result<Vec<Preset>, String> {
@@ -808,6 +814,7 @@ fn check_presets(raw: Vec<RawPreset>, options: &[PackOption]) -> Result<Vec<Pres
                 id: p.id,
                 name: p.name,
                 description: p.description,
+                group: p.group,
                 values,
             })
         })
@@ -1562,7 +1569,9 @@ fn read_pages(raw: &[RawPage], options: &[PackOption]) -> Result<Vec<OptionPage>
                 let item = if item.is_empty() {
                     PageItem::Empty
                 } else if item == "presets" {
-                    PageItem::Presets
+                    PageItem::Presets(String::new())
+                } else if let Some(group) = item.strip_prefix("presets:") {
+                    PageItem::Presets(group.to_owned())
                 } else if let Some(link) = item.strip_prefix("page:") {
                     match raw.iter().position(|p| p.id == link) {
                         Some(i) if i == at => return Err(fail("links to itself".into())),

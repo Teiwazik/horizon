@@ -38,6 +38,8 @@ pub(crate) enum Item {
     Link(u16),
     /// The next of a `shaders/` pack's profiles.
     Profile,
+    /// The next preset of a Horizon pack's `.0`th group of presets.
+    Preset(u8),
     /// Every option of the pack back to its default.
     Reset,
     /// Horizon's own Shadow Cache (`Graphics::shadow_cache`), for every pack: not the pack's.
@@ -203,6 +205,11 @@ fn native_screens(pack: &crate::shader_pack_list::Entry) -> Vec<PackScreen> {
                 .iter()
                 .filter_map(|item| match *item {
                     PageItem::Option(o) if o < count => Some(Item::Option(o as u16)),
+                    PageItem::Presets(ref group) => pack
+                        .preset_groups()
+                        .iter()
+                        .position(|g| g == group)
+                        .map(|g| Item::Preset(g as u8)),
                     PageItem::Page(p) if p < pack.pages.len() && p != i => {
                         Some(Item::Link(p as u16))
                     }
@@ -249,6 +256,24 @@ fn parts(item: Item, s: &Settings, screens: &[PackScreen]) -> (String, Option<St
             Some(o) => shell::name_and_value(&plain(o.profile_label())),
             None => (String::new(), None),
         },
+        Item::Preset(g) => {
+            let Some((_, pack)) = native(s) else {
+                return (String::new(), None);
+            };
+            let groups = pack.preset_groups();
+            let Some(group) = groups.get(usize::from(g)) else {
+                return (String::new(), None);
+            };
+            // The group's name with a capital, through the language file: "Style".
+            let mut label = String::from("Preset");
+            if let Some(first) = group.chars().next() {
+                label = first.to_uppercase().chain(group.chars().skip(1)).collect();
+            }
+            let now = pack
+                .preset(group)
+                .map_or_else(|| lang::get("Custom"), |p| lang::get(&pack.presets[p].name));
+            (lang::get(&label), Some(now))
+        }
         Item::Option(i) => {
             if let Some((_, pack)) = native(s) {
                 let i = usize::from(i);
@@ -351,6 +376,13 @@ fn description(item: Item, s: &Settings, screens: &[PackScreen]) -> String {
         Item::ShadowCache => {
             lang::get("Reuses the pack shadow map when sun, view and world match. Off by default.")
         }
+        Item::Preset(g) => native(s)
+            .and_then(|(_, pack)| {
+                let groups = pack.preset_groups();
+                let p = pack.preset(groups.get(usize::from(g))?)?;
+                Some(pack.presets[p].description.clone())
+            })
+            .unwrap_or_else(|| lang::get("Sets many options at once, as the pack groups them.")),
         Item::Profile => classic(s)
             .and_then(|o| o.comment("profile"))
             .map(plain)
@@ -385,7 +417,9 @@ fn row(item: Item, s: &Settings, screens: &[PackScreen]) -> Row<Item> {
             steps: slider_steps(item, s),
             text,
         },
-        (Item::Option(_) | Item::Profile, None, None, Some(text)) => Value::Choice(text),
+        (Item::Option(_) | Item::Profile | Item::Preset(_), None, None, Some(text)) => {
+            Value::Choice(text)
+        }
         _ => Value::Press,
     };
     Row::new(item, name, value).about(description(item, s, screens))
@@ -525,6 +559,21 @@ impl shell::Screen for ShaderScreen {
             }
             // The shell follows a link (`link`).
             Item::Link(_) => Vec::new(),
+            Item::Preset(g) => match native {
+                Some(p) => {
+                    let group = s.shader_packs[p]
+                        .preset_groups()
+                        .get(usize::from(g))
+                        .map(|g| (*g).to_owned());
+                    match group {
+                        Some(group) if s.shader_packs[p].step_preset(&group, back) => {
+                            vec![Output::Event(Event::NativePackOptions(p))]
+                        }
+                        _ => Vec::new(),
+                    }
+                }
+                None => Vec::new(),
+            },
             Item::Profile => match s.shader_options.as_mut().filter(|o| o.pack == pack) {
                 Some(o) => {
                     o.next_profile();
@@ -592,7 +641,7 @@ impl shell::Screen for ShaderScreen {
     /// and the profile (up goes back); the other rows leave it to scroll the list.
     fn wheel_step(&mut self, s: &mut Settings, item: Item, back: bool) -> Option<Vec<Output>> {
         let steps = match item {
-            Item::Profile => true,
+            Item::Profile | Item::Preset(_) => true,
             Item::Option(_) => switch(item, s).is_none() && slider(item, s).is_none(),
             _ => false,
         };

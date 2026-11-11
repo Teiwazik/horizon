@@ -57,10 +57,28 @@ impl Entry {
         true
     }
 
-    /// The preset the values match, if any (the first, when several do).
-    pub fn preset(&self) -> Option<usize> {
-        self.presets.iter().position(|p| {
-            p.values.iter().all(|&(i, v)| {
+    /// The presets' groups, in the order they first come ("" the ungrouped ones).
+    pub fn preset_groups(&self) -> Vec<&str> {
+        let mut groups: Vec<&str> = Vec::new();
+        for p in &self.presets {
+            if !groups.contains(&p.group.as_str()) {
+                groups.push(&p.group);
+            }
+        }
+        groups
+    }
+
+    /// The presets of `group`, as indices into `presets`.
+    fn group_presets(&self, group: &str) -> Vec<usize> {
+        (0..self.presets.len())
+            .filter(|&i| self.presets[i].group == group)
+            .collect()
+    }
+
+    /// The preset of `group` the values match, if any (the first, when several do).
+    pub fn preset(&self, group: &str) -> Option<usize> {
+        self.group_presets(group).into_iter().find(|&p| {
+            self.presets[p].values.iter().all(|&(i, v)| {
                 self.values
                     .get(i)
                     .is_some_and(|&now| (now - v).abs() < 1e-6)
@@ -70,17 +88,21 @@ impl Entry {
 
     /// The next preset's values (`back`: the one before), from the one they match; from
     /// "Custom", the first (or the last). Whether the pack has any.
-    pub fn step_preset(&mut self, back: bool) -> bool {
-        let n = self.presets.len();
+    pub fn step_preset(&mut self, group: &str, back: bool) -> bool {
+        let of_group = self.group_presets(group);
+        let n = of_group.len();
         if n == 0 {
             return false;
         }
-        let next = match (self.preset(), back) {
+        let now = self
+            .preset(group)
+            .and_then(|p| of_group.iter().position(|&i| i == p));
+        let next = of_group[match (now, back) {
             (Some(i), false) => (i + 1) % n,
             (Some(i), true) => (i + n - 1) % n,
             (None, false) => 0,
             (None, true) => n - 1,
-        };
+        }];
         for &(i, v) in &self.presets[next].values {
             if let Some(slot) = self.values.get_mut(i) {
                 *slot = v;
