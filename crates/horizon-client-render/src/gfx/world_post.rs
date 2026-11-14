@@ -53,8 +53,6 @@ struct TaaResources {
 /// One frame handed to an upscaler backend: the jittered world at `render_size` and what
 /// it needs to rebuild it at `output_size`. The motion is the camera's alone (`reproject`);
 /// objects that move on their own carry no motion vectors yet.
-// Only TAA reads it so far; a vendor backend reads the rest (#12918).
-#[allow(dead_code)]
 pub(super) struct UpscaleFrame<'a> {
     /// The world's colour, rendered with this frame's jitter.
     pub color: &'a wgpu::TextureView,
@@ -550,9 +548,15 @@ impl Post {
             let group = self.bind(device, &color);
             let taa = history_size.and_then(|output| {
                 let res = self.taa_resources.as_ref()?;
+                // COPY_DST: an upscaler mod may copy its output in (`native_upscale`).
                 let history = [0, 1].map(|_| {
-                    make_tex("TAA history", output, HISTORY_FORMAT, sampled)
-                        .create_view(&Default::default())
+                    make_tex(
+                        "TAA history",
+                        output,
+                        HISTORY_FORMAT,
+                        sampled | wgpu::TextureUsages::COPY_DST,
+                    )
+                    .create_view(&Default::default())
                 });
                 let resolve = [0, 1].map(|i| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -638,13 +642,37 @@ impl Post {
         })
     }
 
-    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on.
+    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on, or
+    /// through a mod's upscaler (`native_upscale`) when one takes the frame. `linear_light`: the
+    /// frame's values are linear light.
     pub fn finish(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
+        linear_light: bool,
+        timing: Option<&mut super::pack_timing::PassTiming>,
+    ) {
+        self.finish_hooked(
+            (device, queue),
+            encoder,
+            screen,
+            linear_light,
+            timing,
+            super::native_render::native_upscale,
+        );
+    }
+
+    /// `finish`, asking `hook` instead of the installed mods.
+    fn finish_hooked(
+        &self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &wgpu::TextureView,
+        linear_light: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
+        hook: impl FnOnce(&mut super::native_render::Upscale<'_>),
     ) {
         let Some(target) = &self.target else { return };
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
@@ -667,12 +695,37 @@ impl Post {
             reset: self.taa_this_frame.jitter[2] > 0.5,
             index: self.taa_frame,
         };
-        let shown = res.resolve(queue, encoder, &frame, taa, timing.as_deref_mut());
-        let pipeline = if self.upscale > 1.0 {
-            &self.sharpen
-        } else {
-            &self.copy
+        let i = (frame.index % 2) as usize;
+        let mut upscale = super::native_render::Upscale {
+            device,
+            queue,
+            encoder: &mut *encoder,
+            color: frame.color,
+            depth: frame.depth,
+            render_size: frame.render_size,
+            output_size: frame.output_size,
+            format: self.format,
+            linear_light,
+            jitter_clip: frame.jitter_clip,
+            jitter_pixels: frame.jitter_pixels,
+            reproject: frame.reproject,
+            reset: frame.reset,
+            index: frame.index,
+            exposure: 1.0,
+            output: &taa.history[i],
+            output_format: HISTORY_FORMAT,
+            sharpen: self.upscale > 1.0,
+            handled: false,
         };
+        hook(&mut upscale);
+        let (handled, sharpen) = (upscale.handled, upscale.sharpen);
+        let shown = if handled {
+            // The mod wrote `history[i]`: TAA's next frame blends onto it as its history.
+            &taa.show[i]
+        } else {
+            res.resolve(queue, encoder, &frame, taa, timing.as_deref_mut())
+        };
+        let pipeline = if sharpen { &self.sharpen } else { &self.copy };
         self.draw_onto(encoder, screen, shown, pipeline, timing);
     }
 
@@ -888,6 +941,147 @@ mod tests {
         assert_eq!(post.taa_this_frame.jitter[2], 0.0);
         eprintln!(
             "TAA baked-light GPU checked gain, all settings/gains/windows and the first frame after a pack"
+        );
+    }
+
+    /// A red world through `finish_hooked` onto a 64 by 64 screen at `upscale`: the screen's
+    /// centre pixel, or `None` without a device or TAA.
+    fn upscaled_centre(
+        upscale: f32,
+        hook: impl FnOnce(&mut crate::gfx::native_render::Upscale<'_>),
+    ) -> Option<[u8; 4]> {
+        let (device, queue) = test_device()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut post = Post::new(&device, format);
+        post.taa = true;
+        post.upscale = upscale;
+        if !post.supports_taa() {
+            return None;
+        }
+        post.jitter([64, 64], true, Mat4::IDENTITY, DVec3::ZERO);
+        let (color, _) = post.prepare(&device, [64, 64], false)?;
+        let screen = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 64 * 64 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        clear(&mut encoder, &color, wgpu::Color::RED);
+        post.finish_hooked(
+            (&device, &queue),
+            &mut encoder,
+            &screen.create_view(&Default::default()),
+            false,
+            None,
+            hook,
+        );
+        encoder.copy_texture_to_buffer(
+            screen.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(64 * 4),
+                    rows_per_image: None,
+                },
+            },
+            screen.size(),
+        );
+        queue.submit([encoder.finish()]);
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("readback");
+        let bytes = readback.slice(..).get_mapped_range().unwrap();
+        let at = (32 * 64 + 32) * 4;
+        Some(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, color: wgpu::Color) {
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(color),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+    }
+
+    /// A mod's upscaler takes the frame: it is handed the world at the render size and an output
+    /// at the screen's, and what it writes is what reaches the screen instead of TAA's resolve.
+    #[test]
+    fn an_upscaler_mod_takes_the_frame_and_its_output_is_shown() {
+        struct Green;
+        impl crate::gfx::native_render::RenderHooks for Green {
+            fn upscale(&self, event: &mut crate::gfx::native_render::UpscaleEvent<'_, '_>) {
+                let up = &mut *event.upscale;
+                assert_eq!(
+                    (up.render_size, up.output_size),
+                    ([32, 32], [64, 64]),
+                    "half-size world, screen-size output"
+                );
+                assert_eq!(up.format, wgpu::TextureFormat::Rgba8Unorm);
+                assert_eq!(up.output_format, wgpu::TextureFormat::Rgba16Float);
+                assert!(up.reset, "the first frame has no history");
+                assert!(!up.linear_light);
+                assert_eq!(up.exposure, 1.0);
+                clear(up.encoder, up.output, wgpu::Color::GREEN);
+                up.handled = true;
+            }
+        }
+        let mut seen = false;
+        let pixel = upscaled_centre(2.0, |up| {
+            crate::gfx::native_render::dispatch_upscale_for(&[&Green], up);
+            seen = true;
+        });
+        let Some(pixel) = pixel else {
+            eprintln!("upscaler hook GPU skipped: no device or TAA");
+            return;
+        };
+        assert!(seen);
+        assert!(
+            pixel[0] < 4 && pixel[1] > 251 && pixel[2] < 4,
+            "the mod's green, not TAA's red: {pixel:?}"
+        );
+    }
+
+    /// With no mod taking the frame, TAA resolves it as before: a first frame shows the world.
+    #[test]
+    fn without_an_upscaler_mod_taa_resolves_the_frame() {
+        let mut handled = None;
+        let pixel = upscaled_centre(1.0, |up| {
+            crate::gfx::native_render::dispatch_upscale_for(&[], up);
+            handled = Some(up.handled);
+        });
+        let Some(pixel) = pixel else {
+            eprintln!("upscaler hook GPU skipped: no device or TAA");
+            return;
+        };
+        assert_eq!(handled, Some(false));
+        assert!(
+            pixel[0] > 251 && pixel[1] < 4 && pixel[2] < 4,
+            "TAA's resolve of the red world: {pixel:?}"
         );
     }
 

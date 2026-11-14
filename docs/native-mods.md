@@ -5204,6 +5204,8 @@ render thread with the frame's wgpu objects; what a mod draws there shows in tha
 - `native_world_warp(warp)`: give the frame a [world warp](#world-warps), WGSL every terrain and entity vertex goes
   through. Asked once a frame before the world is drawn (not on the title screen's panorama); the last mod to set
   one draws.
+- `native_upscale(upscale)`: take the [upscale](#upscalers) over from the engine's TAA: on each frame TAA would
+  resolve, a mod gets the frame at render size and writes the full-size picture. Bundles need "hooks": @API:upscale@.
 
 ### World warps
 
@@ -5263,6 +5265,29 @@ and nothing of the warp's is made until a mod gives one.
 
 `cargo run -p horizon-client-render --example world_warp_check -- <dir>` (with throwaway `HORIZON_HOME`,
 `HORIZON_LAUNCHER_HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`) draws a warp through the renderer offscreen.
+
+### Upscalers
+
+`native_upscale` hands a mod the frame the engine's TAA would otherwise resolve: with TAA or an Upscaling mode on and
+no shader pack drawing, once a frame, after the world post pass and before the HDR tone curve, the first-person hand
+and the HUD. `Upscale` holds:
+
+- the device, queue and encoder;
+- `color` (the world drawn with this frame's jitter) and `depth` (Depth32Float, reversed: 0 is the sky), both at
+  `render_size`;
+- `format` (Rgba8Unorm, Rgba16Unorm or Rgba16Float) and `linear_light` (false: gamma-encoded 8-bit);
+- `jitter_clip` (as added to the projection) and `jitter_pixels` (in rendered pixels, y down), `index` (frames
+  jittered so far), `reset` (a cut or resize: drop your history);
+- `reproject`, this frame's unjittered camera-relative clip space to the previous frame's;
+- `exposure`, what the colour was already scaled by: always 1, no exposure runs before the tone curve;
+- `output`, Rgba16Float at `output_size` (a render target, sampleable, and a copy destination), and `sharpen` (on when
+  the world is upscaled; turn it off if your upscaler sharpens itself).
+
+Write every pixel of `output` in the frame's own encoding (don't clamp values above 1 on an HDR frame) and set
+`handled`: the engine skips its TAA, draws `output` onto the frame as it draws TAA's, and the tone curve, hand and
+HUD follow. A later frame you don't handle blends onto your output as TAA's history. Mods are asked in order and see
+`handled` already set by an earlier one. Not there yet: per-pixel motion vectors (`reproject` covers the camera
+only, so what moves on its own has no motion), and frames drawn by a shader pack, which upscales itself.
 
 ### World primitives
 

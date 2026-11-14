@@ -24,6 +24,12 @@ pub trait RenderHooks: Send + Sync {
     fn world_warp(&self, event: &mut WorldWarpEvent<'_>) {
         let _ = event;
     }
+    /// Asked on each frame the engine's TAA would resolve (see [`Upscale`]): write every pixel of
+    /// `upscale.output` and set `upscale.handled` to take the upscale over for that frame. Mods are
+    /// asked in order; later ones see `handled` already set.
+    fn upscale(&self, event: &mut UpscaleEvent<'_, '_>) {
+        let _ = event;
+    }
 }
 /// What [`RenderHooks::world_drawn`] is told. Fields may be added: the struct is `#[non_exhaustive]`.
 #[non_exhaustive]
@@ -67,5 +73,16 @@ pub fn dispatch_world_warp(mods: &[&dyn RenderHooks], warp: &mut WorldWarp) {
     let mut event = WorldWarpEvent { warp };
     for mod_hook in mods {
         mod_hook.world_warp(&mut event);
+    }
+}
+/// What [`RenderHooks::upscale`] is told. Fields may be added: the struct is `#[non_exhaustive]`.
+#[non_exhaustive]
+pub struct UpscaleEvent<'a, 'b> {
+    pub upscale: &'a mut Upscale<'b>,
+}
+pub fn dispatch_upscale(mods: &[&dyn RenderHooks], upscale: &mut Upscale<'_>) {
+    let mut event = UpscaleEvent { upscale };
+    for mod_hook in mods {
+        mod_hook.upscale(&mut event);
     }
 }

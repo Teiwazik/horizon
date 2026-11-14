@@ -11563,8 +11563,14 @@ impl Renderer {
             let world = self
                 .frame_gen
                 .world(&self.device, &self.world_post, &self.config);
-            self.world_post
-                .finish(&self.queue, &mut encoder, &world, self.own_timing.as_mut());
+            self.world_post.finish(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &world,
+                self.output.frame.linear_light,
+                self.own_timing.as_mut(),
+            );
             let camera = frame_gen::Camera {
                 jittered,
                 view_proj,
@@ -11604,9 +11610,11 @@ impl Renderer {
             }
         } else if scaled.is_some() {
             self.world_post.finish(
+                &self.device,
                 &self.queue,
                 &mut encoder,
                 &view_target,
+                self.output.frame.linear_light,
                 self.own_timing.as_mut(),
             );
         }

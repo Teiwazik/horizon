@@ -1,0 +1,13 @@
+{
+  "hooks": [
+    {
+      "name": "upscale",
+      "target": "horizon_client_render::gfx::native_render::native_upscale",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {"contract": "listen"}
+    }
+  ],
+  "rust_summary": "an upscaler hook (`native_upscale`): on each frame the engine's TAA would resolve, a client mod gets the\nrender-size colour and depth, jitter, the camera's reprojection, the reset flag and the full-size output, and may write\nthe output itself instead of TAA.",
+  "doc_summary": "an upscaler hook through `native_upscale`: on each frame the engine's TAA would resolve, a client mod gets the frame at render size (colour and depth), its jitter, the camera's reprojection, a reset flag, the exposure and the encoding, and may write the full-size output itself instead of TAA, before the tone curve and the HUD ([Upscalers](#upscalers)). Bundles need \"hooks\": @API:upscale@."
+}

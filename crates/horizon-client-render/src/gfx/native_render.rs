@@ -15,7 +15,7 @@ use std::sync::{
 /// the game's build checks that the file is current.
 mod generated;
 pub use generated::{
-    HandDrawnEvent, RenderHooks, RenderNeedsEvent, WorldDrawnEvent, WorldWarpEvent,
+    HandDrawnEvent, RenderHooks, RenderNeedsEvent, UpscaleEvent, WorldDrawnEvent, WorldWarpEvent,
 };
 pub use wgpu;
 
@@ -210,6 +210,64 @@ pub fn world_warp() -> WorldWarp {
     let mut warp = WorldWarp::default();
     native_world_warp(&mut warp);
     warp
+}
+
+/// One frame for an upscaler ([`native_upscale`]): the jittered world at `render_size` and
+/// what it takes to rebuild it at `output_size`. It comes only on frames the engine's TAA would
+/// resolve (TAA or an Upscaling mode on, no shader pack drawing), before the HDR tone curve,
+/// the hand and the HUD. The colour is in the frame's own encoding (`format`, `linear_light`):
+/// keep it, and don't clamp values above 1 when the frame is HDR. Motion is the camera's alone
+/// (`reproject`): no motion vector texture exists yet, so what moves on its own carries none.
+#[non_exhaustive]
+pub struct Upscale<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// The world's colour, drawn with this frame's jitter, at `render_size`, in `format`.
+    pub color: &'a wgpu::TextureView,
+    /// The world's depth at `render_size` (Depth32Float, sampleable), reversed: 0 is the sky.
+    pub depth: &'a wgpu::TextureView,
+    pub render_size: [u32; 2],
+    pub output_size: [u32; 2],
+    /// The frame's format: Rgba8Unorm, Rgba16Unorm or Rgba16Float (HDR).
+    pub format: wgpu::TextureFormat,
+    /// Values are linear light (an HDR or 16-bit frame), not gamma-encoded.
+    pub linear_light: bool,
+    /// The jitter in clip space, as added to the projection, and in rendered pixels, y down.
+    pub jitter_clip: [f32; 2],
+    pub jitter_pixels: [f32; 2],
+    /// This frame's unjittered camera-relative clip space to the previous frame's.
+    pub reproject: [[f32; 4]; 4],
+    /// The history is unusable: a cut, a resize, a frame without the upscaler.
+    pub reset: bool,
+    /// Frames jittered so far.
+    pub index: u32,
+    /// What the colour was scaled by before this point: always 1 (no exposure runs before the
+    /// tone curve).
+    pub exposure: f32,
+    /// Where the upscaled picture goes, at `output_size` in `output_format` (Rgba16Float): a
+    /// render target, sampleable, and a copy destination (`output.texture()`). The engine draws
+    /// it onto the frame next, as it draws TAA's.
+    pub output: &'a wgpu::TextureView,
+    pub output_format: wgpu::TextureFormat,
+    /// Sharpen `output` as it is drawn on (on when the world is upscaled); a mod may turn it off.
+    pub sharpen: bool,
+    /// Set once every pixel of `output` is written: the engine's TAA then skips this frame.
+    pub handled: bool,
+}
+
+/// Asked on each frame the engine's TAA would resolve (see [`Upscale`]): write every pixel of
+/// `upscale.output` and set `upscale.handled` to take the upscale over for that frame. Mods are
+/// asked in order; later ones see `handled` already set.
+#[inline(never)]
+pub fn native_upscale(upscale: &mut Upscale<'_>) {
+    generated::dispatch_upscale(RENDERERS.get().map_or(&[], |renderers| renderers), upscale);
+}
+
+/// [`native_upscale`] over `mods` instead of the installed ones, for tests.
+#[cfg(test)]
+pub(crate) fn dispatch_upscale_for(mods: &[&dyn RenderHooks], upscale: &mut Upscale<'_>) {
+    generated::dispatch_upscale(mods, upscale);
 }
 
 #[cfg(test)]

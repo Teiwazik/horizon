@@ -49,8 +49,8 @@ pub use crate::gamerules::Value as GameRuleValue;
 /// What a mod asks of the terrain's picture each frame (`native_world_hold`). API 414.
 pub use crate::gfx::WorldHold;
 pub use crate::gfx::native_render::{
-    BlockSpriteArrays, RenderHooks, RenderNeeds, RenderNeedsEvent, WorldDrawn, WorldDrawnEvent,
-    WorldWarp, WorldWarpEvent, wgpu,
+    BlockSpriteArrays, RenderHooks, RenderNeeds, RenderNeedsEvent, Upscale, UpscaleEvent,
+    WorldDrawn, WorldDrawnEvent, WorldWarp, WorldWarpEvent, wgpu,
 };
 pub use crate::hud::HudBatch;
 pub use crate::hud_layout::{GuiDraw, HealthHud, HealthInputs};
