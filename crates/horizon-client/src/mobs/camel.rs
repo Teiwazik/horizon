@@ -385,14 +385,16 @@ impl Goal for RandomSitting {
         MOVE
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        // checkExtraStartConditions: not leashed, no controlling passenger
-        // (a player's or a mob's, a husk on its back), and room for the pose
-        // it would take (`Camel.canCamelChangePose`).
+        // `CamelAi.RandomSitting` checkExtraStartConditions: not leashed, no
+        // controlling passenger (a driver on a saddled camel, or a mob on its
+        // back: `Camel.hasControllingPassenger`), and room for the pose it
+        // would take (`Camel.canCamelChangePose`). A player on an unsaddled
+        // camel is only a passenger, so it kneels under them.
         !m.fluids.in_water
             && pose_time(m) >= 400
             && m.extra.leash.is_none()
             && m.on_ground
-            && m.rider.is_none()
+            && !super::equine::controlled(m)
             && !super::riders::mob_controlled(m, cx.w)
             && can_change_pose(m, cx.w)
             && m.random.next_int_bound(4).unwrap_or(1) == 0
@@ -539,6 +541,10 @@ pub fn anim(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "camel_husk_tests.rs"]
+mod camel_husk_tests;
 
 #[cfg(test)]
 mod camel_pose_tests;

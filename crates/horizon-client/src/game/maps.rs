@@ -2246,6 +2246,7 @@ mod tests {
                 pos[1] as f64 + 0.5,
                 pos[2] as f64 + 0.5,
             ],
+            inside: false,
         };
         let mut stack = ItemStack::new("minecraft:filled_map", 1);
         stack.data_mut().map_id = Some(map_id);

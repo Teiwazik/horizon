@@ -1,12 +1,29 @@
+//! Naming with a name tag: `Mob.interact` (through
+//! `checkAndHandleImportantInteractions`) and `Player.interactOn` post
+//! `GameEvent.ENTITY_INTERACT` at the named entity from the player once
+//! `NameTagItem` consumed the tag, and an armour stand's name follows
+//! `ArmorStandRenderer.shouldShowName`, `isCustomNameVisible` alone: no team
+//! visibility and no F1 (`LivingEntityRenderer` asks both, the override
+//! neither).
+//!
 //! The two ends of a name tag: `NameTagItem.interactLivingEntity` shrinks the
 //! stack it names with -- and `Player.interactOn` puts a creative player's
 //! count straight back -- and `EntityAttachment.NAME_TAG` says where the tag
 //! hangs, which `EntityTypes.SNIFFER` moves to 2.05 above the feet.
+use super::super::sculk::TEST_POSTED_EVENTS;
 use super::super::*;
 use super::name_tag_at;
+use horizon_client::chunk::Chunk;
 use horizon_client::entities::ArmorStand;
-use horizon_client::mobs::{Anim, Brain, Mob, MobType, Part, Species};
+use horizon_client::hud::HudBatch;
+use horizon_client::items::ItemStack;
+use horizon_client::mobs::{Anim, Brain, Mob, MobType, Part, Species, Who};
+use horizon_client::motion::PlayerMotion;
+use horizon_client::save::uuid_text;
+use horizon_client::scoreboard as sb;
+use horizon_client::text::Text;
 use horizon_core::geometry::Vec3;
+use horizon_core::position::ChunkPos;
 use horizon_world::nbt::Tag;
 use std::sync::Arc;
 
@@ -138,16 +155,161 @@ fn game() -> Game<'static> {
     game.set_allow_commands(true);
     game.world
         .chunks
-        .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
     game.block_ticks
-        .add_empty_chunk(horizon_core::position::ChunkPos::new(0, 0))
+        .add_empty_chunk(ChunkPos::new(0, 0))
         .unwrap();
-    game.player = Some(
-        horizon_client::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap(),
-    );
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
     game.screen = Screen::Playing;
     game.selected = 0;
+    game.set_mode_id(0);
     game
+}
+
+fn spawn(game: &mut Game<'_>, kind: &str, id: u32, at: [f64; 3]) -> usize {
+    let kind = game.res.mob_types().get(kind).unwrap().clone();
+    game.mobs
+        .push(Mob::new(id, kind, Vec3::new(at[0], at[1], at[2]), 0.0));
+    game.mobs.len() - 1
+}
+
+fn target(id: u32) -> Option<InteractTarget> {
+    Some(InteractTarget {
+        id: id as i32,
+        location: [0.0, 0.0, 0.0],
+    })
+}
+
+/// A name tag with `name` as its `minecraft:custom_name`.
+fn named_tag(name: &str) -> ItemStack {
+    let mut stack = ItemStack::new("minecraft:name_tag", 1);
+    stack.data_mut().set_other(
+        "minecraft:custom_name",
+        Some(horizon_world::nbt::Tag::String(name.into())),
+    );
+    stack
+}
+
+fn take_interacts() -> Vec<(&'static str, [f64; 3], Option<Who>)> {
+    TEST_POSTED_EVENTS.with(|events| {
+        std::mem::take(events.borrow_mut().as_mut().unwrap())
+            .into_iter()
+            .filter(|event| event.0 == "minecraft:entity_interact")
+            .collect()
+    })
+}
+
+#[test]
+#[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+fn naming_posts_entity_interact_at_the_named_entity() {
+    let mut game = game();
+    TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+    // A mob names itself in `Mob.interact`: the event goes out at the mob,
+    // from the player who used the tag.
+    game.inventory[0] = Some(named_tag("Bessie"));
+    let cow = spawn(&mut game, "minecraft:cow", 7, [2.5, 64.0, 2.5]);
+    assert!(
+        game.interact_mob(target(7)).unwrap(),
+        "the tag names the cow"
+    );
+    assert_eq!(game.mobs[cow].custom_name.as_deref(), Some("Bessie"));
+    assert_eq!(
+        take_interacts(),
+        vec![(
+            "minecraft:entity_interact",
+            [2.5, 64.0, 2.5],
+            Some(Who::Player)
+        )]
+    );
+    // An armour stand is no mob: `Player.interactOn` posts the same event for
+    // any item that named a living entity.
+    game.inventory[0] = Some(named_tag("Holo"));
+    game.armor_stands
+        .push(ArmorStand::new(21, Vec3::new(3.0, 64.0, 4.0), 0.0));
+    assert!(game.interact_armor_stand(target(21)), "the tag names it");
+    assert_eq!(
+        game.armor_stands[0].custom_name.as_ref().map(Text::plain),
+        Some("Holo".to_owned())
+    );
+    assert_eq!(
+        take_interacts(),
+        vec![(
+            "minecraft:entity_interact",
+            [3.0, 64.0, 4.0],
+            Some(Who::Player)
+        )]
+    );
+    TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = None);
+}
+
+#[test]
+#[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+fn an_armour_stands_name_ignores_f1_and_team_visibility() {
+    let mut game = game();
+    let mut stand = ArmorStand::new(42, Vec3::new(0.0, 64.0, 4.0), 0.0);
+    stand.custom_name = Some(Text::literal("Holo"));
+    stand.name_visible = true;
+    game.armor_stands.push(stand);
+    let camera = glam::DVec3::new(0.5, 65.0, 0.5);
+    assert_eq!(game.shown_name_tags(camera), vec!["Holo".to_owned()]);
+    // F1 hides the HUD: `ArmorStandRenderer.shouldShowName` never asks.
+    game.ui.hide_gui = true;
+    assert_eq!(
+        game.shown_name_tags(camera),
+        vec!["Holo".to_owned()],
+        "F1 keeps the stand's name"
+    );
+    // Nor does a team the stand is on, whose name tags it hides from everyone.
+    let stand_uuid = [0, 0, 0, 42];
+    game.persist.uuids.insert(42, stand_uuid);
+    game.score.board.add_team("hidden").nametag_visibility = sb::Visibility::Never;
+    assert!(
+        game.score
+            .board
+            .add_to_team(&uuid_text(stand_uuid), "hidden")
+    );
+    // A mob's name still follows `LivingEntityRenderer`: the same team hides it.
+    let cow = spawn(&mut game, "minecraft:cow", 9, [1.0, 64.0, 4.0]);
+    game.mobs[cow].custom_name = Some("Moo".into());
+    game.mobs[cow].name_visible = true;
+    let cow_uuid = [0, 0, 0, 9];
+    game.persist.uuids.insert(9, cow_uuid);
+    assert!(game.score.board.add_to_team(&uuid_text(cow_uuid), "hidden"));
+    assert_eq!(
+        game.shown_name_tags(camera),
+        vec!["Holo".to_owned()],
+        "the team hides the cow's name, not the armour stand's"
+    );
+    // The same stand with its name hidden (`CustomNameVisible` off) shows none.
+    game.armor_stands[0].name_visible = false;
+    assert!(game.shown_name_tags(camera).is_empty());
+}
+
+#[test]
+#[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+fn a_trades_title_draws_the_names_style() {
+    let mut game = game();
+    // `MerchantScreen.extractLabels` draws the menu's title, the merchant's
+    // `getDisplayName()`: a name with a colour keeps it, instead of coming out
+    // in the screen's grey (-12566464).
+    let session = horizon_client::merchant::Session::new(Vec::new(), true);
+    game.open_remote_merchant(session, Some(Text::colored("Bob", 0xFF_0000)));
+    let mut batch = HudBatch::new([854, 480]);
+    assert!(game.draw_merchant(&mut batch));
+    let (_, oy) = game.inventory_origin(&batch);
+    // The title's row: glyphs only, its own line (`oy + 6`, 8 px tall).
+    let title: Vec<u32> = batch
+        .vertices
+        .iter()
+        .filter(|v| v.text == 1 && v.pos[1] >= oy + 6.0 && v.pos[1] <= oy + 14.0)
+        .map(|v| v.color)
+        .collect();
+    assert!(!title.is_empty(), "the title draws glyphs");
+    // rgba(255, 0, 0, 255): the name's red, not GREY.
+    assert!(
+        title.contains(&0xFF_0000FF),
+        "the title keeps the name's colour: {title:x?}"
+    );
 }
 
 /// `Player.interactOn`: `NameTagItem` shrinks the stack it named with, and a

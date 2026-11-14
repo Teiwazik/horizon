@@ -179,11 +179,7 @@ impl Game<'_> {
     pub(super) fn cushion_spawn(&self, hit: &Hit) -> Option<(Vec3, Aabb)> {
         // CushionItem.recalculateContextForSpecialCollisionShapes: open containers
         // (cauldrons, hoppers and composters) use the collision ray's actual height.
-        let mut adjusted = Hit {
-            pos: hit.pos,
-            face: hit.face,
-            point: hit.point,
-        };
+        let mut adjusted = *hit;
         let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
         if self.items().block_in_tag(
             "minecraft:cushion_uses_collision_shape",

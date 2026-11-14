@@ -9,7 +9,7 @@ use horizon_client::{
     command::{Arg, Context},
     mobs::Species,
     save,
-    scoreboard::{self as sb, Comp, json_to_tag},
+    scoreboard::{self as sb, Comp, canonical_component, json_to_tag},
     scoreboard_cmd::format_list,
     text::Text,
 };
@@ -131,11 +131,12 @@ impl Game<'_> {
     /// `execute store ... bossbar <id> value|max`.
     pub(in crate::game) fn set_bossbar_value(&mut self, id: &str, value: bool, v: i32) {
         if let Some(b) = self.bosses.bars.get_mut(id) {
+            // CustomBossEvent.setValue/setMax store the number verbatim and
+            // clamp only the progress derived from it.
             if value {
-                b.value = v.clamp(0, b.max);
+                b.value = v;
             } else {
-                b.max = v.max(1);
-                b.value = b.value.min(b.max);
+                b.max = v;
             }
         }
         self.publish_boss_bars();
@@ -286,7 +287,8 @@ impl Game<'_> {
             "bossbar.set.name" => {
                 let name = self.component_json(ctx, "name")?;
                 let b = self.bosses.bars.get_mut(bar).expect("checked");
-                if b.name == name {
+                // BossBarCommands.setName: Component.equals, not its JSON spelling.
+                if canonical_component(&b.name) == canonical_component(&name) {
                     return Err(err("commands.bossbar.set.name.unchanged", &[]));
                 }
                 b.name = name;
@@ -839,3 +841,7 @@ mod listing_tests {
         assert_eq!(ids(&state), ["audit:second", "audit:test"]);
     }
 }
+
+#[cfg(test)]
+#[path = "bossbar_store_tests.rs"]
+mod bossbar_store_tests;

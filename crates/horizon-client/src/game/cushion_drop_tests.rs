@@ -69,6 +69,7 @@ fn top_hit() -> Hit {
         pos: [4, 199, 4],
         face: [0, 1, 0],
         point: AT,
+        inside: false,
     }
 }
 

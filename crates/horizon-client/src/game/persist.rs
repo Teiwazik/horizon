@@ -623,7 +623,7 @@ impl Game<'_> {
     }
     /// The kinds `entity_lists!` does not hold: `Err` hands the compound back
     /// when `kind` is not one of them.
-    fn load_unlisted(
+    pub(super) fn load_unlisted(
         &mut self,
         key: ChunkKey,
         kind: &str,
@@ -864,7 +864,12 @@ impl Game<'_> {
     pub(super) fn load_tnt(&mut self, tag: Tag, uuid: Option<[i32; 4]>) {
         self.load_tnt_with_portal(tag, uuid, false);
     }
-    fn load_tnt_with_portal(&mut self, tag: Tag, uuid: Option<[i32; 4]>, used_portal: bool) {
+    pub(super) fn load_tnt_with_portal(
+        &mut self,
+        tag: Tag,
+        uuid: Option<[i32; 4]>,
+        used_portal: bool,
+    ) {
         if uuid.is_some_and(|u| self.target_with_uuid(u).is_some()) {
             return;
         }
@@ -1273,7 +1278,7 @@ impl Game<'_> {
         add_passengers(tag, riders);
     }
     /// An entity of a type Horizon does not simulate, kept as its compound.
-    fn load_other(&mut self, mut tag: Tag, kind: &str) -> Option<u32> {
+    pub(super) fn load_other(&mut self, mut tag: Tag, kind: &str) -> Option<u32> {
         strip_finalize(&mut tag);
         let mut position = entity_nbt::position(&tag)?;
         let item_transformation = (kind == "minecraft:item_display").then(|| {

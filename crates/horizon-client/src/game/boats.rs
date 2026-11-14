@@ -1682,8 +1682,8 @@ impl Game<'_> {
             return true;
         }
         let id = self.boats[i].id;
-        self.yaw = self.boats[i].yaw;
-        // Entity.startRiding (ServerPlayer.startRiding fires the trigger).
+        // Entity.startRiding (ServerPlayer.startRiding fires the trigger): the
+        // teleport is `Relative.ROTATION`, so the rider keeps its view.
         self.start_riding(id);
         true
     }
@@ -1933,6 +1933,10 @@ impl Game<'_> {
             self.view_scale(),
         );
         for b in &self.boats {
+            // LevelExtractor: the camera entity is not drawn from its own eyes.
+            if self.hides_as_camera(b.id) {
+                continue;
+            }
             // EntityRenderer.shouldRender.
             let (previous, position) = (at(b.previous), at(b.position));
             if !self.standing_entity_in_view(

@@ -88,7 +88,7 @@ impl BossBar {
     }
     /// The filled fraction of the bar (`BossEvent.getProgress`).
     pub fn progress(&self) -> f32 {
-        (self.value as f32 / self.max.max(1) as f32).clamp(0.0, 1.0)
+        (self.value as f32 / self.max as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -215,6 +215,27 @@ mod tests {
         assert_eq!(color_rgb("purple"), text::named_color("dark_blue").unwrap());
         b.remove("test:x");
         assert!(b.bars.is_empty());
+    }
+
+    /// `CustomBossEvent.setValue`/`setMax`: the progress is `value / max`
+    /// clamped, divided by the stored max and not by a max raised to one.
+    #[test]
+    fn progress_divides_by_the_stored_max() {
+        let mut bar = BossBar::new("test:x", literal("Hello"));
+        bar.value = 50;
+        bar.max = 10;
+        assert_eq!(bar.progress(), 1.0);
+        bar.max = 100;
+        assert_eq!(bar.progress(), 0.5);
+        // 50 / -5 is negative, so the clamp floors it.
+        bar.max = -5;
+        assert_eq!(bar.progress(), 0.0);
+        // 50 / 0 is infinite, so the clamp caps it.
+        bar.max = 0;
+        assert_eq!(bar.progress(), 1.0);
+        // 0 / 0 is NaN, as Java's `(float)value / max` is.
+        bar.value = 0;
+        assert!(bar.progress().is_nan());
     }
 
     /// `CustomBossEvent.getDisplayName`: `withInsertion(customId)`, so a

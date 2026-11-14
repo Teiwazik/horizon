@@ -66,6 +66,21 @@ fn pick(caps: &wgpu::SurfaceCapabilities, only: Option<&str>) -> Option<Output> 
 pub fn offscreen_output() -> Option<Output> {
     named(std::env::var("HORIZON_HDR_OUTPUT").ok().as_deref())
 }
+/// What an offscreen renderer's display reports: nothing, or for a test of Auto without an
+/// HDR display, the system's HDR as the file `HORIZON_HDR_DISPLAY` names says it now (`on` or
+/// `off`), read at each poll as the system is.
+pub(super) fn offscreen_display() -> super::DisplayReading {
+    let said =
+        std::env::var_os("HORIZON_HDR_DISPLAY").and_then(|file| std::fs::read_to_string(file).ok());
+    super::DisplayReading {
+        luminance: None,
+        hdr: match said.as_deref().map(str::trim) {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        },
+    }
+}
 fn named(name: Option<&str>) -> Option<Output> {
     NAMES
         .into_iter()

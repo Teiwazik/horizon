@@ -576,6 +576,8 @@ impl Game<'_> {
         let no_blocks = no_blocks_in(&self.world, corner(false), corner(true), &host.hub.encoder);
         let allow_flight = host.hub.config.allow_flight;
         let g = &mut host.hub.guests[gi];
+        // `ServerChunkCache.move` after `absSnapTo` of the accepted move.
+        g.release_tickets();
         g.vehicle_good = Some([target.x, target.y, target.z]);
         let rested = std::mem::replace(
             &mut g.vehicle_rests,

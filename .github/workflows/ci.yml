@@ -58,6 +58,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
       # The merge queue merges with merge commits and main moves to the exact commit its merge_group run verified, so
       # that commit's push run would repeat a finished, green verify (~25 runner-minutes, in a queue that builds six
       # groups at once). Only a green merge_group run of this very commit counts; an admin merge never had one, and an
@@ -123,8 +124,12 @@ jobs:
       - name: Test offline research tooling
         if: steps.queued.outputs.tested != 'true'
         run: python -m unittest discover -s tests -v
+  # Not in the merge queue: GitHub's 20 concurrent jobs are what the queue waits for, every pull request passed this
+  # job on its own head, and main's push after the merge still runs clippy (a combination that breaks a lint shows
+  # there). The required `verify` counts a skipped job as passed.
   verify-lint:
     name: verify (format and lint)
+    if: github.event_name != 'merge_group'
     runs-on: >-
       ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' && (vars.SELF_HOSTED_CI == 'all' ||
       github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
@@ -136,6 +141,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
       # The merge queue merges with merge commits and main moves to the exact commit its merge_group run verified, so
       # that commit's push run would repeat a finished, green verify (~25 runner-minutes, in a queue that builds six
       # groups at once). Only a green merge_group run of this very commit counts; an admin merge never had one, and an
@@ -212,13 +218,11 @@ jobs:
           [ "$TESTED" = true ] || cargo +stable fmt --all -- --check
           cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       # The server build (released as horizon-engine): the game without sound or controllers. Its libraries and
-      # binaries, not the tests and examples the first clippy already checked. A pull request runs it only when it
-      # changes a client crate or a manifest (rust_changes.py's server_build); main's pushes and the merge queue always
-      # do, so a change that breaks it alone stops in the queue.
+      # binaries, not the tests and examples the first clippy already checked. Every pull request runs it: the merge
+      # queue no longer runs this job, so a change that breaks only the server build must stop on its own pull request
+      # (a crate below the client can break it without touching one).
       - name: Lint the server build
-        if: >-
-          steps.rust.outputs.required != 'false' &&
-          (github.event_name != 'pull_request' || steps.rust.outputs.server_build != 'false')
+        if: steps.rust.outputs.required != 'false'
         run: cargo +stable clippy -p horizon-client --lib --bins --locked --no-default-features -- -D warnings
       # Only main's passing run records its commit; pull requests restore it and never save it.
       - name: Record the commit this lint cache was checked at
@@ -240,6 +244,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
       # The merge queue merges with merge commits and main moves to the exact commit its merge_group run verified, so
       # that commit's push run would repeat a finished, green verify (~25 runner-minutes, in a queue that builds six
       # groups at once). Only a green merge_group run of this very commit counts; an admin merge never had one, and an
@@ -387,12 +392,13 @@ jobs:
             [ "$result" = success ] || [ "$result" = skipped ] || exit 1
           done
   # The launcher is its own workspace (launcher/Cargo.toml), so verify's cargo runs never build it. A pull request that
-  # changes it or a crate it builds is checked here, and so are the merge queue and main's pushes when their range
-  # changes it: two pull requests can each pass alone and break it together (#2059 and the registry ratings did,
-  # 2026-10-26). The queue's range runs from main to the queued pull requests' head, so it covers every pull request
-  # queued ahead, and two that break the launcher together still run it; a push's range is the commits it added to main.
-  # A range the job cannot read (a push with no earlier commit, or one a force push removed) runs everything.
+  # changes it or a crate it builds is checked here, and so are main's pushes when their range changes it: two pull
+  # requests can each pass alone and break it together (#2059 and the registry ratings did, 2026-10-26), and the push
+  # after their merge shows it. Not in the merge queue, which waits on GitHub's 20 concurrent jobs and does not need
+  # this one (only `verify` is required). A push's range is the commits it added to main; a range the job cannot read
+  # (a push with no earlier commit, or one a force push removed) runs everything.
   launcher:
+    if: github.event_name != 'merge_group'
     runs-on: >-
       ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' && (vars.SELF_HOSTED_CI == 'all' ||
       github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
@@ -404,6 +410,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
       # The merge queue merges with merge commits and main moves to the exact commit its merge_group run verified, so
       # that commit's push run would repeat a finished, green verify (~25 runner-minutes, in a queue that builds six
       # groups at once). Only a green merge_group run of this very commit counts; an admin merge never had one, and an

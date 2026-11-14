@@ -631,6 +631,10 @@ impl Game<'_> {
         // of 1.
         let range = 16.0 * 64.0 * self.view_scale();
         for f in &self.item_frames {
+            // LevelExtractor: the camera entity is not drawn from its own eyes.
+            if self.hides_as_camera(f.id) {
+                continue;
+            }
             let entity_start = out.len();
             self.mark_entity(entity_start, f.kind());
             let map = f.item.as_ref().and_then(super::maps::map_id);

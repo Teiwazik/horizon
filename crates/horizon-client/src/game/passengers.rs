@@ -243,11 +243,14 @@ impl Game<'_> {
                 }
                 if vehicle.species() == horizon_client::mobs::Species::HappyGhast {
                     // EntityType.HAPPY_GHAST: four seats, by the rider's place
-                    // in `getPassengers`.
-                    let seat = self.mobs[..i]
-                        .iter()
-                        .filter(|r| r.extra.mount == Some(v))
-                        .count();
+                    // in `getPassengers`. `Entity.addPassenger` puts a player
+                    // first, so a mob that boards after one sits at index 1.
+                    let player_aboard = vehicle.rider.is_some() || self.riding == Some(v);
+                    let seat = usize::from(player_aboard)
+                        + self.mobs[..i]
+                            .iter()
+                            .filter(|r| r.extra.mount == Some(v))
+                            .count();
                     attach = riders::happy_ghast_attachment(seat);
                 }
                 let (pos, prev) = (vehicle.position, vehicle.previous);

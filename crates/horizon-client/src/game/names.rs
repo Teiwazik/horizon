@@ -11,7 +11,7 @@ use horizon_client::{
     block_entity_render::vertex_light,
     hud::{HudAtlas, HudBatch, HudVertex},
     mesher::Vertex,
-    mobs::Mob,
+    mobs::{Mob, Who},
     mod_api,
     save::uuid_text,
     scoreboard as sb,
@@ -140,9 +140,14 @@ impl Game<'_> {
         m.custom_name = Some(name);
         m.custom_name_text = text;
         m.persistent = true;
+        let at = [m.position.x, m.position.y, m.position.z];
         // itemStack.shrink(1); `Player.interactOn` puts a creative player's
         // count back, which `consume_held` skips for them.
         self.consume_held();
+        // `Mob.interact`: the tag consumed the use, so
+        // `gameEvent(GameEvent.ENTITY_INTERACT, player)` at the mob.
+        let ctx = self.who_context(Some(Who::Player), None);
+        self.post_game_event("minecraft:entity_interact", at, ctx);
         self.swing_arm();
         if let (Some(player), Some(player_name)) =
             (self.lan_acting_uuid, self.lan_acting_name.clone())
@@ -476,17 +481,10 @@ impl Game<'_> {
                 continue;
             }
             let team = self.mob_team(a.id);
-            let invisible = sb::invisible_to(team, viewer, self.spectator(), false);
-            let view = sb::NameView {
-                discrete: false,
-                distance_sqr,
-                invisible_to_viewer: invisible,
-                hud_hidden: self.ui.hide_gui,
-                is_camera: false,
-                is_vehicle: false,
-            };
-            let name_shown =
-                a.custom_name.is_some() && a.name_visible && sb::name_shown(team, viewer, view);
+            // `ArmorStandRenderer.shouldShowName` overrides the living
+            // entity's rule with `isCustomNameVisible` alone: no team
+            // visibility, no F1, no invisibility.
+            let name_shown = a.custom_name.is_some() && a.name_visible;
             let mut visible = name_shown;
             let mut text = None;
             if hooks {

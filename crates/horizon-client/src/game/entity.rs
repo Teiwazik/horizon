@@ -2302,6 +2302,7 @@ mod set_rotation_tests {
             air: 300,
             rotation: [0.0, 0.0],
             following: None,
+            fire_ticks: 0,
         };
         orb.set_rotation([90.0, 10.0]);
         assert_eq!(orb.rotation(), [90.0, 10.0]);

@@ -517,6 +517,7 @@ impl Game<'_> {
             health: 5,
             air: 300,
             following: None,
+            fire_ticks: 0,
         });
         // ServerLevel.addFreshEntity.
         self.native_joins_flush(false, 0);

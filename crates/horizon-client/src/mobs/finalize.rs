@@ -1007,7 +1007,8 @@ pub fn spawn_egg_is_for(egg: &str, kind: &str) -> bool {
 
 /// `SpawnEggItem.spawnOffspringFromSpawnEgg`: the offspring of a spawn egg
 /// used on a mob of the same kind is a baby of that kind: it starts with
-/// the age of a baby and keeps the parent's variant and colour.
+/// the age of a baby and takes the variant and colour it is given (the
+/// parent's, but a mooshroom's colour rolled by `MushroomCow.getOffspringVariant`).
 pub fn spawn_egg_offspring(child: &mut Mob, species: Species, variant: u8, color: u8) {
     set_baby(child, true);
     child.extra.variant = variant;
