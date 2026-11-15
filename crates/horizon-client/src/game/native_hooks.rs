@@ -824,7 +824,7 @@ use super::{
     maps::{NativeMapDecoration, NativeMapInfo},
     native_block_entity_draw::BlockEntityDraw,
     native_configs::{NativeConfig, NativeConfigFile},
-    native_mob_draw::{NativeMobRender, NativePlayerRender},
+    native_mob_draw::{NativeMobRender, NativePlayerPose, NativePlayerRender},
     native_panel_recipes::RecipePage,
     native_reload_listeners::NativeReloadListener,
     native_world_draw::NativeWorldDraw,
@@ -866,7 +866,7 @@ use horizon_client::{
     keybinds,
     lan::menu::Slots,
     merchant::MerchantOffer,
-    mobs::{Damage, Who},
+    mobs::{Damage, Who, anim::BodyPose},
     mod_list::{self, Installed, NativePage},
     music::{Music, MusicLayer},
     particles::{ParticleOptions, ParticleType},
@@ -3495,6 +3495,32 @@ impl Game<'_> {
         draw: &mut BlockEntityDraw,
     ) {
         mod_api::dispatch_mob_layer(self, mod_api::mods(), mob, who, draw);
+    }
+    /// Whether a mod listens to `native_player_pose`: a mod that hooks it
+    /// hooks this one too and sets `listened` (HEAD, `*listened = true`).
+    /// Without it no player is asked, each tick. Client-side.
+    /// API @API:player_pose@.
+    pub(super) fn native_player_pose_listened(&self, listened: &mut bool) {
+        mod_api::dispatch_player_pose_listened(self, mod_api::mods(), listened);
+    }
+    /// Pose the player `player`'s body on this client: once a client tick
+    /// for this window's player and every other player in the level, `pose`
+    /// is what is laid over it now (None at first); set, keep or clear it.
+    /// The pose's `BodyPose::pose` is asked every time the model is posed,
+    /// each frame, with the model's age and partial tick, `at_rest` and the
+    /// parts as vanilla's `setupAnim` and Horizon's emote left them
+    /// (`BODY_PARTS`: head, body, arms, legs; x, y, z in model pixels,
+    /// x/y/z rotation in radians, x/y/z scale): add to them to blend, write
+    /// them to override. The cape, armour, held items and the other layers
+    /// follow the parts. Visual and on this client only; the first-person
+    /// hand and a mannequin are not posed. Client-side.
+    /// API @API:player_pose@.
+    pub(super) fn native_player_pose(
+        &self,
+        player: &NativePlayerPose<'_>,
+        pose: &mut Option<Arc<dyn BodyPose>>,
+    ) {
+        mod_api::dispatch_player_pose(self, mod_api::mods(), player, pose);
     }
     /// Icons a mod puts on map `map` each time it is drawn: held, in an
     /// item frame or on the cartography table's screen (a map's pixels are

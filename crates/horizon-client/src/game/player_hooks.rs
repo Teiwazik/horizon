@@ -526,13 +526,14 @@ impl Game<'_> {
         self.cosmetics_frame();
     }
 
-    /// Once a client tick in a world: the player's own emote, then the hooks.
+    /// Once a client tick in a world: the player's own emote, the mods' poses, then the hooks.
     pub(super) fn client_hooks_tick(&mut self) {
         debug_assert!(
             self.serving.is_none(),
             "a server thread calls no client hook"
         );
         self.tick_emotes();
+        self.tick_mod_poses();
         if !engine::any() {
             return;
         }

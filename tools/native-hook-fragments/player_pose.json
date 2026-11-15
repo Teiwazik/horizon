@@ -1,0 +1,20 @@
+{
+  "hooks": [
+    {
+      "name": "player_pose",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_player_pose",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {"contract": "collect", "out": "pose"}
+    },
+    {
+      "name": "player_pose_listened",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_player_pose_listened",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {"contract": "collect", "out": "listened"}
+    }
+  ],
+  "rust_summary": "a player's body posed by a mod over its vanilla animation, each part's rotation, position and scale, with the cape, armour and held items following (`native_player_pose`, told while a mod sets `native_player_pose_listened`).",
+  "doc_summary": "a player's body posed by a mod (`native_player_pose`, `native_player_pose_listened`). Bundles need \"hooks\": @API:player_pose@."
+}

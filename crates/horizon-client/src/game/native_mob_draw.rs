@@ -90,6 +90,22 @@ pub struct NativePlayerRender<'a> {
     pub local: bool,
 }
 
+/// Which player `native_player_pose` asks about, once a tick.
+// Native mods read it; nothing in Horizon does.
+#[derive(Clone, Copy, Debug)]
+pub struct NativePlayerPose<'a> {
+    /// Its entity id on this connection, as the mob helpers name it.
+    pub id: u32,
+    /// The player's profile UUID, when the server sent it (this window's: its profile).
+    pub uuid: Option<u128>,
+    /// The player's profile name.
+    pub name: &'a str,
+    /// Whether it is the player of this window (seen in third person).
+    pub local: bool,
+    /// Its age in ticks: a pose's `age` is this plus the frame's partial tick.
+    pub age: u32,
+}
+
 /// The pose a mod's mob model starts from: at the feet, `at` (relative to the
 /// camera), turned with the body so +z is the way it faces, +x its left and +y
 /// up, in blocks.
@@ -98,6 +114,51 @@ pub(super) fn mob_pose(at: DVec3, body_yaw: f32) -> Mat4 {
 }
 
 impl Game<'_> {
+    /// `native_player_pose` for this window's player and every other player in the level, once a
+    /// tick, while a mod listens: what the mods leave in `pose` is laid over the player's body.
+    pub(super) fn tick_mod_poses(&mut self) {
+        let mut listened = false;
+        self.native_player_pose_listened(&mut listened);
+        if !listened {
+            return;
+        }
+        if let Some(own) = &self.player_model {
+            let mut pose = own.mod_pose.clone();
+            let name = self.own_profile_name();
+            let player = NativePlayerPose {
+                id: own.id,
+                uuid: self.remote.as_ref().map(|r| r.profile()),
+                name: &name,
+                local: true,
+                age: own.age,
+            };
+            self.native_player_pose(&player, &mut pose);
+            if let Some(own) = &mut self.player_model {
+                own.mod_pose = pose;
+            }
+        }
+        let players: Vec<usize> = (self.mobs.iter().enumerate())
+            .filter(|(_, m)| &*m.kind.id == "minecraft:player")
+            .map(|(i, _)| i)
+            .collect();
+        for i in players {
+            let m = &self.mobs[i];
+            let (id, age) = (m.id, m.age);
+            let Some(uuid) = self.remote_player_uuid(id) else {
+                continue;
+            };
+            let mut pose = m.mod_pose.clone();
+            let player = NativePlayerPose {
+                id,
+                uuid: Some(uuid),
+                name: self.remote_player_name(id).unwrap_or_default(),
+                local: false,
+                age,
+            };
+            self.native_player_pose(&player, &mut pose);
+            self.mobs[i].mod_pose = pose;
+        }
+    }
     /// `native_mob_submit` for `mob`, lit by `light` (packed as the entity
     /// pass packs it): true when a mod drew it, and its vanilla model, armour
     /// and held items are left out. The name tag, shadow, fire and a glowing

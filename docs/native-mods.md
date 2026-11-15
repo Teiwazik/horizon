@@ -4532,6 +4532,50 @@ items are left out (NeoForge's `RenderLivingEvent.Pre`, cancelled); its name tag
   host.draw_model_part(draw, &model, "mymod:entity/golem", 0xFFFFFF);
   ```
 
+### Player poses
+
+`crates/horizon-client/src/game/native_mob_draw.rs`: `native_player_pose(player, pose)` (client) lets a mod pose a player's
+vanilla body over its animation: emotes, a custom player model's motion, a VR player's tracked head and hands. Hook
+`native_player_pose_listened` too and set `listened`; without it no player is asked.
+
+- It is asked once a client tick for this window's player and every other player in the level. `player`
+  (`NativePlayerPose`) has the entity `id`, the profile `uuid` and `name`, `local` for this window's player, and `age`
+  in ticks. `pose` is what is laid over the body now (None at first): set it, keep it or clear it. Mods are asked in
+  order, each seeing what the one before left.
+- The pose is a `BodyPose` (`horizon_client::mod_api::{BodyPose, BODY_PARTS}`). Its `pose(age, at_rest, poses)` is
+  asked each time the model is posed, every frame, with `age` the model's ticks plus the partial tick. `poses` holds the
+  six `BODY_PARTS` (head, body, right arm, left arm, right leg, left leg) as vanilla's `setupAnim` and Horizon's emote
+  left them, and `at_rest` the same parts before any animation. Each part is x, y, z in model pixels, x/y/z rotation
+  in radians and x/y/z scale. Add to a part to blend with the walk cycle; write it to override. Return false to pose
+  nothing this frame.
+- The cape, armour, held items, ears and other layers follow the parts, as they follow vanilla's animation. Move the
+  whole body by moving all six parts. A part the model lacks is ignored.
+- Visual, on this client only: it changes no hitbox and sends nothing. The first-person hand, the name tag, the shadow
+  and mannequins are not posed. To show other players the same emote, send it with mod messages and pose them on each
+  client.
+- Keep shared state behind the pose (an `Arc<Mutex<_>>` a mod updates from its tick or its VR input) to change it
+  between ticks without setting a new one.
+
+```rust
+#[derive(Debug)]
+struct Wave;
+impl BodyPose for Wave {
+    fn pose(&self, age: f32, _: &[[f32; 9]; 6], poses: &mut [[f32; 9]; 6]) -> bool {
+        poses[2][3] = -2.8; // the right arm up
+        poses[2][5] = 0.4 * (age * 0.5).sin(); // waving side to side
+        true
+    }
+}
+fn player_pose_listened(&self, _: &dyn Host, event: &mut PlayerPoseListenedEvent) {
+    event.listened = true;
+}
+fn player_pose(&self, _: &dyn Host, event: &mut PlayerPoseEvent<'_, '_>) {
+    if event.player.local && event.pose.is_none() {
+        *event.pose = Some(Arc::new(Wave));
+    }
+}
+```
+
 ### Advancement triggers
 
 `crates/horizon-client/src/game/native_criteria.rs`: a mod's own criteria triggers, as a NeoForge mod registers a

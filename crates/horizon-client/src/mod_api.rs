@@ -41,9 +41,9 @@ pub use crate::game::{
     NativeColumnBlocks, NativeComponentError, NativeConfig, NativeConfigFile, NativeConfigKind,
     NativeCriterion, NativeDataMapType, NativeExperienceOrb, NativeFalling, NativeHeightmap,
     NativeHeldItem, NativeHit, NativeItemEntity, NativeMapDecoration, NativeMapInfo,
-    NativeMobRender, NativeModEvent, NativePlayer, NativePlayerRender, NativeReloadListener,
-    NativeShake, NativeStructureBlock, NativeStructureTemplate, NativeTerrainColumn,
-    NativeWorldDraw,
+    NativeMobRender, NativeModEvent, NativePlayer, NativePlayerPose, NativePlayerRender,
+    NativeReloadListener, NativeShake, NativeStructureBlock, NativeStructureTemplate,
+    NativeTerrainColumn, NativeWorldDraw,
 };
 pub use crate::gamerules::Value as GameRuleValue;
 /// What a mod asks of the terrain's picture each frame (`native_world_hold`). API 414.
@@ -58,6 +58,8 @@ pub use crate::item_data::StackData;
 pub use crate::items::ItemStack;
 pub use crate::merchant::MerchantOffer;
 pub use crate::mesher::TintSource;
+/// A pose a mod lays over a player's body (`native_player_pose`), and the parts it poses.
+pub use crate::mobs::anim::{BODY_PARTS, BodyPose};
 pub use crate::mobs::goals::{Cx, Goal, GoalSelector};
 pub use crate::mobs::model_layers::{
     CubeDefinition, CubeDeformation, CubeListBuilder, LayerDefinition, MeshDefinition, ModelPart,

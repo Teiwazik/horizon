@@ -780,19 +780,22 @@ fn swim(p: &mut Poses, pos: f32, h: &Hum) {
 /// the hook's own types (`horizon_hooks::players`), kept here under their old path.
 pub use horizon_hooks::players::{BODY_PARTS, BodyPose};
 
-/// Apply the mob's model animation to `p` (at rest), then the pose laid over it, if any.
+/// Apply the mob's model animation to `p` (at rest), then the poses laid over it: the emote's,
+/// then a native mod's (`Mob::mod_pose`), which sees what the emote did.
 pub fn setup(
     m: &Mob,
     s: &State,
     p: &mut Poses,
     w_anims: &HashMap<String, super::keyframes::Animation>,
 ) {
-    let Some(over) = &m.emote else {
+    if m.emote.is_none() && m.mod_pose.is_none() {
         return vanilla_setup(m, s, p, w_anims);
-    };
+    }
     let rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
     vanilla_setup(m, s, p, w_anims);
-    body_pose(&**over, s.age, rest, p);
+    for over in [&m.emote, &m.mod_pose].into_iter().flatten() {
+        body_pose(&**over, s.age, rest, p);
+    }
 }
 
 /// Poses the parts `rest` names (those the model has; at rest) as `over` has them at `age`.
@@ -1199,6 +1202,55 @@ mod body_pose_tests {
         body_pose(&raise, 30.0, at_rest, &mut p);
         assert_eq!(p.version(), version);
         assert_eq!(p.get("right_arm")[5], 1.5);
+    }
+
+    /// Turns the right arm by its angle about x, on top of what it is given.
+    #[derive(Debug)]
+    struct Turn(f32);
+    impl BodyPose for Turn {
+        fn pose(&self, _: f32, _: &[[f32; 9]; 6], poses: &mut [[f32; 9]; 6]) -> bool {
+            poses[2][3] += self.0;
+            true
+        }
+    }
+
+    #[test]
+    fn a_mod_pose_is_laid_over_the_emote() {
+        let mut kind = crate::mobs::sensor_scan_tests::kind();
+        std::sync::Arc::make_mut(&mut kind).anim = Anim::Humanoid { zombie_arms: false };
+        let mut m = Mob::new(1, kind, horizon_core::geometry::Vec3::ZERO, 0.0);
+        let state = State {
+            pos: 0.0,
+            speed: 0.0,
+            age: 0.0,
+            y_rot: 0.0,
+            x_rot: 0.0,
+            swing: 0.0,
+            baby: false,
+            partial: 0.0,
+        };
+        let arm = |m: &Mob| {
+            let mut p = Poses {
+                map: ["head", "body", "right_arm", "left_arm"]
+                    .into_iter()
+                    .map(|n| (key(n), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]))
+                    .collect(),
+                dummy: [0.0; 9],
+                skipped: Default::default(),
+                hidden: Default::default(),
+                version: 0,
+            };
+            setup(m, &state, &mut p, &HashMap::new());
+            p.get("right_arm")[3]
+        };
+        let vanilla = arm(&m);
+        m.mod_pose = Some(std::sync::Arc::new(Turn(0.5)));
+        assert!((arm(&m) - vanilla - 0.5).abs() < 1e-6);
+        // The mod's pose comes after the emote's and sees it.
+        m.emote = Some(std::sync::Arc::new(Turn(1.0)));
+        assert!((arm(&m) - vanilla - 1.5).abs() < 1e-6);
+        m.mod_pose = None;
+        assert!((arm(&m) - vanilla - 1.0).abs() < 1e-6);
     }
 }
 
