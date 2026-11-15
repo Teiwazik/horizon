@@ -3149,6 +3149,8 @@ struct Game<'a> {
     fangs: fangs::FangState,
     /// The local player as a model (third person, the inventory).
     player_model: Option<Mob>,
+    /// The poses native mods keep on players (`native_player_pose`).
+    mod_poses: native_mob_draw::ModPoses,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Dim {
@@ -11906,6 +11908,7 @@ impl<'a> Game<'a> {
             camera_type: Default::default(),
             fangs: Default::default(),
             player_model: None,
+            mod_poses: Default::default(),
         };
         if game.native_window() {
             game.native_client_start();

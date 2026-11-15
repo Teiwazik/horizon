@@ -13,8 +13,9 @@ use glam::{DVec3, Mat4};
 use horizon_client::{
     block_entity_render::diffuse_lights,
     mesher::Vertex,
-    mobs::{Mob, anim},
+    mobs::{Mob, anim, anim::BodyPose},
 };
+use std::{collections::HashMap, sync::Arc};
 
 /// One mob's frame, as `EntityRenderer.extractRenderState` fills a
 /// `LivingEntityRenderState`: what a model reads to pose and animate itself.
@@ -98,12 +99,48 @@ pub struct NativePlayerPose<'a> {
     pub id: u32,
     /// The player's profile UUID, when the server sent it (this window's: its profile).
     pub uuid: Option<u128>,
-    /// The player's profile name.
-    pub name: &'a str,
+    /// The player's profile name, when this client knows it.
+    pub name: Option<&'a str>,
     /// Whether it is the player of this window (seen in third person).
     pub local: bool,
     /// Its age in ticks: a pose's `age` is this plus the frame's partial tick.
     pub age: u32,
+}
+
+/// The poses mods keep on players (`native_player_pose`): each stays on its player, through a
+/// respawn or a trip out of view, until a mod sets None.
+#[derive(Debug, Default)]
+pub(super) struct ModPoses {
+    /// This window's player's.
+    own: Option<Arc<dyn BodyPose>>,
+    /// The other players', by profile UUID.
+    players: HashMap<u128, Arc<dyn BodyPose>>,
+}
+
+impl ModPoses {
+    /// Lets `ask` set, keep or clear the pose kept for `player` (None: this window's player),
+    /// starting from it, and keeps what it leaves; returns that.
+    fn ask(
+        &mut self,
+        player: Option<u128>,
+        ask: impl FnOnce(&mut Option<Arc<dyn BodyPose>>),
+    ) -> Option<Arc<dyn BodyPose>> {
+        let mut pose = match player {
+            None => self.own.clone(),
+            Some(uuid) => self.players.get(&uuid).cloned(),
+        };
+        ask(&mut pose);
+        match (player, &pose) {
+            (None, _) => self.own.clone_from(&pose),
+            (Some(uuid), Some(kept)) => {
+                self.players.insert(uuid, kept.clone());
+            }
+            (Some(uuid), None) => {
+                self.players.remove(&uuid);
+            }
+        }
+        pose
+    }
 }
 
 /// The pose a mod's mob model starts from: at the feet, `at` (relative to the
@@ -115,24 +152,26 @@ pub(super) fn mob_pose(at: DVec3, body_yaw: f32) -> Mat4 {
 
 impl Game<'_> {
     /// `native_player_pose` for this window's player and every other player in the level, once a
-    /// tick, while a mod listens: what the mods leave in `pose` is laid over the player's body.
+    /// tick, while a mod listens: what the mods leave in `pose` is laid over the player's body and
+    /// kept for that player until a mod clears it.
     pub(super) fn tick_mod_poses(&mut self) {
         let mut listened = false;
         self.native_player_pose_listened(&mut listened);
         if !listened {
             return;
         }
-        if let Some(own) = &self.player_model {
-            let mut pose = own.mod_pose.clone();
+        // The dispatch borrows the game; the kept poses are no mod's to see.
+        let mut kept = std::mem::take(&mut self.mod_poses);
+        if let Some(age) = self.player_model.as_ref().map(|own| own.age) {
             let name = self.own_profile_name();
             let player = NativePlayerPose {
-                id: own.id,
+                id: self.own_entity_id() as u32,
                 uuid: self.remote.as_ref().map(|r| r.profile()),
-                name: &name,
+                name: Some(&name),
                 local: true,
-                age: own.age,
+                age,
             };
-            self.native_player_pose(&player, &mut pose);
+            let pose = kept.ask(None, |pose| self.native_player_pose(&player, pose));
             if let Some(own) = &mut self.player_model {
                 own.mod_pose = pose;
             }
@@ -142,22 +181,21 @@ impl Game<'_> {
             .map(|(i, _)| i)
             .collect();
         for i in players {
-            let m = &self.mobs[i];
-            let (id, age) = (m.id, m.age);
+            let (id, age) = (self.mobs[i].id, self.mobs[i].age);
             let Some(uuid) = self.remote_player_uuid(id) else {
                 continue;
             };
-            let mut pose = m.mod_pose.clone();
             let player = NativePlayerPose {
                 id,
                 uuid: Some(uuid),
-                name: self.remote_player_name(id).unwrap_or_default(),
+                name: self.remote_player_name(id),
                 local: false,
                 age,
             };
-            self.native_player_pose(&player, &mut pose);
+            let pose = kept.ask(Some(uuid), |pose| self.native_player_pose(&player, pose));
             self.mobs[i].mod_pose = pose;
         }
+        self.mod_poses = kept;
     }
     /// `native_mob_submit` for `mob`, lit by `light` (packed as the entity
     /// pass packs it): true when a mod drew it, and its vanilla model, armour
@@ -287,5 +325,34 @@ mod tests {
         let at = DVec3::new(3.0, -1.5, 0.25);
         let pose = mob_pose(at, 37.0);
         assert!(close(pose.transform_point3(Vec3::ZERO), at.as_vec3()));
+    }
+
+    #[derive(Debug)]
+    struct Still;
+    impl BodyPose for Still {
+        fn pose(&self, _: f32, _: &[[f32; 9]; 6], _: &mut [[f32; 9]; 6]) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_mod_pose_stays_on_its_player_until_a_mod_clears_it() {
+        let mut kept = ModPoses::default();
+        let set: Arc<dyn BodyPose> = Arc::new(Still);
+        assert!(kept.ask(Some(7), |p| *p = Some(set.clone())).is_some());
+        assert!(kept.ask(None, |p| *p = Some(set.clone())).is_some());
+        // A tick in which no mod updates it keeps it, as a new entity for the same player would.
+        for _ in 0..3 {
+            let pose = kept.ask(Some(7), |p| assert!(p.is_some()));
+            assert!(pose.is_some_and(|p| Arc::ptr_eq(&p, &set)));
+            assert!(kept.ask(None, |_| {}).is_some());
+        }
+        // Another player starts with none.
+        assert!(kept.ask(Some(8), |p| assert!(p.is_none())).is_none());
+        // Cleared, it is gone, and stays gone.
+        assert!(kept.ask(Some(7), |p| *p = None).is_none());
+        assert!(kept.ask(Some(7), |_| {}).is_none());
+        assert!(kept.ask(None, |p| *p = None).is_none());
+        assert!(kept.ask(None, |_| {}).is_none());
     }
 }

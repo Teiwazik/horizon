@@ -3506,6 +3506,8 @@ impl Game<'_> {
     /// Pose the player `player`'s body on this client: once a client tick
     /// for this window's player and every other player in the level, `pose`
     /// is what is laid over it now (None at first); set, keep or clear it.
+    /// A pose stays on its player, ticks no mod changes it included, until a
+    /// mod sets None.
     /// The pose's `BodyPose::pose` is asked every time the model is posed,
     /// each frame, with the model's age and partial tick, `at_rest` and the
     /// parts as vanilla's `setupAnim` and Horizon's emote left them
@@ -3513,7 +3515,7 @@ impl Game<'_> {
     /// x/y/z rotation in radians, x/y/z scale): add to them to blend, write
     /// them to override. The cape, armour, held items and the other layers
     /// follow the parts. Visual and on this client only; the first-person
-    /// hand and a mannequin are not posed. Client-side.
+    /// hand, mannequins and armor stands are not posed. Client-side.
     /// API @API:player_pose@.
     pub(super) fn native_player_pose(
         &self,

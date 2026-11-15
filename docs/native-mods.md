@@ -4539,9 +4539,14 @@ vanilla body over its animation: emotes, a custom player model's motion, a VR pl
 `native_player_pose_listened` too and set `listened`; without it no player is asked.
 
 - It is asked once a client tick for this window's player and every other player in the level. `player`
-  (`NativePlayerPose`) has the entity `id`, the profile `uuid` and `name`, `local` for this window's player, and `age`
-  in ticks. `pose` is what is laid over the body now (None at first): set it, keep it or clear it. Mods are asked in
-  order, each seeing what the one before left.
+  (`NativePlayerPose`) has the entity `id`, the profile `uuid` and `name` (None when this client doesn't know them),
+  `local` for this window's player, and `age` in ticks. `pose` is what is laid over the body now (None at first): set
+  it, keep it or clear it. Mods are asked in order, each seeing what the one before left.
+- A pose is sticky: it stays on its player until a mod sets `pose` to None. A tick in which no mod touches it keeps it,
+  and so do a respawn and the player leaving view and coming back (other players' poses are kept by profile UUID).
+  The event still comes every tick, to change the pose or to clear it.
+- The pose goes after Horizon's emote (docs/cosmetics.md): vanilla's animation, then the emote, then the mod's. A
+  player with no mod pose is posed as before.
 - The pose is a `BodyPose` (`horizon_client::mod_api::{BodyPose, BODY_PARTS}`). Its `pose(age, at_rest, poses)` is
   asked each time the model is posed, every frame, with `age` the model's ticks plus the partial tick. `poses` holds the
   six `BODY_PARTS` (head, body, right arm, left arm, right leg, left leg) as vanilla's `setupAnim` and Horizon's emote
@@ -4550,9 +4555,9 @@ vanilla body over its animation: emotes, a custom player model's motion, a VR pl
   nothing this frame.
 - The cape, armour, held items, ears and other layers follow the parts, as they follow vanilla's animation. Move the
   whole body by moving all six parts. A part the model lacks is ignored.
-- Visual, on this client only: it changes no hitbox and sends nothing. The first-person hand, the name tag, the shadow
-  and mannequins are not posed. To show other players the same emote, send it with mod messages and pose them on each
-  client.
+- Visual, on this client only: it changes no hitbox and sends nothing. The first-person hand, the name tag and the
+  shadow are not posed. Mannequins and armor stands are not covered by this hook. To show other players the same
+  emote, send it with mod messages and pose them on each client.
 - Keep shared state behind the pose (an `Arc<Mutex<_>>` a mod updates from its tick or its VR input) to change it
   between ticks without setting a new one.
 
