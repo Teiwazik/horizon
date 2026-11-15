@@ -15,8 +15,10 @@ use std::sync::{
 /// the game's build checks that the file is current.
 mod generated;
 pub use generated::{
-    HandDrawnEvent, RenderHooks, RenderNeedsEvent, WorldDrawnEvent, WorldWarpEvent,
+    HandDrawnEvent, RenderHooks, RenderNeedsEvent, VulkanDeviceEvent, WorldDrawnEvent,
+    WorldWarpEvent,
 };
+pub use horizon_hdr::vulkan::{self, VulkanRequest};
 pub use wgpu;
 
 static RENDERERS: OnceLock<Box<[&'static dyn RenderHooks]>> = OnceLock::new();
@@ -210,6 +212,22 @@ pub fn world_warp() -> WorldWarp {
     let mut warp = WorldWarp::default();
     native_world_warp(&mut warp);
     warp
+}
+
+/// Asked once, before the Vulkan instance and device are created (not on other backends): add
+/// the instance and device extensions and features your mod needs to [`VulkanRequest`]. Each one
+/// is enabled only where the driver offers it, and a missing one is no error: read what was
+/// enabled from `vulkan::granted()`, and the device's raw handles from `vulkan::handles(device)`.
+#[inline(never)]
+pub fn native_vulkan_device(request: &mut VulkanRequest) {
+    generated::dispatch_vulkan_device(RENDERERS.get().map_or(&[], |renderers| renderers), request);
+}
+
+/// What the mods ask of Vulkan ([`native_vulkan_device`]).
+pub fn vulkan_request() -> VulkanRequest {
+    let mut request = VulkanRequest::default();
+    native_vulkan_device(&mut request);
+    request
 }
 
 #[cfg(test)]
@@ -450,5 +468,26 @@ mod tests {
                 entity_spans: true
             }
         );
+    }
+
+    struct AskExtension(&'static std::ffi::CStr);
+    impl RenderHooks for AskExtension {
+        fn vulkan_device(&self, event: &mut VulkanDeviceEvent<'_>) {
+            event.request.device_extensions.push(self.0);
+            event.request.present_id = true;
+        }
+    }
+
+    #[test]
+    fn vulkan_requests_gather_every_mod_in_order() {
+        let mut request = VulkanRequest::default();
+        generated::dispatch_vulkan_device(&[], &mut request);
+        assert!(request.is_empty(), "no mod asks for nothing");
+
+        let a = AskExtension(c"VK_KHR_a");
+        let b = AskExtension(c"VK_KHR_b");
+        generated::dispatch_vulkan_device(&[&a, &b], &mut request);
+        assert_eq!(request.device_extensions, [c"VK_KHR_a", c"VK_KHR_b"]);
+        assert!(request.present_id && !request.is_empty());
     }
 }

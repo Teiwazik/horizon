@@ -130,6 +130,7 @@ pub(super) async fn open_adapter(
     surface: Option<&wgpu::Surface<'static>>,
     adapter: &wgpu::Adapter,
     needs: DeviceNeeds,
+    vulkan: &horizon_hdr::vulkan::VulkanRequest,
 ) -> std::result::Result<Adapted, AdapterFailure> {
     let caps = surface.map(|surface| surface.get_capabilities(adapter));
     if caps.as_ref().is_some_and(|caps| caps.formats.is_empty()) {
@@ -190,13 +191,9 @@ pub(super) async fn open_adapter(
         experimental_features: ray_query::experimental(features),
         ..Default::default()
     };
-    #[cfg(not(target_os = "macos"))]
-    let opened = match info.backend {
-        wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(adapter, &desc),
-        _ => None,
-    };
-    #[cfg(target_os = "macos")]
-    let opened = None;
+    // Vulkan opens with what the mods asked for (`native_vulkan_device`), where offered;
+    // with nothing asked, as before. Other backends: `None`, wgpu opens it.
+    let opened = horizon_hdr::vulkan::open_device(adapter, &desc, vulkan);
     let opened = match opened {
         Some(opened) => opened,
         None => adapter.request_device(&desc).await,

@@ -1,0 +1,16 @@
+{
+  "hooks": [
+    {
+      "name": "vulkan_device",
+      "target": "horizon_client_render::gfx::native_render::native_vulkan_device",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "collect",
+        "out": "request"
+      }
+    }
+  ],
+  "rust_summary": "Vulkan extensions and features asked before the device opens (`native_vulkan_device`), and the device's raw Vulkan handles (`vulkan::handles`, `vulkan::image`).",
+  "doc_summary": "Vulkan extensions and features through `native_vulkan_device`: asked once before the Vulkan instance and device\nare created, each enabled only where the driver offers it (a missing one is no error), with the device's raw handles\nand a texture's image, view and format read back through `vulkan` ([Vulkan device](#vulkan-device)). Bundles need\n`\"hooks\": @API:vulkan_device@`."
+}

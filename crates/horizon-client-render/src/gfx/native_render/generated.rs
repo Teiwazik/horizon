@@ -24,6 +24,15 @@ pub trait RenderHooks: Send + Sync {
     fn world_warp(&self, event: &mut WorldWarpEvent<'_>) {
         let _ = event;
     }
+    /// Asked once, before the Vulkan instance and device are created (not on other backends): add
+    /// the instance and device extensions and features your mod needs to [`VulkanRequest`]. Each one
+    /// is enabled only where the driver offers it, and a missing one is no error: read what was
+    /// enabled from `vulkan::granted()`, and the device's raw handles from `vulkan::handles(device)`.
+    ///
+    /// Every mod gets `event.request` in order and may add, change or remove request.
+    fn vulkan_device(&self, event: &mut VulkanDeviceEvent<'_>) {
+        let _ = event;
+    }
 }
 /// What [`RenderHooks::world_drawn`] is told. Fields may be added: the struct is `#[non_exhaustive]`.
 #[non_exhaustive]
@@ -67,5 +76,16 @@ pub fn dispatch_world_warp(mods: &[&dyn RenderHooks], warp: &mut WorldWarp) {
     let mut event = WorldWarpEvent { warp };
     for mod_hook in mods {
         mod_hook.world_warp(&mut event);
+    }
+}
+/// What [`RenderHooks::vulkan_device`] is told. Fields may be added: the struct is `#[non_exhaustive]`.
+#[non_exhaustive]
+pub struct VulkanDeviceEvent<'a> {
+    pub request: &'a mut VulkanRequest,
+}
+pub fn dispatch_vulkan_device(mods: &[&dyn RenderHooks], request: &mut VulkanRequest) {
+    let mut event = VulkanDeviceEvent { request };
+    for mod_hook in mods {
+        mod_hook.vulkan_device(&mut event);
     }
 }

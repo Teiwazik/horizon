@@ -2403,13 +2403,14 @@ async fn open_backend(
     allow_cpu: bool,
 ) -> std::result::Result<Opened, NoDevice> {
     let name = backends_name(backends);
+    // What native mods ask of Vulkan: nothing without one, and the instance and device
+    // open as wgpu opens them.
+    let vulkan = native_render::vulkan_request();
     let open = |dx12_compiler| {
-        wgpu::Instance::new(instance_descriptor(
-            backends,
-            Some(window),
-            allow_nonconformant,
-            dx12_compiler,
-        ))
+        let descriptor =
+            instance_descriptor(backends, Some(window), allow_nonconformant, dx12_compiler);
+        horizon_hdr::vulkan::create_instance(&descriptor, &vulkan.instance_extensions)
+            .unwrap_or_else(|| wgpu::Instance::new(descriptor))
     };
     let instance = open(wgpu::Dx12Compiler::Fxc);
     let (surface, adapter) = match surface_and_adapter(&instance, window, offscreen).await {
@@ -2452,7 +2453,8 @@ async fn open_backend(
     let mut tried = Vec::new();
     let mut adapter = adapter;
     loop {
-        let why = match open_adapter(name, window, surface.as_ref(), &adapter, needs).await {
+        let why = match open_adapter(name, window, surface.as_ref(), &adapter, needs, &vulkan).await
+        {
             Ok(adapted) => {
                 return Ok(Opened {
                     instance,

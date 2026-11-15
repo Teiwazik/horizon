@@ -1777,6 +1777,8 @@ name = "horizon-hdr"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "log",
+ "pollster",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

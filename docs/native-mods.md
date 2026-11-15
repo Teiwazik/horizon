@@ -5204,6 +5204,9 @@ render thread with the frame's wgpu objects; what a mod draws there shows in tha
 - `native_world_warp(warp)`: give the frame a [world warp](#world-warps), WGSL every terrain and entity vertex goes
   through. Asked once a frame before the world is drawn (not on the title screen's panorama); the last mod to set
   one draws.
+- `native_vulkan_device(request)`: add the [Vulkan](#vulkan-device) instance and device extensions and features your
+  mod needs. Asked once, before the instance and the device are created, and only on Vulkan; each one is enabled only
+  where the driver offers it.
 
 ### World warps
 
@@ -5263,6 +5266,34 @@ and nothing of the warp's is made until a mod gives one.
 
 `cargo run -p horizon-client-render --example world_warp_check -- <dir>` (with throwaway `HORIZON_HOME`,
 `HORIZON_LAUNCHER_HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`) draws a warp through the renderer offscreen.
+
+### Vulkan device
+
+A mod that drives Vulkan itself (an upscaler, a latency layer, an interop with another API) needs extensions the game
+doesn't enable, and the raw objects of the game's device. Add what you need to `VulkanRequest` in
+`native_vulkan_device`; the game asks it once, before it creates the Vulkan instance and device:
+
+- `instance_extensions`, `device_extensions`: names such as `c"VK_KHR_push_descriptor"`. Push them; leave the others'.
+- `timeline_semaphore`: wgpu turns timeline semaphores on wherever the GPU has them; asking only reports it.
+- `present_id`: `VK_KHR_present_id` with its `presentId` feature on.
+
+Each is enabled only where the driver offers it. A missing one is no error: it's logged ("Vulkan device extension
+"X" asked by a mod is not offered here") and left out, and the game starts as it would without it. Read what was
+enabled from `vulkan::granted()` once the renderer is up. With no mod asking, the instance and device open exactly as
+they do without mods, and on other backends (DirectX 12, Metal, OpenGL) nothing is asked and every `vulkan` call
+returns `None`.
+
+The raw objects come from `vulkan`, which keeps the unsafe code in the game:
+
+- `vulkan::handles(&device)`: `VkInstance`, `VkPhysicalDevice`, `VkDevice`, the queue, its family and index,
+  `vkGetInstanceProcAddr` and the device's enabled extensions, as Vulkan handle values. Load the functions you call
+  through `get_instance_proc_addr`.
+- `vulkan::image(&texture)`: the `VkImage` and `VkFormat` of a `wgpu::Texture`; `vulkan::view(&view)` a
+  `VkImageView`; `vulkan::format(format)` the `VkFormat` a `wgpu::TextureFormat` is created with.
+
+The game owns all of them: never destroy one, and use them only while the `wgpu::Device` or texture lives. Submit to
+the queue only on the render thread, from a render hook: Vulkan queues need external
+synchronisation, and the game submits there too.
 
 ### World primitives
 
