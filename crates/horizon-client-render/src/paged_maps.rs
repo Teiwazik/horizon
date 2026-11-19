@@ -52,7 +52,9 @@ fn build_one<'a>(
     let mut table = vec![0u32; (pages_x * pages_y) as usize];
     let mut pool: Vec<Vec<u8>> = Vec::new();
     let blank: Vec<u8> = default.repeat((PAGE * PAGE) as usize);
+    let mut mapped_sprites = 0_u32;
     for ([x, y, w, h], map) in sprites {
+        mapped_sprites += 1;
         if w == 0 || h == 0 || map.len() < (w * h * 4) as usize || x + w > width || y + h > height {
             continue;
         }
@@ -79,6 +81,35 @@ fn build_one<'a>(
     if pool.is_empty() || pool.len() >= 1 << 24 {
         return None;
     }
+    // Pages with equal contents share one pool entry: animation frames and
+    // repeating tiles carry the same map bytes, and a page's map outside its
+    // sprite is `default`, so the pool holds many copies. The table can only
+    // name pages, so re-pointing it costs nothing at read time.
+    let before = pool.len() as u32;
+    let mut seen = std::collections::HashMap::new();
+    // Each old pool page's entry in the deduplicated pool.
+    let mut kept = Vec::with_capacity(pool.len());
+    let mut deduped: Vec<Vec<u8>> = Vec::new();
+    for page in pool.iter_mut() {
+        let hash = page_hash(page);
+        // A hash collision also compares the bytes, so equal hashes are equal
+        // pages and dropped hashes stay equal to their page.
+        let match_ = seen
+            .get(&hash)
+            .copied()
+            .filter(|&k| deduped[k as usize] == *page);
+        kept.push(match_.unwrap_or_else(|| {
+            let k = deduped.len() as u32;
+            seen.insert(hash, k);
+            deduped.push(std::mem::take(page));
+            k
+        }));
+    }
+    for entry in table.iter_mut().filter(|entry| **entry != 0) {
+        *entry = kept[*entry as usize - 1] + 1;
+    }
+    pool = deduped;
+    let after = pool.len() as u32;
     let entries = HEADER + pages_x * pages_y;
     // The narrowest map width (whole pages) that keeps it within the GPU's side.
     let (side, rows, map_height) = [1024, 2048, 4096, 8192, 16384]
@@ -114,11 +145,31 @@ fn build_one<'a>(
                 .copy_from_slice(&page[src..src + (PAGE * 4) as usize]);
         }
     }
+    if std::env::var_os("HORIZON_DEBUG_PAGED_MAPS").is_some() {
+        log::info!(
+            "Horizon: paged map {}x{}: {mapped_sprites} mapped sprites, {} of {} atlas pages \
+             mapped, pool pages {before} -> {after} ({:.1} MiB)",
+            side,
+            map_height,
+            table.iter().filter(|entry| **entry != 0).count(),
+            table.len(),
+            (side as u64 * map_height as u64 * 4) as f64 / (1 << 20) as f64,
+        );
+    }
     Some(PagedMap {
         width: side,
         height: map_height,
         pixels,
     })
+}
+
+/// FNV-1a of a page's bytes, to find pages worth comparing byte for byte.
+fn page_hash(page: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    for &b in page {
+        hash = (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// `map` (RGBA8, `mw` by `mh`) at `w` by `h`, nearest: a map drawn for a strip of animation
@@ -222,6 +273,40 @@ mod tests {
             maps: [None, None],
         }];
         assert_eq!(build((1024, 1024), &sprites, 16384), [None, None]);
+    }
+
+    #[test]
+    fn equal_map_pages_share_one_pool_page() {
+        // 70 sprites with the same 16x16 map, one atlas page each: with the
+        // equal pages sharing one pool page the pool is a single page, one row
+        // short of what 70 pages would be, and each sprite still reads its
+        // texels from that shared page.
+        let size = (1024, 70 * 16);
+        let map: Vec<u8> = (0..16 * 16)
+            .flat_map(|i: u32| [i as u8, i as u8 | 8, 5, 255])
+            .collect();
+        let sprite = |y| SpriteMaps {
+            rect: [0, y, 16, 16],
+            maps: [Some(map.clone()), None],
+        };
+        let mut sprites: Vec<SpriteMaps> = (0..70).map(|i| sprite(i * 16)).collect();
+        let [equal, _] = build(size, &sprites, 16384);
+        let equal = equal.unwrap();
+        assert_eq!(equal.height, 32); // 70 unordered pages would be 48.
+        for y in [0, 34 * 16, 69 * 16] {
+            assert_eq!(read(&equal, size, (3, y + 7)), [115, 123, 5, 255]);
+        }
+        // A different map in the middle keeps its own pool page: the texels of
+        // both the shared and the owned page read back through the table.
+        sprites[35] = SpriteMaps {
+            rect: [0, 35 * 16, 16, 16],
+            maps: [Some(vec![255; 16 * 16 * 4]), None],
+        };
+        let [mixed, _] = build(size, &sprites, 16384);
+        let mixed = mixed.unwrap();
+        assert_eq!(read(&mixed, size, (3, 7)), [115, 123, 5, 255]);
+        assert_eq!(read(&mixed, size, (3, 35 * 16 + 7)), [255, 255, 255, 255]);
+        assert_eq!(read(&mixed, size, (3, 69 * 16 + 7)), [115, 123, 5, 255]);
     }
 
     #[test]

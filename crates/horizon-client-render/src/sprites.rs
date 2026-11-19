@@ -162,14 +162,26 @@ pub fn set_labpbr_maps(on: bool) {
 pub fn labpbr_maps() -> bool {
     LABPBR_MAPS.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// The LabPBR maps' budget from the `pbrBudgetMiB` setting (0 follows the block
+/// textures' budget), for resources loaded from now on.
+static PBR_BUDGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The LabPBR maps' budget in MiB (0 for their share of the block textures'
+/// budget), so a pack's colours and its maps can keep different sizes.
+pub fn set_pbr_budget(mib: u32) {
+    PBR_BUDGET.store(mib, std::sync::atomic::Ordering::Relaxed);
+}
 /// Budget for either complete normal or specular image set: a quarter of the block textures'
 /// budget, so raising `textureBudgetMiB` sharpens a pack's LabPBR maps along with its colours.
 fn map_bytes(texture_budget: u64) -> u64 {
     texture_budget / 4
 }
-/// [`map_bytes`] for the budget the next resource load keeps to.
+/// [`map_bytes`] for the budget the next resource load keeps to: `pbrBudgetMiB`
+/// when set, else the maps' share of the block textures' budget.
 fn max_map_bytes() -> u64 {
-    map_bytes(TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed))
+    match PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => map_bytes(TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed)),
+        mib => u64::from(mib) << 20,
+    }
 }
 /// Fewer layers than any game has (vanilla's are about 1300): what a map is kept at while
 /// loading assumes at least these many share the array.
@@ -888,6 +900,15 @@ mod tests {
             64
         );
         assert_eq!(side_within(1024, 1300, map_bytes(1536 << 20)), 256);
+    }
+    #[test]
+    fn a_separate_pbr_budget_overrides_the_maps_without_touching_the_textures() {
+        // 0 follows the block textures' budget, 4 MiB packs 1300 layers at 16 px.
+        assert_eq!(max_map_bytes(), map_bytes(DEFAULT_TEXTURE_BUDGET));
+        set_pbr_budget(4);
+        assert_eq!(max_map_bytes(), 4 << 20);
+        set_pbr_budget(0);
+        assert_eq!(max_map_bytes(), map_bytes(DEFAULT_TEXTURE_BUDGET));
     }
     #[test]
     fn a_labpbr_map_selects_whole_texels_and_missing_layers_get_defaults() {

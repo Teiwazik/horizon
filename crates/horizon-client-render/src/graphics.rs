@@ -768,10 +768,13 @@ pub struct Graphics {
     pub chunk_updates: u32,
     /// Section mesh bytes uploaded per frame, in KiB; 0 is unlimited.
     pub upload_budget_kib: u32,
-    /// The block textures' video memory (colour and LabPBR maps, top mip level), in MiB;
-    /// 0 leaves it to Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources
-    /// next load.
+    /// The block textures' video memory (colour, LabPBR maps when `pbrBudgetMiB` is unset),
+    /// in MiB; 0 leaves it to Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when
+    /// resources next load.
     pub texture_budget_mib: u32,
+    /// The LabPBR maps' video memory (the top mip level), in MiB; 0 leaves it to Horizon:
+    /// a quarter of the block textures' budget. Applies when resources next load.
+    pub pbr_budget_mib: u32,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -908,6 +911,7 @@ impl Default for Graphics {
             chunk_updates: 0,
             upload_budget_kib: 0,
             texture_budget_mib: 0,
+            pbr_budget_mib: 0,
             sky: true,
             fog: true,
             weather: true,
@@ -1030,6 +1034,9 @@ impl Graphics {
                 "textureBudgetMiB" => {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
                 }
+                "pbrBudgetMiB" => {
+                    g.pbr_budget_mib = number(g.pbr_budget_mib).min(16384);
+                }
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
@@ -1101,7 +1108,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nframeGenerationMultiplier:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\nnvidiaReflex:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\npbrBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nframeGenerationMultiplier:{}\nupscaler:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\nnvidiaReflex:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1121,6 +1128,7 @@ impl Graphics {
             self.chunk_updates,
             self.upload_budget_kib,
             self.texture_budget_mib,
+            self.pbr_budget_mib,
             bool_text(self.sky),
             bool_text(self.fog),
             bool_text(self.weather),
@@ -1331,6 +1339,7 @@ mod tests {
             chunk_updates: 12,
             upload_budget_kib: 4096,
             texture_budget_mib: 1536,
+            pbr_budget_mib: 384,
             sky: false,
             fog: false,
             weather: false,
@@ -1490,6 +1499,20 @@ mod tests {
                 "workers:abc\nsky:maybe\ncullLeaves:true\nentityCulling:maybe\nleafCulling:maybe\n"
             ),
             Graphics::default()
+        );
+    }
+
+    #[test]
+    fn the_pbr_budget_round_trips_and_clamps_like_the_texture_budget() {
+        let g = Graphics::parse("textureBudgetMiB:256\npbrBudgetMiB:8\n");
+        assert_eq!(g.texture_budget_mib, 256);
+        assert_eq!(g.pbr_budget_mib, 8);
+        assert_eq!(Graphics::parse(&g.serialize()), g);
+        // 0 leaves the maps to Horizon, off the scale it clamps.
+        assert_eq!(Graphics::parse("pbrBudgetMiB:0\n").pbr_budget_mib, 0);
+        assert_eq!(
+            Graphics::parse("pbrBudgetMiB:16385\n").pbr_budget_mib,
+            16384
         );
     }
 
