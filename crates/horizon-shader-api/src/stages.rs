@@ -706,7 +706,11 @@ pub const PBR_MAPS_TERRAIN: &str =
 /// first sprite array.
 const PBR_MAPS_POST: &str = pbr_maps!("nearest_sampler", "horizon_ray_sprites_0");
 
-/// A traced post, compute or before-world pass's `block_pbr_maps`, as the material prelude's.
+/// A traced entity stage's, against the scene: the frame's bilinear `block_light_sampler`, which
+/// reads a hit's texel at its centre (`horizon_hit_pbr`) as it is.
+const PBR_MAPS_ENTITY: &str = pbr_maps!("block_light_sampler", "horizon_ray_sprites_0");
+
+/// A traced post, entity, compute or before-world pass's `block_pbr_maps`, as the material prelude's.
 const POST_PBR: &str = "\
 // LabPBR: whether the resource packs ship normal (`_n`) or specular (`_s`) maps beside their
 // block textures. Without them `hit_normal_map` and `hit_specular_map` give their defaults.
@@ -1506,14 +1510,18 @@ impl StageKind {
     }
 
     /// `prelude` with what `tracing` holds of the scene: in every stage the frame's two fields
-    /// for it, and in the post, material, compute and before-world stages `RayHit`, `trace`,
+    /// for it, and in the post, material, entity, compute and before-world stages `RayHit`, `trace`,
     /// `trace_any`, their `_layers` forms with `RAY_SOLID` and `RAY_TRANSLUCENT`,
     /// `hit_normal_map` and `hit_specular_map`, and outside the material stage, which has its
     /// own, `block_pbr_maps`.
     pub fn prelude_traced(self, tracing: Tracing) -> String {
         let rays = matches!(
             self,
-            StageKind::Post | StageKind::Material | StageKind::Compute | StageKind::BeforeWorld
+            StageKind::Post
+                | StageKind::Material
+                | StageKind::Entity
+                | StageKind::Compute
+                | StageKind::BeforeWorld
         );
         self.prelude_rays(
             tracing, rays, false, false, false, false, false, false, false, false, false, false,
@@ -1521,7 +1529,7 @@ impl StageKind {
         )
     }
 
-    /// `prelude_traced`, with the ray names only where `rays`: a material, compute or
+    /// `prelude_traced`, with the ray names only where `rays`: a material, entity, compute or
     /// before-world stage that calls none of the trace functions is built as it was before
     /// them. `kept`: the frame's epochs, for a pack with `[[resource]]`. With `entities` (the
     /// pack's files name `RAY_ENTITY`) the trace functions have the entity layer too. `fog`:
@@ -1631,8 +1639,9 @@ impl StageKind {
             }
             // The material stage's renderer, or the check's stand-in, reads the LabPBR maps.
             if self != StageKind::Material {
-                out += match tracing {
-                    Tracing::Scene => PBR_MAPS_POST,
+                out += match (tracing, self) {
+                    (Tracing::Scene, StageKind::Entity) => PBR_MAPS_ENTITY,
+                    (Tracing::Scene, _) => PBR_MAPS_POST,
                     _ => PBR_STUB,
                 };
                 out += POST_PBR;
@@ -1895,7 +1904,7 @@ pub fn compose(pack: &Pack, kind: StageKind, file: &str) -> Composed {
 }
 
 /// `compose` for a pack with `[ray_tracing]` where the renderer binds the scene: its post
-/// stage traces it, and its material, compute and before-world stages where they call a trace
+/// stage traces it, and its material, entity, compute and before-world stages where they call a trace
 /// function (`TRACE_NAMES`).
 /// Such a module needs a device with ray queries.
 pub fn compose_scene(pack: &Pack, kind: StageKind, file: &str) -> Composed {
@@ -2119,9 +2128,9 @@ fn light_source_stub(kind: StageKind) -> &'static str {
     }
 }
 
-/// Whether a material stage's files, `texts`, name a trace function, or with `lights` (the
-/// pack's `[ray_tracing] lights = true`) a light one: only then does its prelude have them and
-/// the renderer build its terrain against the scene.
+/// Whether the stage's files, `texts`, name a trace function, or with `lights` (the pack's
+/// `[ray_tracing] lights = true`) a light one. Outside post passes, only stages that name one
+/// are built against the scene.
 fn traces<'a>(mut texts: impl Iterator<Item = &'a str>, lights: bool) -> bool {
     let ray = |(_, name): &(usize, &str)| {
         TRACE_NAMES.contains(name) || lights && LIGHT_NAMES.contains(name)
@@ -2187,7 +2196,7 @@ pub(crate) fn compose_traced(
     let source = |f: &&str| pack.source(f).unwrap_or_default();
     let rays = match kind {
         StageKind::Post => true,
-        StageKind::Material | StageKind::Compute | StageKind::BeforeWorld => {
+        StageKind::Material | StageKind::Entity | StageKind::Compute | StageKind::BeforeWorld => {
             tracing != Tracing::None && traces(files.iter().map(source), lights_on(pack))
         }
         _ => false,

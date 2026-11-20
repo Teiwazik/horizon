@@ -168,12 +168,12 @@ scatters, a little denser in the middle tones. A post pass fogs what the stages 
 fn ray_tracing() -> String {
     let mut out = String::from(
         "### Ray tracing\n\n\
-         With `[ray_tracing]` in the manifest (it needs a `[[post]]` pass, a `[[before_world]]` pass or a `[material]`\n\
-         stage; its one key, `lights`, is below) the post stage's prelude also has `RayHit` and the functions and constants\n\
-         below, so do the material, compute and `[[before_world]]` stages' where their files name one of the four trace\n\
-         functions (or, with `lights = true`, a light one), and the\n\
-         `Frame` of every stage of the pack has `has_ray_tracing` and `ray_distance`. A pack without the key has none of\n\
-         them, and a material, compute or `[[before_world]]` stage that names no trace function is built as without it.\n\n\
+         With `[ray_tracing]` in the manifest (it needs a `[[post]]` pass, a `[[before_world]]` pass, a `[material]` or an\n\
+         `[entity]` stage; its one key, `lights`, is below), post passes get `RayHit` and the functions and constants\n\
+         below. So do the material, entity, compute and `[[before_world]]` stages whose files name one of the four trace\n\
+         functions (or, with `lights = true`, a light one). Every stage of the pack has `frame.has_ray_tracing` and\n\
+         `frame.ray_distance`. A pack without the key has none of these. A material, entity, compute or `[[before_world]]`\n\
+         stage that names no trace function is built as without it.\n\n\
          The game traces for the pack picked when it starts: only then, and only for a pack with `[ray_tracing]`, does it\n\
          ask the GPU for hardware ray queries, where the GPU and graphics API have them. In a game started without them a\n\
          pack picked while it runs traces from the next start, and the shader pack screen says so. `HORIZON_RAY_TRACING=1`\n\
@@ -202,7 +202,7 @@ fn ray_tracing() -> String {
          - `fn hit_normal_map(hit: RayHit) -> vec4<f32>`, `fn hit_specular_map(hit: RayHit) -> vec4<f32>`: the resource\n  \
          packs' LabPBR maps at the hit, its sprite's texel at `hit.uv` at full size, as `block_normal_map_level(uv, 0.0)`\n  \
          and `block_specular_map_level(uv, 0.0)` read a drawn surface's; their defaults without maps, and on a miss.\n\
-         - In the post, compute and `[[before_world]]` stages, `fn block_pbr_maps() -> bool`: whether the resource packs\n  \
+         - In the post, entity, compute and `[[before_world]]` stages, `fn block_pbr_maps() -> bool`: whether the resource packs\n  \
          ship LabPBR maps, as the material stage's.\n\
          - The light sources, only with `lights = true` under `[ray_tracing]` (off by default: without it these five names\n  \
          are free for the pack's own), and only in a stage whose files name one of them outside a comment, which alone\n  \
@@ -257,14 +257,17 @@ fn ray_tracing() -> String {
          pixel. But a post pass knows only the solid terrain's surface (`surface_at` isn't `present` behind water,\n\
          glass or entities) and has no albedo, so direct light that must be right there is traced in `material`. With\n\
          `[material] reads`, a pack can also trace in a compute or `[[before_world]]` pass and apply the result in\n\
-         `material`.\n\n",
+         `material`.\n\n\
+         In the entity stage `entity` traces as `material` does, in the world's colour pass only (the shadow map's\n\
+         entities don't run the stage). A ray it casts with `RAY_ENTITY` in its layers can hit the entity it starts on:\n\
+         move its origin off the surface, as from terrain.\n\n",
     );
     out += &shaded_table(&RAY_HIT);
     out += &format!(
         "Bindings {RAY_SCENE_BINDING} to {} of group {GROUP} hold the scene while the game traces ({RAY_ENTITY_STORE_BINDING} to\n\
          {RAY_ENTITY_RETAINED_BINDING} the entity layer, for a pack that names it, {RAY_LIGHTS_BINDING} the light sources, for a pass that\n\
          names them under `lights = true`), and in a post, compute or `[[before_world]]` pass bindings\n\
-         {PBR_NORMALS_BINDING} and {PBR_SPECULAR_BINDING} the LabPBR maps (the material stage has them there already).\n\
+         {PBR_NORMALS_BINDING} and {PBR_SPECULAR_BINDING} the LabPBR maps (the material and entity stages have them there already).\n\
          Binding {RAY_LOOKS_BINDING} holds terrain hit looks for a stage that reads `RayHit.tint`, `shade` or `ao` from its entry point.\n\
          These bindings are Horizon's, as their `horizon_` names say, and change with the renderer.\n\n",
         RAY_SPRITES_BINDING + RAY_SPRITE_ARRAYS - 1
