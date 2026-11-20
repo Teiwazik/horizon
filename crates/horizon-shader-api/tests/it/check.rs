@@ -1948,3 +1948,24 @@ fn a_traced_entity_stage_can_t_take_a_builtin_s_name() {
     let plain = own.replace("v * f32(ray_light_count())", "v");
     assert!(traced_entity(&plain, "lights = true\n", &[]).is_ok());
 }
+
+/// A material stage that reads the light sources can't have its own `fn fract`: Horizon's
+/// terrain vertex code shares its module and would call it. One that only traces keeps it.
+#[test]
+fn a_lit_material_stage_can_t_take_a_builtin_s_name() {
+    let fract = "fn fract(a: f32) -> f32 { return a - floor(a); }\n";
+    let lit = format!(
+        "{fract}fn material(input: MaterialInput) -> Surface {{\n    \
+         return Surface(input.albedo * fract(f32(ray_light_count())));\n}}\n"
+    );
+    let problems = traced_material(&lit, "lights = true\n", &[]).unwrap_err();
+    let needle = "`fn fract` takes the name of a WGSL builtin: a `[material]` stage that reads";
+    let found = problems.iter().find(|p| p.message.contains(needle));
+    assert_eq!(found.map(|p| p.line), Some(1), "{problems:#?}");
+    let traced = format!(
+        "{fract}fn material(input: MaterialInput) -> Surface {{\n    \
+         let open = trace_any(input.position, frame.sun_direction, 16.0);\n    \
+         return Surface(input.albedo * fract(f32(open)));\n}}\n"
+    );
+    assert!(traced_material(&traced, "", &[]).is_ok());
+}

@@ -539,10 +539,23 @@ fn check_entry(
     // First without the entry points, so a missing or mistyped stage function
     // is reported as such rather than as a call that doesn't resolve.
     let mut own = compose_traced(pack, kind, file, at, false);
-    // An entity stage built against the scene shares its module with Horizon's entity vertex
-    // code, whose builtin calls a pack function of the same name would take over.
-    if kind == StageKind::Entity && compose_traced(pack, kind, file, at, true).text != own.text {
-        let problems = shadowed_builtins(&own);
+    // An entity stage built against the scene, and a material stage that reads the light
+    // sources, share their module with Horizon's vertex code, whose builtin calls a pack
+    // function of the same name would take over. (A material stage that only traces or reads
+    // looks keeps such helpers, as 0.2 packs had them.)
+    let traced = || compose_traced(pack, kind, file, at, true).text;
+    let shared = match kind {
+        StageKind::Entity => (traced() != own.text)
+            .then_some("an `[entity]` stage that traces or reads the light sources"),
+        StageKind::Material => {
+            let lights = format!("@binding({RAY_LIGHTS_BINDING})");
+            (traced().contains(&lights))
+                .then_some("a `[material]` stage that reads the light sources")
+        }
+        _ => None,
+    };
+    if let Some(who) = shared {
+        let problems = shadowed_builtins(&own, who);
         if !problems.is_empty() {
             return Err(problems);
         }
@@ -905,16 +918,15 @@ const WGSL_BUILTINS: &str = "\
     workgroupUniformLoad";
 
 /// The pack's functions in `composed` named as a WGSL builtin: Horizon's own code in the same
-/// module would call them in place of the builtin.
-fn shadowed_builtins(composed: &Composed) -> Vec<Problem> {
+/// module would call them in place of the builtin. `who`: the stage, and what puts it there.
+fn shadowed_builtins(composed: &Composed, who: &str) -> Vec<Problem> {
     let names = identifiers(&composed.text);
     (names.windows(2))
         .filter(|w| w[0].1 == "fn" && WGSL_BUILTINS.split_whitespace().any(|b| b == w[1].1))
         .map(|w| {
             let message = format!(
-                "`fn {}` takes the name of a WGSL builtin: an `[entity]` stage that traces or \
-                 reads the light sources shares its module with Horizon's entity vertex code, \
-                 which would call it in place of the builtin; name it otherwise",
+                "`fn {}` takes the name of a WGSL builtin: {who} shares its module with Horizon's \
+                 vertex code, which would call it in place of the builtin; name it otherwise",
                 w[1].1
             );
             located(composed, Some(w[1].0), message)
