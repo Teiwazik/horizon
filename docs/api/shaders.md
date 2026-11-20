@@ -243,6 +243,7 @@ fog = "engine"             # optional: engine (default) or pack, when the pack f
 
 [ray_tracing]              # optional, needs [[post]], [[before_world]], [material] or [entity]: the post stage gets `trace` and `trace_any`, other supported stages get them where they call them
 lights = true              # optional, default false: the light sources (`ray_lights_near`, `ray_light`) in the stages that name them
+light_filter = true        # optional, default false: `trace_light` and `trace_light_skipping` in the stages that name them
 [motion]                   # optional, needs [[post]]: the post stage's motion guide (not drawn yet)
 ```
 
@@ -298,6 +299,11 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-20: API 0.2 (additions, preview): `trace_light` and `trace_light_skipping`, under `[ray_tracing]` with its
+  second key, `light_filter = true` (off by default). A stage whose files name one of them gets the light that gets
+  through translucent terrain in one ray query: 0 behind a solid surface, else the product of the translucent texels it
+  passes (`mix(1, albedo.rgb * tint.rgb, albedo.a)`; water untinted), with the `skip` materials of the second let
+  through untinted. A pack without the key sees the same prelude as before, and its own names stay its own.
 - 2026-11-20: API 0.2 (additions, preview): the light sources, under `[ray_tracing]` with its first key,
   `lights = true` (off by default). A stage whose files name `ray_lights_near`, `ray_light`, `ray_light_at`,
   `ray_light_count` or `RayLight` gets the light-giving blocks around the camera (`RayLight`: `position`, `level`,

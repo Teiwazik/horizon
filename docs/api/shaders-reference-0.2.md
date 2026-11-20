@@ -365,7 +365,7 @@ pass reads a blank one in place of the target it writes).
 ### Ray tracing
 
 With `[ray_tracing]` in the manifest (it needs a `[[post]]` pass, a `[[before_world]]` pass, a `[material]` or an
-`[entity]` stage; its one key, `lights`, is below), post passes get `RayHit` and the functions and constants
+`[entity]` stage; its keys, `lights` and `light_filter`, are below), post passes get `RayHit` and the functions and constants
 below. So do the material, entity, compute and `[[before_world]]` stages whose files name one of the four trace
 functions (or, with `lights = true`, a light one). Every stage of the pack has `frame.has_ray_tracing` and
 `frame.ray_distance`. A pack without the key has none of these. A material, entity, compute or `[[before_world]]`
@@ -402,6 +402,15 @@ asks for ray queries and keeps the scene with any pack or none; any other value 
   and `block_specular_map_level(uv, 0.0)` read a drawn surface's; their defaults without maps, and on a miss.
 - In the post, entity, compute and `[[before_world]]` stages, `fn block_pbr_maps() -> bool`: whether the resource packs
   ship LabPBR maps, as the material stage's.
+- `fn trace_light(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> vec3<f32>` and `fn
+  trace_light_skipping(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32, skip: vec2<u32>) -> vec3<f32>`,
+  only with `light_filter = true` under `[ray_tracing]` (off by default: without it these two names are free for the
+  pack's own), and only in a stage whose files name one of them outside a comment: the light that gets from
+  `origin` along the unit vector `direction` to `max_distance` blocks, in one ray query over the solid and the
+  translucent layers. A solid surface (a cut-out's opaque texel too) stops it: the result is 0. A translucent
+  texel multiplies its colour in, `mix(1, albedo.rgb * tint.rgb, albedo.a)`; water passes it untinted. In
+  `trace_light_skipping` a surface whose `[[materials]]` id is `skip.x` or `skip.y` (`0xffffffffu` for none) lets the
+  light through untinted, solid or not. Entities are never in the way. Without the scene the result is 1.
 - The light sources, only with `lights = true` under `[ray_tracing]` (off by default: without it these five names
   are free for the pack's own), and only in a stage whose files name one of them outside a comment, which alone
   binds them. `struct RayLight`: `position: vec3<f32>`, the centre of its block, camera-relative from the player's

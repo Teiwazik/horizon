@@ -1071,6 +1071,71 @@ fn ray_light_at(i: u32) -> u32 {
 }
 ";
 
+/// `trace_light` and `trace_light_skipping` with the scene, for a pack with `[ray_tracing]
+/// light_filter = true` whose stage names them: one ray query over solid and translucent terrain.
+const RAY_LIGHT_FILTER_SCENE: &str = "\
+// The light that gets through: one query, a solid surface (a cut-out's opaque texel too) stops
+// it, a translucent one (stained glass, ice) multiplies its colour in, and the quads of a
+// `skip` material let it through untinted. Water passes untinted. Entities don't count.
+fn horizon_ray_light(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32, skip: vec2<u32>) -> vec3<f32> {
+    var light = vec3<f32>(1.0);
+    var query: ray_query;
+    rayQueryInitialize(&query, horizon_ray_scene, RayDesc(RAY_FLAG_NONE, 3u, 0.0,
+        max(max_distance, 0.0), origin + horizon_ray_space.camera, direction));
+    while rayQueryProceed(&query) {
+        let c = rayQueryGetCandidateIntersection(&query);
+        if !horizon_ray_stops(c) {
+            continue;
+        }
+        let t = horizon_ray_triangle(c.instance_custom_data, c.primitive_index, c.barycentrics);
+        let layer = horizon_ray_word(t.corners.x, 4u) & 0x7fffu;
+        var material = 0u;
+        if layer * 2u + 1u < arrayLength(&horizon_ray_layers) {
+            material = horizon_ray_layers[layer * 2u];
+        }
+        if material == skip.x || material == skip.y {
+            continue;
+        }
+        if c.instance_index < horizon_ray_space.solid_instances {
+            rayQueryTerminate(&query);
+            return vec3<f32>(0.0);
+        }
+        // Bit 3 of the colour's alpha byte is clear on a fluid quad: water lets the light pass.
+        if ((horizon_ray_word(t.corners.x, 5u) >> 24u) & 8u) == 0u {
+            continue;
+        }
+        let color = unpack4x8unorm(horizon_ray_word(t.corners.x, 5u)) * t.weights.x
+            + unpack4x8unorm(horizon_ray_word(t.corners.y, 5u)) * t.weights.y
+            + unpack4x8unorm(horizon_ray_word(t.corners.z, 5u)) * t.weights.z;
+        let texel = horizon_decode_rgba(horizon_ray_texel(layer, horizon_ray_uv(t)));
+        light *= mix(vec3<f32>(1.0), texel.rgb * horizon_decode(color.rgb), texel.a);
+    }
+    return light;
+}
+// The light that reaches the camera-relative `origin + direction * max_distance` along the unit
+// vector `direction`: 0 where a solid surface stops it, else the product of the translucent
+// texels it passes, mix(1, albedo.rgb * tint.rgb, albedo.a). One ray query.
+fn trace_light(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> vec3<f32> {
+    return horizon_ray_light(origin, direction, max_distance, vec2<u32>(0xffffffffu));
+}
+// `trace_light`, but a surface whose `[[materials]]` id is `skip.x` or `skip.y` lets the light
+// through untinted (0xffffffffu for none).
+fn trace_light_skipping(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32, skip: vec2<u32>) -> vec3<f32> {
+    return horizon_ray_light(origin, direction, max_distance, skip);
+}
+";
+
+/// `RAY_LIGHT_FILTER_SCENE` without the scene: nothing stops the light.
+const RAY_LIGHT_FILTER_STUB: &str = "\
+// The scene isn't there (`frame.has_ray_tracing` is 0): nothing stops the light.
+fn trace_light(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+fn trace_light_skipping(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32, skip: vec2<u32>) -> vec3<f32> {
+    return vec3<f32>(1.0);
+}
+";
+
 /// What the scene adds for a pack that names `RAY_ENTITY`: the entity layer, read from the
 /// entity stream's vertices as entity.wgsl reads them, its candidates kept as it keeps a pixel.
 const RAY_ENTITY_SCENE: &str = "\
@@ -1525,7 +1590,7 @@ impl StageKind {
         );
         self.prelude_rays(
             tracing, rays, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         )
     }
 
@@ -1543,7 +1608,9 @@ impl StageKind {
     /// whose files name one of them (`names_jitter`).
     /// `looks`: a terrain hit reads its quad's look (`RAY_LOOKS`), for a stage that
     /// reads one (`check::RAY_LOOK_FIELDS`). With `lights` (the pack's files name the light
-    /// functions, `names_lights`) the light sources are there.
+    /// functions, `names_lights`) the light sources are there. With `light_filter` (the pack has
+    /// `[ray_tracing] light_filter = true` and its files name `trace_light`, `names_light_filter`)
+    /// so are `trace_light` and `trace_light_skipping`.
     #[allow(clippy::too_many_arguments)]
     fn prelude_rays(
         self,
@@ -1560,6 +1627,7 @@ impl StageKind {
         lit: bool,
         looks: bool,
         lights: bool,
+        light_filter: bool,
     ) -> String {
         let rays = rays && tracing != Tracing::None;
         let mut out = match tracing {
@@ -1635,6 +1703,12 @@ impl StageKind {
                 out += match tracing {
                     Tracing::Scene => RAY_LIGHTS_SCENE,
                     _ => RAY_LIGHTS_STUB,
+                };
+            }
+            if light_filter {
+                out += match tracing {
+                    Tracing::Scene => RAY_LIGHT_FILTER_SCENE,
+                    _ => RAY_LIGHT_FILTER_STUB,
                 };
             }
             // The material stage's renderer, or the check's stand-in, reads the LabPBR maps.
@@ -2000,6 +2074,23 @@ pub(crate) const LIGHT_NAMES: [&str; 5] = [
     "ray_light_at",
 ];
 
+/// The names `[ray_tracing] light_filter = true` brings (`RAY_LIGHT_FILTER_SCENE`).
+pub(crate) const LIGHT_FILTER_NAMES: [&str; 2] = ["trace_light", "trace_light_skipping"];
+
+/// Whether `pack` has `[ray_tracing] light_filter = true`.
+pub(crate) fn light_filter_on(pack: &Pack) -> bool {
+    (pack.manifest.ray_tracing.as_ref()).is_some_and(|r| r.light_filter)
+}
+
+/// Whether `texts`, a stage's files, name `trace_light` or `trace_light_skipping`.
+fn names_light_filter<'a>(mut texts: impl Iterator<Item = &'a str>) -> bool {
+    texts.any(|text| {
+        identifiers(text)
+            .iter()
+            .any(|(_, n)| LIGHT_FILTER_NAMES.contains(n))
+    })
+}
+
 /// Whether `pack` has `[ray_tracing] lights = true`.
 pub(crate) fn lights_on(pack: &Pack) -> bool {
     (pack.manifest.ray_tracing.as_ref()).is_some_and(|r| r.lights)
@@ -2131,9 +2222,11 @@ fn light_source_stub(kind: StageKind) -> &'static str {
 /// Whether the stage's files, `texts`, name a trace function, or with `lights` (the pack's
 /// `[ray_tracing] lights = true`) a light one. Outside post passes, only stages that name one
 /// are built against the scene.
-fn traces<'a>(mut texts: impl Iterator<Item = &'a str>, lights: bool) -> bool {
+fn traces<'a>(mut texts: impl Iterator<Item = &'a str>, lights: bool, light_filter: bool) -> bool {
     let ray = |(_, name): &(usize, &str)| {
-        TRACE_NAMES.contains(name) || lights && LIGHT_NAMES.contains(name)
+        TRACE_NAMES.contains(name)
+            || lights && LIGHT_NAMES.contains(name)
+            || light_filter && LIGHT_FILTER_NAMES.contains(name)
     };
     texts.any(|text| identifiers(text).iter().any(ray))
 }
@@ -2197,7 +2290,12 @@ pub(crate) fn compose_traced(
     let rays = match kind {
         StageKind::Post => true,
         StageKind::Material | StageKind::Entity | StageKind::Compute | StageKind::BeforeWorld => {
-            tracing != Tracing::None && traces(files.iter().map(source), lights_on(pack))
+            tracing != Tracing::None
+                && traces(
+                    files.iter().map(source),
+                    lights_on(pack),
+                    light_filter_on(pack),
+                )
         }
         _ => false,
     };
@@ -2216,6 +2314,8 @@ pub(crate) fn compose_traced(
         && crate::check::reads_hit_looks(&compose_traced(pack, kind, file, at, false).text);
     // Only the stages whose own files name them: a pass that doesn't has no binding 80.
     let lights = rays && lights_on(pack) && names_lights(files.iter().map(source));
+    let light_filter =
+        rays && light_filter_on(pack) && names_light_filter(files.iter().map(source));
     let mut prelude = kind.prelude_rays(
         tracing,
         rays,
@@ -2230,6 +2330,7 @@ pub(crate) fn compose_traced(
         lit,
         looks,
         lights,
+        light_filter,
     ) + &texture_declarations(&pack.manifest.textures);
     if matches!(kind, StageKind::Post | StageKind::Compute) {
         prelude += &post_target_declarations(&pack.manifest);

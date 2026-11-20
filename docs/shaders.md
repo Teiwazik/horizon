@@ -340,6 +340,23 @@ A mob's traced shadow on what a post pass lights, starting off the surface as fr
 let shadowed = trace_any_layers(position + normal * 0.01, frame.sun_direction, 64.0, RAY_SOLID | RAY_ENTITY);
 ```
 
+#### Light through glass
+
+With `light_filter = true` under `[ray_tracing]`, a stage whose files name `trace_light` or `trace_light_skipping`
+(outside a comment) gets the light that gets through translucent terrain in one ray query. Without the key the two
+names are the pack's own.
+
+| | |
+| --- | --- |
+| `trace_light(origin, direction, max_distance)` | `vec3<f32>`: 0 where a solid surface stops the ray (a cut-out's opaque texel too), else the product of the translucent texels it passes, `mix(1, albedo.rgb * tint.rgb, albedo.a)`; water passes untinted. One traversal, where `trace_layers` in a loop is one per pane |
+| `trace_light_skipping(origin, direction, max_distance, skip)` | The same, but a surface whose `[[materials]]` id is `skip.x` or `skip.y` (`0xffffffffu` for none) lets the light through untinted |
+| Not in the way | Entities |
+| Without the scene | 1: nothing stops the light |
+
+```wgsl
+let sun = trace_light(position + normal * 0.02, frame.sun_direction, 256.0) * max(dot(normal, frame.sun_direction), 0.0);
+```
+
 #### Light sources
 
 With `lights = true` under `[ray_tracing]`, a stage whose files name `ray_lights_near`, `ray_light`, `ray_light_at`,

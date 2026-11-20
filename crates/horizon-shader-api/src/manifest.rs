@@ -174,6 +174,11 @@ pub struct RayTracing {
     /// the pack is built as without the key.
     #[serde(default)]
     pub lights: bool,
+    /// `light_filter = true`: the stages whose files name them get `trace_light` and
+    /// `trace_light_skipping`, the light that gets through translucent terrain in one ray query,
+    /// and the names are taken. Off, the pack is built as without the key.
+    #[serde(default)]
+    pub light_filter: bool,
 }
 
 /// `[motion]` (0.2): the pack's post passes get `scene_motion`, `motion_at`, `MotionData` and
@@ -658,6 +663,8 @@ pub(crate) fn taken(name: &str, ray_tracing: Option<&RayTracing>, motion: bool) 
     reserved.contains(&name)
         || (ray_tracing.is_some() && traced.contains(&name))
         || (ray_tracing.is_some_and(|r| r.lights) && crate::stages::LIGHT_NAMES.contains(&name))
+        || (ray_tracing.is_some_and(|r| r.light_filter)
+            && crate::stages::LIGHT_FILTER_NAMES.contains(&name))
         || (motion && guide.contains(&name))
         || naga::keywords::wgsl::RESERVED.contains(&name)
 }

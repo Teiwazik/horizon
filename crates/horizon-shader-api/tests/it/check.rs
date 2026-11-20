@@ -1218,6 +1218,76 @@ fn the_light_sources_are_the_keyed_pack_s_that_names_them() {
     }
 }
 
+/// A post pass that takes the light a sun ray gets through glass, and one that skips a material.
+const FILTERED: &str = "fn post(input: PostInput) -> vec4<f32> {
+    let p = view_position(input.uv, input.depth);
+    let sun = trace_light(p, frame.sun_direction, 64.0);
+    let sky = trace_light_skipping(p, frame.sun_direction, 64.0, vec2<u32>(3u, 0xffffffffu));
+    return vec4<f32>(input.color.rgb * sun + sky, 1.0);
+}
+";
+
+/// `[ray_tracing]` with `trace_light` (`light_filter = true`).
+fn filtered(post: &str) -> Result<horizon_shader_api::Report, Vec<Problem>> {
+    post_pack(post, TONEMAP, "[ray_tracing]\nlight_filter = true\n")
+}
+
+/// With `light_filter = true` a post pass that names `trace_light` is checked without the scene
+/// (nothing stops the light, no ray query) and with it (one ray query, valid where the device
+/// traces); a pass that names neither, or only in a comment, composes byte for byte as without
+/// the key. Without the key the names are the pack's own to define.
+#[test]
+fn trace_light_is_the_keyed_pack_s_that_names_it() {
+    use horizon_shader_api::{compose, compose_scene};
+    let report = filtered(FILTERED).unwrap();
+    let post = &report.stages[0];
+    let plain = naga::valid::Capabilities::default();
+    assert!(!ray_queries(&post.module) && valid(&post.module, plain));
+    let scene = post.scene.as_ref().unwrap();
+    assert!(valid(scene, plain | naga::valid::Capabilities::RAY_QUERY));
+    // Not named, or only in a comment: the stage is the one of the same pack without the key.
+    let manifest = |extra: &str| {
+        let manifest = format!(
+            "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+             [[post]]\nfile = \"post.wgsl\"\n[tonemap]\nfile = \"tonemap.wgsl\"\n[ray_tracing]\n{extra}"
+        );
+        let post = format!("// trace_light\n{SHADOWED}");
+        let files = [
+            (MANIFEST, manifest.as_str()),
+            ("post.wgsl", post.as_str()),
+            ("tonemap.wgsl", TONEMAP),
+        ]
+        .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+        .into();
+        Pack::from_files(files).unwrap()
+    };
+    let (keyed, unkeyed) = (manifest("light_filter = true\n"), manifest(""));
+    for build in [compose, compose_scene] {
+        let file = "post.wgsl";
+        assert_eq!(
+            build(&keyed, StageKind::Post, file).text,
+            build(&unkeyed, StageKind::Post, file).text
+        );
+    }
+    // A pack's own `trace_light` stays its own without the key, and is a redefinition with it.
+    let own = "fn trace_light(a: f32) -> f32 { return a; }\n\
+               fn post(input: PostInput) -> vec4<f32> { return input.color * trace_light(1.0); }\n";
+    assert!(traced(own).is_ok());
+    let problems: Vec<String> = filtered(own)
+        .unwrap_err()
+        .iter()
+        .map(Problem::to_string)
+        .collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("redefinition of `trace_light`")),
+        "{problems:#?}"
+    );
+    // The names are unknown without the key.
+    assert!(traced(FILTERED).is_err());
+}
+
 /// Two `[[post]]` entries of one file with different `files`: each binds the light sources by
 /// its own files, whichever comes first.
 #[test]
