@@ -297,6 +297,10 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-20: API 0.2 (change, preview): a pack may chain 40 post passes (was 12), declare 128 options (was 64), and
+  a stage may hold 24 000 naga expressions (was 20 000), room for a traced GI chain (ReSTIR, a temporal denoise, light
+  probes, each with its kept copy) and the options of a full ray-traced pack. Every pack that passed still passes,
+  unchanged; `budget.gpu_ms` and the post target memory are as they were.
 - 2026-11-19: API 0.2 (change, preview): under a pack without `[[post]]` whose frame holds gamma light and whose
   `[tonemap]`, if it has one, never reads `previous`, TAA upscaling and its sharpening apply too (#16126 step 7): the
   world draws smaller, `frame.resolution` stays its size, `input.color` samples the picture TAA rebuilt, and the

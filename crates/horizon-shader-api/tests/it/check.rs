@@ -1598,3 +1598,44 @@ fn a_hit_s_look_fields_bring_the_scene_s_looks() {
     }
     assert!(!ray_looks(&none[0], looked), "uncalled look helper");
 }
+
+/// A stage may hold 24 000 naga expressions: a traced material stage with the `[ray_tracing]`
+/// prelude holds about 21 000, past the 20 000 there were. (Daily: naga unoptimized takes half a
+/// minute over stages this size.)
+#[test]
+#[ignore = "daily"]
+fn a_stage_holds_twenty_four_thousand_expressions() {
+    // `post/grade.wgsl` with `steps` dependent steps, each adding the same few expressions.
+    let grade = |steps: usize| {
+        let body: String = (0..steps)
+            .map(|i| {
+                format!(
+                    "    c = c * 0.999 + vec3<f32>(f32({i}u) * 1e-6) - c * c * 0.001 + c.zxy * 0.002 \
+                     - c.yzx * 0.003 + abs(c) * 0.004;\n"
+                )
+            })
+            .collect();
+        format!(
+            "override saturation: f32 = 1.1;\noverride tonemap: u32 = 1u;\n\
+             fn post(input: PostInput) -> vec4<f32> {{\n    var c = input.color.rgb * saturation;\n\
+             {body}    return vec4<f32>(c * f32(tonemap), input.color.a);\n}}\n"
+        )
+    };
+    let expressions = |steps: usize| {
+        let mut files = sample().files;
+        files.insert(GRADE.into(), grade(steps).into_bytes());
+        let report = check(&Pack::from_files(files).unwrap()).unwrap();
+        (report.stages.iter())
+            .find(|s| s.label == "Colour grade")
+            .unwrap()
+            .expressions
+    };
+    let base = expressions(0);
+    let step = (expressions(100) - base) as f64 / 100.0;
+    assert!(step >= 1.0);
+    // About 23 500 passes; past 24 000 is refused.
+    let fits = ((23_500 - base) as f64 / step) as usize;
+    assert!((22_500..=24_000).contains(&expressions(fits)));
+    let over = ((24_000 - base) as f64 / step).ceil() as usize + 1;
+    one(GRADE, &grade(over), "expressions; a stage may hold 24000");
+}

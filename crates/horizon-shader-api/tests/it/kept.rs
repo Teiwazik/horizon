@@ -394,14 +394,26 @@ fn what_four_targets_took_still_passes() {
 }
 
 /// 16 outputs at most, the bindings below the scene's, whatever they take: 17 at 0.25 are
-/// 17/16 of a texture. (Today the 12 post passes allow 11.)
+/// 17/16 of a texture.
 #[test]
 fn post_outputs_are_at_most_sixteen() {
-    let e = parse(&outputs(&[Some(0.25); 16])).unwrap_err();
-    assert!(e.contains("post passes; a pack may chain 12"), "{e}");
+    parse(&outputs(&[Some(0.25); 16])).unwrap();
     refused(
         &outputs(&[Some(0.25); 17]),
         "17 [[post]] outputs; a pack may write 16",
+    );
+}
+
+/// A pack may chain 40 post passes: a traced GI chain (bloom, AO, ReSTIR, a temporal denoise,
+/// light probes and bounced light, each with its kept copy) takes about 32.
+#[test]
+fn a_pack_chains_forty_post_passes() {
+    let pass = |i: usize| format!("[[post]]\nfile = \"p{i}.wgsl\"\n");
+    // `parse` adds the pass that draws the picture.
+    parse(&(0..39).map(pass).collect::<String>()).unwrap();
+    refused(
+        &(0..40).map(pass).collect::<String>(),
+        "41 post passes; a pack may chain 40",
     );
 }
 

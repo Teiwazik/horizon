@@ -358,8 +358,8 @@ fn refuses_what_this_build_does_not_read() {
     assert!(refused(no_stage).contains("no stage"));
     let mirror = format!("{no_stage}[sky]\nfile = \"sky.wgsl\"\n[reflection]\n");
     assert!(refused(&mirror).contains("[reflection] needs [material]"));
-    let many = (0..13).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
-    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("13 post passes"));
+    let many = (0..41).map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"));
+    assert!(refused(&format!("{no_stage}{}", many.collect::<String>())).contains("41 post passes"));
 }
 
 #[test]
@@ -1095,4 +1095,19 @@ file = \"s.wgsl\"
     );
     let why = Manifest::parse(&sky).unwrap_err().to_string();
     assert!(why.contains("a [material] or an [entity]"), "{why}");
+}
+
+/// A pack may declare 128 options: a ray-traced pack with pages for its water, clouds, sky,
+/// lights and materials declares about 80. The sample declares 5.
+#[test]
+fn a_pack_declares_up_to_128_options() {
+    let with = |extra: usize| {
+        let options: String = (0..extra)
+            .map(|i| format!("[[options]]\nid = \"o{i}\"\nname = \"O{i}\"\ntype = \"bool\"\ndefault = false\n"))
+            .collect();
+        format!("{}{options}", sample_text())
+    };
+    let m = Manifest::parse(&with(123)).unwrap();
+    assert_eq!(m.options.len(), 128);
+    assert!(refused(&with(124)).contains("129 options; a pack may declare 128"));
 }

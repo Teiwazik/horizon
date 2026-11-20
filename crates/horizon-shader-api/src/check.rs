@@ -22,8 +22,9 @@ use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
 use std::collections::HashSet;
 use std::fmt;
 
-/// naga expressions a stage may hold, over all its functions.
-pub const MAX_EXPRESSIONS: usize = 20_000;
+/// naga expressions a stage may hold, over all its functions: a traced material stage holds
+/// about 21 000 with the `[ray_tracing]` prelude counted in.
+pub const MAX_EXPRESSIONS: usize = 24_000;
 /// Texture reads (samples, gathers and loads) a stage may write.
 pub const MAX_TEXTURE_READS: usize = 64;
 

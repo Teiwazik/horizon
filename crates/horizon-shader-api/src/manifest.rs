@@ -74,10 +74,13 @@ impl Primaries {
         }
     }
 }
-/// Full-screen passes a pack may chain.
-pub const MAX_POST_PASSES: usize = 12;
-/// Options a pack may declare.
-pub const MAX_OPTIONS: usize = 64;
+/// Full-screen passes a pack may chain: room for a traced GI chain (bloom, AO, ReSTIR pick,
+/// neighbours, shade and filter, a temporal denoise, light probes, bounce, each with its kept
+/// copy), which takes about 32; `budget.gpu_ms` still bounds what they cost.
+pub const MAX_POST_PASSES: usize = 40;
+/// Options a pack may declare: a ray-traced pack with pages for water, clouds, sky, lights and
+/// materials declares about 80.
+pub const MAX_OPTIONS: usize = 128;
 /// Settings pages a pack may declare, and the items one page may hold.
 pub const MAX_PAGES: usize = 32;
 pub const MAX_PAGE_ITEMS: usize = 64;
