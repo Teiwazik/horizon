@@ -406,7 +406,8 @@ asks for ray queries and keeps the scene with any pack or none; any other value 
   a camera-relative point, as the first and the count of the indices `fn ray_light_at(i: u32) -> u32` reads;
   none outside the grid. `ray_light_at` gives `0xffffffffu`, which `ray_light` reads as level 0, for an `i` past
   its cell's count. Both are candidate sets, not a verdict: a source listed may not reach the point itself, so
-  the pack's own falloff (and a trace) decides what each gives. The list is
+  the pack's own falloff (and a trace) decides what each gives. A cell's order is its strength at the cell's
+  nearest point, not at the point: a pass that tests only its first few shows the cells' edges. The list is
   the data, and the grid a convenience built from it with fixed choices (8-block cells, 16 a side around the
   camera, at most 24 a cell, ranked by vanilla's falloff, level minus distance, at the cell's nearest point): a
   pack that wants others reads the list and builds its own grid into a kept buffer in a compute or

@@ -4,8 +4,6 @@
 
 // How bright a source's light is at its block, over the picture's own colour.
 const GAIN: f32 = 1.5;
-// The most sources a pixel tests, of those its cell lists (the strongest there first).
-const MOST: u32 = 8u;
 
 // How far along the unit `direction` from `origin` the ray enters the block whose centre is
 // `center`: a full glowing cube (glowstone, a sea lantern) is in the ray scene itself, so a
@@ -45,7 +43,9 @@ fn post(input: PostInput) -> vec4<f32> {
     let origin = position + normal * 0.02;
     let near = ray_lights_near(position);
     var light = vec3<f32>(0.0);
-    for (var i = 0u; i < min(near.y, MOST); i++) {
+    // Every source the cell lists (at most 24): they are ranked at the cell's nearest point, not
+    // at this pixel, so testing only the first few would show the cell's edges.
+    for (var i = 0u; i < near.y; i++) {
         let source = ray_light(ray_light_at(near.x + i));
         let to = source.position - origin;
         let distance = length(to);
