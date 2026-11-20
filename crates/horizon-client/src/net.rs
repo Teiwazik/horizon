@@ -2416,6 +2416,20 @@ mod tests {
                 Arc::clone(&data),
             );
             let (stream, _) = listener.accept().unwrap();
+            // Older-server detection pings the address on a second connection before the login
+            // handshake goes out; dropping that one leaves the release unknown, so this one
+            // (the login) is the one under test. With detection off no second one arrives.
+            listener.set_nonblocking(true).unwrap();
+            let waited = std::time::Instant::now();
+            while waited.elapsed() < Duration::from_secs(2) {
+                match listener.accept() {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
