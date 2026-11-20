@@ -102,25 +102,13 @@ impl CheckedStage {
     /// (`[ray_tracing] lights = true`, `stages::names_lights`), so the renderer binds their list in
     /// this pass's layout (binding 80) and keeps it for the pack.
     pub fn traces_lights(&self) -> bool {
-        self.scene.as_ref().is_some_and(|module| {
-            module.global_variables.iter().any(|(_, g)| {
-                g.binding
-                    .as_ref()
-                    .is_some_and(|b| b.group == GROUP && b.binding == RAY_LIGHTS_BINDING)
-            })
-        })
+        (self.scene.as_ref()).is_some_and(|module| binds(module, RAY_LIGHTS_BINDING))
     }
 
     /// Whether the stage against the scene reads a terrain hit's look (`RAY_LOOK_FIELDS`), so the
     /// renderer binds the scene's looks for it (`RAY_LOOKS_BINDING`).
     pub fn traces_looks(&self) -> bool {
-        self.scene.as_ref().is_some_and(|module| {
-            module.global_variables.iter().any(|(_, g)| {
-                g.binding
-                    .as_ref()
-                    .is_some_and(|b| b.group == GROUP && b.binding == RAY_LOOKS_BINDING)
-            })
-        })
+        (self.scene.as_ref()).is_some_and(|module| binds(module, RAY_LOOKS_BINDING))
     }
 
     /// Whether the stage's inputs end with `shaded_tint` (`SHADED_TINT`): its pack's files name
@@ -539,27 +527,6 @@ fn check_entry(
     // First without the entry points, so a missing or mistyped stage function
     // is reported as such rather than as a call that doesn't resolve.
     let mut own = compose_traced(pack, kind, file, at, false);
-    // An entity stage built against the scene, and a material stage that reads the light
-    // sources, share their module with Horizon's vertex code, whose builtin calls a pack
-    // function of the same name would take over. (A material stage that only traces or reads
-    // looks keeps such helpers, as 0.2 packs had them.)
-    let traced = || compose_traced(pack, kind, file, at, true).text;
-    let shared = match kind {
-        StageKind::Entity => (traced() != own.text)
-            .then_some("an `[entity]` stage that traces or reads the light sources"),
-        StageKind::Material => {
-            let lights = format!("@binding({RAY_LIGHTS_BINDING})");
-            (traced().contains(&lights))
-                .then_some("a `[material]` stage that reads the light sources")
-        }
-        _ => None,
-    };
-    if let Some(who) = shared {
-        let problems = shadowed_builtins(&own, who);
-        if !problems.is_empty() {
-            return Err(problems);
-        }
-    }
     let entries = own.parts.pop().expect("entries are the last part");
     own.text.truncate(entries.1.start);
     if pack.manifest.ray_tracing.is_some() {
@@ -628,6 +595,21 @@ fn check_entry(
     let scene = match traced {
         Some(mut composed) => {
             let module = parse(&composed)?;
+            // A material or entity stage that reads the light sources shares its module with
+            // Horizon's vertex code, whose builtin calls a pack function of the same name would
+            // take over, reaching binding 80 from a vertex shader. (One that only traces or
+            // reads looks keeps such helpers, as 0.2 packs had them.)
+            let who = match kind {
+                StageKind::Material => Some("a `[material]`"),
+                StageKind::Entity => Some("an `[entity]`"),
+                _ => None,
+            };
+            if let Some(who) = who.filter(|_| binds(&module, RAY_LIGHTS_BINDING)) {
+                let problems = shadowed_builtins(&composed, who);
+                if !problems.is_empty() {
+                    return Err(problems);
+                }
+            }
             let capabilities = Capabilities::default() | Capabilities::RAY_QUERY;
             let info = validate(&module, &composed, capabilities)?;
             if kind == StageKind::Material {
@@ -898,6 +880,13 @@ fn vertex_reach(
     problems
 }
 
+/// Whether `module` has a global at `binding` of group 3.
+fn binds(module: &naga::Module, binding: u32) -> bool {
+    (module.global_variables.iter()).any(|(_, g)| {
+        (g.binding.as_ref()).is_some_and(|b| b.group == GROUP && b.binding == binding)
+    })
+}
+
 /// WGSL's builtin functions.
 const WGSL_BUILTINS: &str = "\
     abs acos acosh all any arrayLength asin asinh atan atan2 atanh atomicAdd atomicAnd \
@@ -925,8 +914,9 @@ fn shadowed_builtins(composed: &Composed, who: &str) -> Vec<Problem> {
         .filter(|w| w[0].1 == "fn" && WGSL_BUILTINS.split_whitespace().any(|b| b == w[1].1))
         .map(|w| {
             let message = format!(
-                "`fn {}` takes the name of a WGSL builtin: {who} shares its module with Horizon's \
-                 vertex code, which would call it in place of the builtin; name it otherwise",
+                "`fn {}` takes the name of a WGSL builtin: {who} stage that reads the light \
+                 sources shares its module with Horizon's vertex code, which would call it in \
+                 place of the builtin; name it otherwise",
                 w[1].1
             );
             located(composed, Some(w[1].0), message)
