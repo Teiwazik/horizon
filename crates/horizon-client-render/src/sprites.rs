@@ -368,7 +368,14 @@ impl Sprites {
         self.specular.clear();
         let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
         self.pbr_size = largest_map.map_or(SPRITE_SIZE, |l| {
-            side_within(l.min(size), layers, max_map_bytes())
+            // An explicit `pbrBudgetMiB` may keep maps sharper than the colours; without it the
+            // maps never exceed them.
+            let cap = if PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                l.min(size)
+            } else {
+                l
+            };
+            side_within(cap, layers, max_map_bytes())
         });
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
@@ -1314,6 +1321,22 @@ mod tests {
         assert_eq!(sprites.normals[16 * 16 * 4..][..4], FLAT_NORMAL);
         assert_eq!(sprites.specular[..4], NO_SPECULAR);
         assert_eq!(sprites.specular.len(), 2 * 16 * 16 * 4);
+    }
+    #[test]
+    fn an_explicit_pbr_budget_keeps_maps_sharper_than_the_colours() {
+        let sheet = |pbr_budget: u32| {
+            set_pbr_budget(pbr_budget);
+            let mut sprites = Sprites {
+                native: vec![(16, Arc::new(vec![vec![0; 16 * 16 * 4]]), 0)],
+                pbr: vec![[Some((64, vec![[9, 8, 7, 6].repeat(64 * 64)])), None]],
+                ..Default::default()
+            };
+            sprites.finish();
+            set_pbr_budget(0);
+            sprites.pbr_size
+        };
+        assert_eq!(sheet(0), 16);
+        assert_eq!(sheet(64), 64);
     }
     #[test]
     fn companion_grid_and_static_map_follow_colour_frame_selection() {
