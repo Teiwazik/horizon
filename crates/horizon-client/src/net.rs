@@ -904,10 +904,15 @@ fn connect_tcp(
     Ok((c, host, port))
 }
 
-/// Whether joining servers of older releases is on (roadmap `older-servers`): off by default while the
-/// adapter is incomplete; `HORIZON_OLDER_SERVERS=1` turns it on.
+/// Whether joining servers of older releases is on (roadmap `older-servers`): on by default;
+/// `HORIZON_OLDER_SERVERS=0` turns it off.
 pub fn older_servers_enabled() -> bool {
-    std::env::var_os("HORIZON_OLDER_SERVERS").is_some_and(|v| v == "1")
+    older_servers_setting(std::env::var_os("HORIZON_OLDER_SERVERS").as_deref())
+}
+
+/// [`older_servers_enabled`] for a given `HORIZON_OLDER_SERVERS` value: only `0` turns it off.
+fn older_servers_setting(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|v| v != "0")
 }
 
 /// The older release a server speaks, by its status ping, when Horizon can translate it; `None` for the
@@ -1891,6 +1896,14 @@ fn continues_after_failed_join(lan: bool, signed_in: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn older_servers_are_on_unless_the_variable_is_zero() {
+        use std::ffi::OsStr;
+        assert!(super::older_servers_setting(None));
+        assert!(super::older_servers_setting(Some(OsStr::new("1"))));
+        assert!(!super::older_servers_setting(Some(OsStr::new("0"))));
+    }
+
     use super::*;
     use horizon_world::native_load_context::DataLoadOrigin;
 
