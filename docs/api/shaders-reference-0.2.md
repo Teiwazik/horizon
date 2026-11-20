@@ -353,7 +353,7 @@ With `[ray_tracing]` in the manifest (it needs a `[[post]]` pass, a `[[before_wo
 below. So do the material, entity, compute and `[[before_world]]` stages whose files name one of the four trace
 functions (or, with `lights = true`, a light one). Every stage of the pack has `frame.has_ray_tracing` and
 `frame.ray_distance`. A pack without the key has none of these. A material, entity, compute or `[[before_world]]`
-stage that names no trace function is built as without it.
+stage that names no trace function (nor, with `lights = true`, a light one) is built as without it.
 
 The game traces for the pack picked when it starts: only then, and only for a pack with `[ray_tracing]`, does it
 ask the GPU for hardware ray queries, where the GPU and graphics API have them. In a game started without them a

@@ -1929,3 +1929,22 @@ fn an_entity_stage_that_doesn_t_trace_is_built_as_before() {
 
 /// The SHA-256 of the entity stage above, composed on main before entity tracing.
 const ENTITY_UNTRACED: &str = "e7a641d743807343540ca08b7c56a10d606b123ab3c682be0398bb089bab23ca";
+
+/// A traced or lit entity stage's own `fn normalize` would replace the builtin in Horizon's
+/// entity vertex code, which shares its module: refused, where it is (an untraced one keeps it).
+#[test]
+fn a_traced_entity_stage_can_t_take_a_builtin_s_name() {
+    let own = "fn normalize(v: vec3<f32>) -> vec3<f32> { return v * f32(ray_light_count()); }\n\
+               fn entity(input: EntityInput) -> Surface {\n    \
+               return Surface(vec4<f32>(normalize(input.normal), 1.0));\n}\n";
+    let problems = traced_entity(own, "lights = true\n", &[]).unwrap_err();
+    let needle = "`fn normalize` takes the name of a WGSL builtin";
+    let found = problems.iter().find(|p| p.message.contains(needle));
+    assert_eq!(
+        found.map(|p| (p.file.as_str(), p.line)),
+        Some(("entity.wgsl", 1)),
+        "{problems:#?}"
+    );
+    let plain = own.replace("v * f32(ray_light_count())", "v");
+    assert!(traced_entity(&plain, "lights = true\n", &[]).is_ok());
+}

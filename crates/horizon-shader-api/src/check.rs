@@ -539,6 +539,14 @@ fn check_entry(
     // First without the entry points, so a missing or mistyped stage function
     // is reported as such rather than as a call that doesn't resolve.
     let mut own = compose_traced(pack, kind, file, at, false);
+    // An entity stage built against the scene shares its module with Horizon's entity vertex
+    // code, whose builtin calls a pack function of the same name would take over.
+    if kind == StageKind::Entity && compose_traced(pack, kind, file, at, true).text != own.text {
+        let problems = shadowed_builtins(&own);
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+    }
     let entries = own.parts.pop().expect("entries are the last part");
     own.text.truncate(entries.1.start);
     if pack.manifest.ray_tracing.is_some() {
@@ -877,6 +885,43 @@ fn vertex_reach(
     problems
 }
 
+/// WGSL's builtin functions.
+const WGSL_BUILTINS: &str = "\
+    abs acos acosh all any arrayLength asin asinh atan atan2 atanh atomicAdd atomicAnd \
+    atomicCompareExchangeWeak atomicExchange atomicLoad atomicMax atomicMin atomicOr \
+    atomicStore atomicSub atomicXor bitcast ceil clamp cos cosh countLeadingZeros countOneBits \
+    countTrailingZeros cross degrees determinant distance dot dot4I8Packed dot4U8Packed dpdx \
+    dpdxCoarse dpdxFine dpdy dpdyCoarse dpdyFine exp exp2 extractBits faceForward \
+    firstLeadingBit firstTrailingBit floor fma fract frexp fwidth fwidthCoarse fwidthFine \
+    insertBits inverseSqrt ldexp length log log2 max min mix modf normalize pack2x16float \
+    pack2x16snorm pack2x16unorm pack4x8snorm pack4x8unorm pack4xI8 pack4xI8Clamp pack4xU8 \
+    pack4xU8Clamp pow quantizeToF16 radians reflect refract reverseBits round saturate select \
+    sign sin sinh smoothstep sqrt step storageBarrier tan tanh textureBarrier \
+    textureDimensions textureGather textureGatherCompare textureLoad textureNumLayers \
+    textureNumLevels textureNumSamples textureSample textureSampleBaseClampToEdge \
+    textureSampleBias textureSampleCompare textureSampleCompareLevel textureSampleGrad \
+    textureSampleLevel textureStore transpose trunc unpack2x16float unpack2x16snorm \
+    unpack2x16unorm unpack4x8snorm unpack4x8unorm unpack4xI8 unpack4xU8 workgroupBarrier \
+    workgroupUniformLoad";
+
+/// The pack's functions in `composed` named as a WGSL builtin: Horizon's own code in the same
+/// module would call them in place of the builtin.
+fn shadowed_builtins(composed: &Composed) -> Vec<Problem> {
+    let names = identifiers(&composed.text);
+    (names.windows(2))
+        .filter(|w| w[0].1 == "fn" && WGSL_BUILTINS.split_whitespace().any(|b| b == w[1].1))
+        .map(|w| {
+            let message = format!(
+                "`fn {}` takes the name of a WGSL builtin: an `[entity]` stage that traces or \
+                 reads the light sources shares its module with Horizon's entity vertex code, \
+                 which would call it in place of the builtin; name it otherwise",
+                w[1].1
+            );
+            located(composed, Some(w[1].0), message)
+        })
+        .collect()
+}
+
 fn located(composed: &Composed, offset: Option<usize>, message: String) -> Problem {
     match offset {
         Some(at) => {
@@ -903,8 +948,9 @@ fn parse(composed: &Composed) -> Result<naga::Module, Vec<Problem>> {
         let light =
             |n: &&str| e.message() == format!("no definition in scope for identifier: `{n}`");
         if crate::stages::LIGHT_NAMES.iter().any(light) {
-            message += "; the light sources are only in the post, compute, `[[before_world]]` \
-                        and material stages of a pack with `lights = true` under `[ray_tracing]`";
+            message += "; the light sources are only in the post, compute, `[[before_world]]`, \
+                        material and entity stages of a pack with `lights = true` under \
+                        `[ray_tracing]`";
         }
         let at = label.and_then(|(span, _)| span.to_range()).map(|r| r.start);
         vec![located(composed, at, message)]
