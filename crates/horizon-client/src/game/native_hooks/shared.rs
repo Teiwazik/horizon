@@ -4544,7 +4544,11 @@ mod tests {
         let mut pointer = ModScreenPointer::default();
         pointer.screen_changed(Screen::Mod);
         pointer.moved(5.0, 5.0);
-        assert_eq!(pointer.motion(), [0.0, 0.0], "a free pointer moves the cursor");
+        assert_eq!(
+            pointer.motion(),
+            [0.0, 0.0],
+            "a free pointer moves the cursor"
+        );
         pointer.grab = true;
         pointer.moved(3.0, -2.0);
         pointer.moved(1.5, 4.0);

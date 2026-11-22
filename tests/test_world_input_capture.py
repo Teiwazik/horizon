@@ -73,7 +73,13 @@ class WorldInputCaptureTests(unittest.TestCase):
         fixture = r'''
 use std::cell::Cell;
 #[derive(Clone, Copy, PartialEq)]
-enum Screen { Playing, Paused, Inventory, Chat }
+enum Screen { Playing, Paused, Inventory, Chat, Mod }
+#[derive(Default)]
+struct ModScreenPointer { grab: bool }
+mod native_hooks {
+    use super::Screen;
+REFOCUS
+}
 #[derive(Clone, Copy)]
 enum CursorGrabMode { Locked, Confined, None }
 mod winit {
@@ -148,7 +154,7 @@ struct Game {
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
     server_packs: ServerPacks, command_prompt: Option<()>, options: Options, settings: Settings,
     unclaimed_window: bool, scripted: bool, focus_after_run: Option<bool>, applied_focus: Vec<bool>,
-    unclaimed_modifiers: Option<u8>, applied_modifiers: Vec<u8>,
+    unclaimed_modifiers: Option<u8>, applied_modifiers: Vec<u8>, native_screen_pointer: ModScreenPointer,
 }
 impl Default for Game {
     fn default() -> Self {
@@ -161,7 +167,8 @@ impl Default for Game {
             renderer: None, cursor: (0.0, 0.0), server_packs: ServerPacks::default(),
             command_prompt: None, options: Options::default(), settings: Settings,
             unclaimed_window: false, scripted: false, focus_after_run: None, applied_focus: Vec::new(),
-            unclaimed_modifiers: None, applied_modifiers: Vec::new() }
+            unclaimed_modifiers: None, applied_modifiers: Vec::new(),
+            native_screen_pointer: ModScreenPointer::default() }
     }
 }
 HELPER
@@ -341,6 +348,15 @@ fn main() {
         game.server_packs.prompt = Some(());
         game.regrab_on_refocus();
         assert!(!game.captured);
+    }
+    // A mod's screen takes the pointer back on focus only while its mod asks for the grab.
+    for grab in [false, true] {
+        let mut game = Game::default();
+        game.screen = Screen::Mod;
+        game.native_screen_pointer.grab = grab;
+        game.regrab_on_refocus = true;
+        game.regrab_on_refocus();
+        assert_eq!(game.captured, grab, "grab={grab}");
     }
     // Studio replays keep the pointer released after focus returns; camera look
     // only captures it while the right mouse button is held.
@@ -580,6 +596,10 @@ fn main() {
         grab_helpers = source[grab_start:source.index("\n#[cfg(test)]", grab_start)]
         fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change") +
                                   "\n" + grab_helpers)
+        hooks = (ROOT / "crates/horizon-client/src/game/native_hooks/shared.rs").read_text(encoding="utf-8")
+        start = hooks.index("pub(in crate::game) fn refocus_regrabs(")
+        refocus = hooks[start:hooks.index("\n}\n", start) + 2].replace("pub(in crate::game) fn", "pub fn", 1)
+        fixture = fixture.replace("REFOCUS", refocus)
         fixture = fixture.replace("METHODS", capture + "\n" +
                                   method(source, "capture_loaded_world") + "\n" +
                                   method(source, "regrab_on_refocus") + "\n" +
@@ -607,7 +627,12 @@ use mouse::{MouseLook, LookOptions, Rotation};
 struct ActiveEventLoop;
 struct DeviceId;
 enum DeviceEvent { MouseMotion { delta: (f64, f64) }, Other }
-#[derive(PartialEq)] enum Screen { Playing, Paused }
+#[derive(PartialEq)] enum Screen { Playing, Paused, Mod }
+// `native_hooks/shared.rs`: a mod screen that grabbed the pointer collects the motion.
+#[derive(Default)] struct ModScreenPointer { grab: bool, motion: [f64; 2] }
+impl ModScreenPointer {
+    fn moved(&mut self, x: f64, y: f64) { if self.grab { self.motion[0] += x; self.motion[1] += y; } }
+}
 struct Options { offscreen: bool }
 mod input_trace {
     pub enum InputOrigin { User }
@@ -624,7 +649,7 @@ impl Studio { fn flying(&self) -> bool { self.freecam.active } }
 struct Game {
     pending_save: Option<()>, captured: bool, focused: bool, keyboard_mouse: bool, split_window: bool,
     options: Options, screen: Screen, mouse: MouseLook, last_input: Instant, pad: Pad, scripted: bool,
-    unclaimed_window: bool, replay: Replay, studio: Studio,
+    unclaimed_window: bool, replay: Replay, studio: Studio, native_screen_pointer: ModScreenPointer,
 }
 impl Game {
     fn scripted_run(&self) -> bool { self.scripted }
@@ -660,6 +685,7 @@ fn main() {
                 mouse: MouseLook::default(), last_input: Instant::now(), pad: Pad { radial: Radial(radial) },
                 scripted, unclaimed_window: unclaimed, replay: Replay { driver: replay.then_some(()) },
                 studio: Studio { freecam: StudioFreecam { active: freecam } },
+                native_screen_pointer: ModScreenPointer::default(),
             };
             game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (0.0, 0.0) });
             game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
@@ -671,6 +697,24 @@ fn main() {
             assert!((rotation.y_rot - want.0).abs() < 0.00001 && (rotation.x_rot - want.1).abs() < 0.00001,
                 "rotation=({}, {}), offscreen={offscreen}, split={split}, owner={owner}, active={active}, playing={playing}, saving={saving}, radial={radial}, scripted={scripted}, unclaimed={unclaimed}, replay={replay}, freecam={freecam}", rotation.y_rot, rotation.x_rot);
         }
+    }
+    // A mod screen never turns the camera; one that grabbed the pointer reads the motion itself.
+    for grab in [false, true] {
+        let mut game = Game {
+            pending_save: None, captured: true, focused: true, keyboard_mouse: true, split_window: false,
+            options: Options { offscreen: false }, screen: Screen::Mod, mouse: MouseLook::default(),
+            last_input: Instant::now(), pad: Pad { radial: Radial(false) }, scripted: false,
+            unclaimed_window: false, replay: Replay { driver: None },
+            studio: Studio { freecam: StudioFreecam { active: false } },
+            native_screen_pointer: ModScreenPointer { grab, motion: [0.0; 2] },
+        };
+        game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
+        let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false };
+        let turned = game.mouse.handle_accumulated_movement(1.0, true, true, look)
+            .map_or(false, |(x, y)| x != 0.0 || y != 0.0);
+        assert!(!turned, "a mod screen turned the camera (grab={grab})");
+        let want = if grab { [20.0, -10.0] } else { [0.0, 0.0] };
+        assert_eq!(game.native_screen_pointer.motion, want, "grab={grab}");
     }
 }
 '''
