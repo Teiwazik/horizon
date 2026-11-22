@@ -25,7 +25,7 @@ pub const PAGE_SLOTS: u32 = 16;
 pub const MAX_PAGES: u32 = 64;
 /// The resolve binds that many pages, the block tables and the origins by section id.
 const STORAGE_BUFFERS: u32 = PAGE_SLOTS + 2;
-const IDS: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+pub(super) const IDS: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 
 /// Whether the visibility buffer is asked for, and the device binds storage buffers enough.
 pub fn wanted(device: &wgpu::Device) -> bool {
@@ -47,6 +47,8 @@ pub struct Visbuffer {
     blocks_per_page: u64,
     /// The IDs, the size of the world's depth.
     ids: Option<(wgpu::TextureView, [u32; 2])>,
+    /// The size the IDs or block tables had no room at (#13624).
+    no_room: Option<[u32; 2]>,
 }
 
 impl Visbuffer {
@@ -191,30 +193,64 @@ impl Visbuffer {
             blocks: None,
             blocks_per_page,
             ids: None,
+            no_room: None,
         }
     }
 
     /// Makes the IDs the world depth's `size`, and the block tables hold the pages `flat`
-    /// draws this frame.
-    pub fn fit(&mut self, device: &wgpu::Device, size: [u32; 2], flat: &Flat) {
+    /// draws this frame: `false` where there was no room for them (#13624), and the frame
+    /// draws solid terrain without the visibility buffer. Nothing that failed is kept, the old
+    /// one goes first, and that size is not tried again until it changes.
+    pub fn fit(&mut self, device: &wgpu::Device, size: [u32; 2], flat: &Flat) -> bool {
+        if self.no_room == Some(size) {
+            return false;
+        }
         let pages = flat.calls[..flat.solid_calls]
             .iter()
             .map(|c| c.page + 1)
             .max()
             .unwrap_or(1);
+        self.fit_page_count(device, size, pages)
+    }
+
+    /// Makes the IDs the world depth's `size`, and the block tables hold at least `pages`.
+    pub fn fit_pages(&mut self, device: &wgpu::Device, size: [u32; 2], pages: &[u32]) -> bool {
+        if self.no_room == Some(size) {
+            return false;
+        }
+        let count = pages.iter().map(|&p| p + 1).max().unwrap_or(1);
+        self.fit_page_count(device, size, count)
+    }
+
+    fn fit_page_count(&mut self, device: &wgpu::Device, size: [u32; 2], pages: u32) -> bool {
+        use super::frame_targets::{Kind, made};
         if self.blocks.as_ref().is_none_or(|(_, n)| *n < pages) {
             let pages = pages.next_power_of_two();
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Visibility buffer block tables"),
-                size: u64::from(pages) * self.blocks_per_page * 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+            self.blocks = None;
+            self.blocks = made(device, Kind::Visibility, || {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Visibility buffer block tables"),
+                    size: u64::from(pages) * self.blocks_per_page * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (buffer, pages)
             });
-            self.blocks = Some((buffer, pages));
+            if self.blocks.is_none() {
+                self.no_room = Some(size);
+                return false;
+            }
         }
         if self.ids.as_ref().is_some_and(|(_, s)| *s == size) {
-            return;
+            return true;
         }
+        self.ids = None;
+        self.ids = made(device, Kind::Visibility, || Self::ids(device, size));
+        self.no_room = self.ids.is_none().then_some(size);
+        self.ids.is_some()
+    }
+
+    fn ids(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::TextureView, [u32; 2]) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Visibility buffer IDs"),
             size: wgpu::Extent3d {
@@ -229,7 +265,7 @@ impl Visbuffer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.ids = Some((texture.create_view(&Default::default()), size));
+        (texture.create_view(&Default::default()), size)
     }
 
     /// Pass 1's render pass over the world's `depth`: the IDs cleared (`clear`, phase 1) or
@@ -332,20 +368,37 @@ impl Visbuffer {
         arena: &Arena,
         timing: Option<&mut PassTiming>,
     ) {
-        let (Some((ids, _)), Some((blocks, _))) = (&self.ids, &self.blocks) else {
-            return;
-        };
         let mut pages: Vec<u32> = flat.calls[..flat.solid_calls]
             .iter()
             .map(|c| c.page)
             .collect();
         pages.sort_unstable();
         pages.dedup();
+        self.resolve_pages(
+            device, encoder, target, terrain, flat, arena, &pages, timing,
+        );
+    }
+
+    /// Shades the visibility buffer IDs for `pages` into `target`.
+    pub fn resolve_pages(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        terrain: &wgpu::BindGroup,
+        flat: &Flat,
+        arena: &Arena,
+        pages: &[u32],
+        timing: Option<&mut PassTiming>,
+    ) {
+        let (Some((ids, _)), Some((blocks, _))) = (&self.ids, &self.blocks) else {
+            return;
+        };
         let Some(&any) = pages.first() else {
             return;
         };
         let table = self.blocks_per_page * 4;
-        for &page in &pages {
+        for &page in pages {
             if let Some(from) = flat.block_table(page) {
                 encoder.copy_buffer_to_buffer(from, 0, blocks, u64::from(page) * table, table);
             }

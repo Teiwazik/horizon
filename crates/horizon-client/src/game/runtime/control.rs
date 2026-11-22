@@ -14,12 +14,12 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 
 /// The control protocol's version (`docs/api/stability.md`): before 1.0 an
 /// addition makes the next patch and a breaking change the next line.
-const PROTOCOL: &str = "0.1.0";
+const PROTOCOL: &str = "0.1.1";
 
 /// The command groups the game serves, as `help` chains them: what `hello` reports as its features.
 const FEATURES: &[&str] = &[
     "game", "station", "blocks", "lan", "friends", "render", "sculk", "agent", "ui", "options",
-    "events", "saves", "pad", "studio",
+    "events", "saves", "pad", "studio", "export",
 ];
 
 /// `hello`: the protocol the socket speaks, the game's release and the command groups it serves.
@@ -54,6 +54,7 @@ const HELP: &[&str] = &[
     "fill X1 Y1 Z1 X2 Y2 Z2 BLOCK   set a box of loaded blocks",
     "resume                         leave the pause menu",
     "screenshot PATH                write the next frame as PNG",
+    "export start|step|stop|status  capture offscreen on a fixed clock (horizon-ctl export --help)",
     "screenshot-sequence FRAMES STEP_MS PATH|cancel  a shader pack's first frames on a set clock (HORIZON_STILL), the last as PNG",
     "chat TEXT                      send a chat line or /command as if typed",
     "type TEXT                      type into the open chat box (key enter tap sends)",
@@ -82,6 +83,8 @@ pub struct Flight {
     to: Vec3,
     pitch: f32,
     started: Instant,
+    /// Includes only fixed-clock frame time during export.
+    elapsed: Duration,
     seconds: f64,
     /// Reply with every frame time too (`fly ... PITCH raw`).
     raw: bool,
@@ -102,8 +105,11 @@ impl Game<'_> {
             return;
         };
         flight.tick_ms.push(tick_ms);
-        let flight = &*flight;
-        let t = (flight.started.elapsed().as_secs_f64() / flight.seconds).min(1.0);
+        flight.elapsed = self.export.as_ref().map_or_else(
+            || flight.started.elapsed(),
+            |session| flight.elapsed + session.frame_elapsed(),
+        );
+        let t = (flight.elapsed.as_secs_f64() / flight.seconds).min(1.0);
         let (a, b) = (flight.from, flight.to);
         let d = [b.x - a.x, b.y - a.y, b.z - a.z];
         let at = Vec3::new(a.x + d[0] * t, a.y + d[1] * t, a.z + d[2] * t);
@@ -118,6 +124,7 @@ impl Game<'_> {
             player.flying = true;
             self.previous_position = at;
         }
+        self.notify_export_view_move(at);
         if t >= 1.0
             && let Some(flight) = self.flight.take()
         {
@@ -132,6 +139,20 @@ impl Game<'_> {
             let _ = flight.reply.send(summary.to_string());
         }
     }
+    fn notify_export_view_move(&mut self, at: Vec3) {
+        // The next simulation tick waits while the live server sends the new view.
+        if self.export.is_some() && super::player_chunk(at) != self.streaming.center {
+            self.send_export_view_position();
+        }
+    }
+
+    pub(super) fn resume_flight_clock(&mut self) {
+        if let Some(flight) = &mut self.flight {
+            let now = Instant::now();
+            flight.started = now.checked_sub(flight.elapsed).unwrap_or(now);
+        }
+    }
+
     /// The game's settings a render capture records beside the renderer's own state.
     fn render_capture_settings(&self) -> horizon_client::gfx::capture::Settings {
         let s = &self.settings;
@@ -210,6 +231,22 @@ impl Game<'_> {
             } else {
                 self.pending_bench = Some((deadline, reply, raw));
             }
+        }
+        // Without frames too: a screenshot no frame takes fails rather than waiting for good.
+        // A result still to be answered (a rebuilt renderer carries it over) is left to the
+        // next frame, which answers it whether or not it is drawn.
+        let renderer = self.renderer.as_mut();
+        if renderer
+            .as_ref()
+            .is_none_or(|r| r.screenshot_result.is_none())
+        {
+            let not_drawn = renderer.as_ref().and_then(|r| r.not_drawn());
+            super::pending_screenshot::expire(
+                &mut self.pending_screenshot,
+                renderer.map(|r| &mut r.screenshot),
+                not_drawn,
+                Instant::now(),
+            );
         }
         horizon_client::widgets::end_frame(self.frames);
         self.narrate_screen();
@@ -379,9 +416,13 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
     ) -> Result<Option<Value>> {
         let words: Vec<&str> = line.split_whitespace().collect();
+        self.export_gate(&words)?;
         self.screenshot_sequence_gate(words.first().copied())?;
         if words.first() == Some(&"screenshot-sequence") {
             return self.screenshot_sequence_command(line, reply);
+        }
+        if words.first() == Some(&"export") {
+            return self.frame_export_command(&words[1..]).map(Some);
         }
         if self.pending_save.is_some() && words.first() != Some(&"quit") {
             return Err("a world save is in progress".into());
@@ -878,6 +919,7 @@ impl Game<'_> {
                 }
                 self.left = false;
                 self.right = false;
+                self.agent_mouse_holds = [false; 2];
                 ok()
             }
             "mouse" => {
@@ -948,6 +990,7 @@ impl Game<'_> {
                 player.velocity = Vec3::new(0.0, 0.0, 0.0);
                 player.fall_distance = 0.0;
                 self.previous_position = to;
+                self.notify_export_view_move(to);
                 ok()
             }
             "emote" => match words.get(1).copied() {
@@ -1107,19 +1150,16 @@ impl Game<'_> {
             }
             "screenshot" => {
                 let renderer = self.renderer.as_mut().ok_or("no renderer yet")?;
-                if self.pending_screenshot.is_some() {
-                    return Err("a screenshot is already pending".into());
-                }
                 arg(1)?;
                 // The rest of the line: a path may hold spaces.
                 let path = line.trim_start().strip_prefix("screenshot").unwrap_or("");
-                renderer.screenshot = Some(horizon_client::gfx::ScreenshotRequest {
-                    path: path.trim().into(),
-                    size: None,
-                    scaled: false,
-                    background: false,
-                });
-                self.pending_screenshot = Some(reply.clone());
+                super::pending_screenshot::begin(
+                    &mut self.pending_screenshot,
+                    &mut renderer.screenshot,
+                    path.trim().into(),
+                    reply,
+                    Instant::now(),
+                )?;
                 Ok(None)
             }
             "chat" => {
@@ -1269,6 +1309,7 @@ impl Game<'_> {
                     to: Vec3::new(n(4)?, n(5)?, n(6)?),
                     pitch,
                     started: Instant::now(),
+                    elapsed: Duration::ZERO,
                     seconds: n(7)?.max(0.1),
                     raw: words.get(9) == Some(&"raw"),
                     reply: reply.clone(),
@@ -1608,6 +1649,19 @@ impl Game<'_> {
             .iter()
             .map(|(id, (pos, stage, _))| json!({ "id": id, "pos": pos, "stage": stage }))
             .collect();
+        // Its own `json!` object: the status macro is already at the crate's recursion limit.
+        let display = self
+            .window
+            .as_deref()
+            .and_then(horizon_client::monitor::of)
+            .map(|m| {
+                json!({
+                    "width": m.size().width,
+                    "height": m.size().height,
+                    "scale": m.scale_factor(),
+                    "refresh_hz": m.refresh_rate_millihertz().map(|r| r.div_ceil(1000)),
+                })
+            });
         let mut status = json!({
             "screen": self.screen_name(),
             "debug": {
@@ -1645,22 +1699,18 @@ impl Game<'_> {
             "carts": self.remote_carts().unwrap_or_else(|| self.carts.iter().map(|c| serde_json::json!({"kind": c.kind.id(), "position": [c.position.x, c.position.y, c.position.z], "velocity": [c.velocity.x, c.velocity.y, c.velocity.z]})).collect::<Vec<_>>()),
             "riding": self.riding,
             "using": self.using,
-            "render_distance": self.streaming.radius,
+            "render_distance": self.effective_render_distance(),
             "chunks": self.world.chunks.len(),
             "mobs": self.mobs.len(),
             "block_entities": self.world.block_entities.len(),
             "pending_chunks": self.streaming.pending() + self.pending_uploads.len() + self.remote_backlog(),
+            "terrain_loading": self.terrain_loading(),
             "generated_chunks": self.streaming.generated_total,
             "meshed_sections": self.streaming.meshed_total,
             "streaming": self.streaming.stages().into_iter().map(|(k, v)| (k.to_string(), v.into())).collect::<serde_json::Map<_, _>>(),
             "dirty_light": self.world.dirty_light.len(),
             "renderer": renderer,
-            "display": self.window.as_deref().and_then(horizon_client::monitor::of).map(|m| json!({
-                "width": m.size().width,
-                "height": m.size().height,
-                "scale": m.scale_factor(),
-                "refresh_hz": m.refresh_rate_millihertz().map(|r| r.div_ceil(1000)),
-            })),
+            "display": display,
             "uptime_seconds": self.started.elapsed().as_secs_f64(),
             "server": self.remote_status(),
             // The names the name tags show now, seen from the eyes.
@@ -1669,6 +1719,9 @@ impl Game<'_> {
                 .map(|e| self.shown_name_tags(glam::DVec3::from_array(e))),
         });
         status["lod"] = lod;
+        // Why `frames` stands still, if it does (#19436).
+        let not_drawn = self.renderer.as_ref().and_then(|r| r.not_drawn());
+        status["not_drawn"] = not_drawn.map(|n| n.as_str()).into();
         // Parallel Tick: the setting, whether the next tick shares its work, and Auto's state.
         let (setting, on, auto) = horizon_client::parallel::status();
         status["parallel_tick"] = json!({ "setting": setting, "on": on, "auto": auto });

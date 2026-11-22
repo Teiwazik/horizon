@@ -320,12 +320,15 @@ impl GraphicsApi {
             .into_iter()
             .find(|api| api.name().eq_ignore_ascii_case(s.trim()))
     }
-    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else the setting.
-    pub fn with_env(self) -> Self {
+    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else `None`.
+    pub fn from_env() -> Option<Self> {
         std::env::var("HORIZON_GRAPHICS_API")
             .ok()
             .and_then(|v| Self::from_name(&v))
-            .unwrap_or(self)
+    }
+    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else the setting.
+    pub fn with_env(self) -> Self {
+        Self::from_env().unwrap_or(self)
     }
 }
 
@@ -833,9 +836,6 @@ pub struct Graphics {
     pub lod_distance: u32,
     /// How finely far terrain is drawn; Full unless the player picks Reduced.
     pub far_detail: FarDetail,
-    /// Far terrain from servers' BlueMap web maps; no server has one unless
-    /// the player names it (`blueMap:` lines) or turns on auto-detect.
-    pub blue_map: crate::bluemap::Settings,
     /// Skip sections hidden behind closed ones (vanilla's occlusion graph).
     pub cave_culling: bool,
     /// Near solid terrain culled, and its draws listed, on the GPU (`gfx::gpu_culling`), where it
@@ -939,6 +939,9 @@ pub struct Graphics {
     /// mode is changed or the window starts on another driver ([`Graphics::hdr_held`]).
     /// Empty for a marker that named no driver: the first one seen holds it.
     pub hdr_failed_start: Option<String>,
+    /// The graphics driver whose last start lost the graphics device with HDR output on
+    /// (`gfx::safe_start`): HDR output is held back on it like [`Graphics::hdr_failed_start`].
+    pub safe_start: Option<String>,
     /// Battery mode: at most 60 frames per second in a world and 30 in menus
     /// or behind other windows, and half the automatic size of the pools the
     /// client starts — chunk building, the tick's helpers, chunk decoding, saves,
@@ -952,6 +955,12 @@ pub struct Graphics {
     pub shadow_cache: bool,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
+    /// Backend hold after a GPU search watchdog timeout (`gfx::safe_start`): applied in memory
+    /// without overwriting [`Graphics::api`] (`graphicsApi`) in `horizon-graphics.txt`, and
+    /// dropped when the graphics driver changes (`watchdog_driver`) or `api` is changed.
+    pub watchdog_api: Option<GraphicsApi>,
+    /// Graphics driver on which [`Graphics::watchdog_api`] settled (`watchdogDriver`).
+    pub watchdog_driver: Option<String>,
     /// Translucent quads in vertex buffers of their own (`gfx`'s translucent arena), so their
     /// back-to-front draws go out in a few calls, for a little more video memory. On by
     /// default (Translucent Batching, Advanced graphics); read when a renderer is made (start,
@@ -970,7 +979,6 @@ impl Default for Graphics {
             preset: Preset::Custom,
             lod_distance: 0,
             far_detail: FarDetail::Full,
-            blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: GpuCullingMode::Off,
             entity_culling: EntityCullingMode::Off,
@@ -1017,9 +1025,12 @@ impl Default for Graphics {
             hdr_color_boost: 0,
             hdr_look: HdrLook::Horizon,
             hdr_failed_start: None,
+            safe_start: None,
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
+            watchdog_api: None,
+            watchdog_driver: None,
             translucent_batching: true,
             shader_pack: String::new(),
         }
@@ -1033,14 +1044,6 @@ impl Graphics {
         let mut g: Self = fs::read_to_string(dir.join(FILE))
             .map(|t| Self::parse(&t))
             .unwrap_or_default();
-        g.blue_map.servers = match fs::read_to_string(dir.join(crate::bluemap::SERVERS_FILE)) {
-            Ok(text) => crate::bluemap::Settings::parse_servers(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                log::warn!("{}: {e}; no BlueMap is named", crate::bluemap::SERVERS_FILE);
-                Vec::new()
-            }
-        };
         let marker = dir.join(HDR_MARKER);
         if let Ok(text) = fs::read_to_string(&marker)
             && fs::remove_file(&marker).is_ok()
@@ -1056,22 +1059,31 @@ impl Graphics {
     }
     /// Whether HDR output is held back on a window whose graphics driver is `driver`
     /// (`gfx::output::window_driver`): the last start on it ended before HDR output
-    /// showed a frame ([`Graphics::hdr_failed_start`]).
+    /// showed a frame ([`Graphics::hdr_failed_start`]), or lost the graphics device
+    /// ([`Graphics::safe_start`]).
     pub fn hdr_held(&self, driver: &str) -> bool {
         self.hdr_failed_start
             .as_deref()
             .is_some_and(|failed| failed.is_empty() || failed == driver)
+            || self.safe_start_holds_hdr(driver)
     }
     /// The window's renderer runs on `driver`: a failed start that named no driver is this
     /// one's now, and another driver's (a driver update, another GPU) is dropped, so HDR output
-    /// is tried again. True when it changed.
+    /// is tried again; the device-loss hold settles too (`settle_safe_start`). True when it
+    /// changed.
     pub fn settle_failed_start(&mut self, driver: &str) -> bool {
+        let lost = self.settle_safe_start(driver);
         match self.hdr_failed_start.as_deref() {
             Some("") => self.hdr_failed_start = Some(driver.to_owned()),
             Some(failed) if failed != driver => self.hdr_failed_start = None,
-            _ => return false,
+            _ => return lost,
         }
         true
+    }
+    /// The graphics API to start the renderer with: any active watchdog step-down hold
+    /// ([`Graphics::watchdog_api`]), else the player's configured [`Graphics::api`].
+    pub fn effective_api(&self) -> GraphicsApi {
+        self.watchdog_api.unwrap_or(self.api)
     }
     /// `before`, as Undo brings it back, but never the hold on a driver HDR output failed to
     /// start on: that stays as it is now, and goes when Undo changes the mode, as any change of
@@ -1082,6 +1094,12 @@ impl Graphics {
                 .hdr_failed_start
                 .clone()
                 .filter(|_| self.hdr == before.hdr),
+            safe_start: self.safe_start.clone().filter(|_| self.hdr == before.hdr),
+            watchdog_api: self.watchdog_api.filter(|_| self.api == before.api),
+            watchdog_driver: self
+                .watchdog_driver
+                .clone()
+                .filter(|_| self.api == before.api),
             ..before.clone()
         }
     }
@@ -1108,12 +1126,6 @@ impl Graphics {
                     g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
                 }
                 "farDetail" => g.far_detail = FarDetail::parse(value),
-                "blueMapRadius" => {
-                    if let Some(radius) = crate::bluemap::Settings::parse_radius(value) {
-                        g.blue_map.radius = radius;
-                    }
-                }
-                "blueMapAutoDetect" => g.blue_map.auto_detect = flag(g.blue_map.auto_detect),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "gpuCulling" => g.gpu_culling = GpuCullingMode::parse(value, g.gpu_culling),
                 "entityCulling" => g.entity_culling = EntityCullingMode::parse(value),
@@ -1197,10 +1209,13 @@ impl Graphics {
                 "hdrBlackLevel" => g.hdr_black_level = number(g.hdr_black_level).min(100),
                 "hdrColorBoost" => g.hdr_color_boost = number(g.hdr_color_boost).min(100),
                 "hdrFailedStart" => g.hdr_failed_start = Some(value.to_owned()),
+                "safeStart" => g.safe_start = Some(value.to_owned()),
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
                 "batchTranslucent" => g.translucent_batching = flag(g.translucent_batching),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
+                "watchdogApi" => g.watchdog_api = GraphicsApi::from_name(value),
+                "watchdogDriver" => g.watchdog_driver = Some(value.to_owned()),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
                     g.overlay = match value {
@@ -1297,8 +1312,16 @@ impl Graphics {
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
         }
+        if let Some(driver) = &self.safe_start {
+            text += &format!("safeStart:{driver}\n");
+        }
+        if let Some(api) = self.watchdog_api {
+            text += &format!("watchdogApi:{}\n", api.name());
+        }
+        if let Some(driver) = &self.watchdog_driver {
+            text += &format!("watchdogDriver:{driver}\n");
+        }
         text += &format!("msaa4x:{}\n", bool_text(self.msaa4x));
-        text += &self.blue_map.serialize();
         text
     }
     pub fn save(&self, dir: &Path) {
@@ -1632,12 +1655,6 @@ mod tests {
             preset: Preset::Balanced,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,
-            blue_map: crate::bluemap::Settings {
-                radius: 40,
-                auto_detect: true,
-                // In their own file (`bluemap::SERVERS_FILE`).
-                servers: Vec::new(),
-            },
             cave_culling: false,
             gpu_culling: GpuCullingMode::On,
             entity_culling: EntityCullingMode::Synchronous,
@@ -1685,9 +1702,12 @@ mod tests {
             hdr_failed_start: Some(
                 "Vulkan 10de:2684 NVIDIA GeForce RTX 4090; NVIDIA; 581.57".into(),
             ),
+            safe_start: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
             battery: true,
             shadow_cache: true,
             api: GraphicsApi::Dx12,
+            watchdog_api: Some(GraphicsApi::OpenGl),
+            watchdog_driver: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
             translucent_batching: false,
             shader_pack: "Golden Hour".into(),
         };
@@ -1731,13 +1751,6 @@ mod tests {
         assert_eq!(
             Graphics::parse("entityCulling:false\n").entity_culling,
             EntityCullingMode::Off
-        );
-        // A map named here (a shared instance's, a pack's) is no map.
-        assert!(
-            Graphics::parse("blueMap:play.example.net https://map.example.net\n")
-                .blue_map
-                .servers
-                .is_empty()
         );
         assert_eq!(Graphics::parse(""), Graphics::default());
         // Translucent Batching is on, in files from before it too; only false turns it off,

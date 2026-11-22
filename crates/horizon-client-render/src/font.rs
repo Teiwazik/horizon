@@ -466,7 +466,9 @@ fn load_bitmap(
                 top,
                 right: cell_w as f32 * scale,
                 bottom: top + cell_h as f32 * scale,
-                advance: (0.5 + used as f32 * scale).floor() + 1.0,
+                // `(int) (0.5 + width * scale)`: truncated toward zero, so a negative
+                // `height` gives a cell an advance one more than flooring would.
+                advance: (0.5 + used as f32 * scale).trunc() + 1.0,
                 offset: 1.0,
             };
             if metrics_only {
@@ -553,8 +555,14 @@ impl TrueType {
         self.font.as_scaled(self.scale).h_advance(id).round() / self.oversample
     }
     /// `loadGlyph` and its bitmap: the grey coverage as `rrrr` texels
-    /// (`text_intensity`), below 0.1 cut (its discard).
-    fn glyph(&self, id: ab_glyph::GlyphId) -> (Glyph, Option<(u32, u32, Vec<u8>)>) {
+    /// (`text_intensity`), below 0.1 cut (its discard). A glyph wider or taller than `max`
+    /// (what the atlas can hold) is refused before its bitmap is allocated: a pack's `size`
+    /// and `oversample` are otherwise unbounded.
+    fn glyph(
+        &self,
+        id: ab_glyph::GlyphId,
+        max: (u32, u32),
+    ) -> Option<(Glyph, Option<(u32, u32, Vec<u8>)>)> {
         let advance = self.advance(id);
         let glyph =
             id.with_scale_and_position(self.scale, ab_glyph::point(self.shift.0, self.shift.1));
@@ -568,14 +576,17 @@ impl TrueType {
             offset: 1.0,
         };
         let Some(outline) = self.font.outline_glyph(glyph) else {
-            return (empty, None);
+            return Some((empty, None));
         };
         let bounds = outline.px_bounds();
         let (w, h) = (bounds.width() as u32, bounds.height() as u32);
         if w == 0 || h == 0 {
-            return (empty, None);
+            return Some((empty, None));
         }
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        if w > max.0 || h > max.1 {
+            return None;
+        }
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
         outline.draw(|x, y, coverage| {
             let v = if coverage < 0.1 {
                 0
@@ -591,7 +602,7 @@ impl TrueType {
         // GlyphBitmap: bitmap_left / bitmap_top over the oversampling, and
         // top = 7 - bearingTop.
         let (left, top) = (bounds.min.x / os, 7.0 + bounds.min.y / os);
-        (
+        Some((
             Glyph {
                 rect: None,
                 left,
@@ -602,7 +613,7 @@ impl TrueType {
                 offset: 1.0,
             },
             Some((w, h, rgba)),
-        )
+        ))
     }
 }
 fn load_hex(source: &ResourceSource, p: &serde_json::Value) -> HashMap<u32, HexGlyph> {
@@ -825,7 +836,12 @@ impl Font {
                         .as_object()
                         .into_iter()
                         .flatten()
-                        .filter_map(|(k, v)| Some((k.chars().next()?, v.as_f64()? as f32)))
+                        .filter_map(|(k, v)| {
+                            let advance = v.as_f64()? as f32;
+                            // A huge number casts to infinity, which would break every
+                            // line that holds the glyph.
+                            advance.is_finite().then_some((k.chars().next()?, advance))
+                        })
                         .collect(),
                 )),
                 "bitmap" => Some(Provider::Bitmap(
@@ -1018,7 +1034,7 @@ impl Font {
                                 ..self.missing
                             });
                         }
-                        let (glyph, bitmap) = ttf.glyph(*id);
+                        let (glyph, bitmap) = ttf.glyph(*id, (self.atlas.0, self.region.1))?;
                         return match bitmap {
                             Some((w, h, rgba)) => {
                                 let (x, y) = region.place(w, h, rgba, self.atlas, self.region)?;
@@ -1714,6 +1730,40 @@ mod tests {
         assert!(texels.iter().any(|t| t[0] == 255));
     }
 
+    /// A pack's `size` and `oversample` are unbounded: a glyph larger than the atlas can hold is
+    /// refused before its bitmap is allocated, and falls to the missing glyph.
+    #[test]
+    fn a_true_type_glyph_too_big_for_the_atlas_is_refused_before_it_is_drawn() {
+        let def = br#"{"providers":[{"type":"ttf","file":"minecraft:mono.ttf","size":100000}]}"#;
+        let root = root(
+            "ttf-huge",
+            &[
+                ("assets/minecraft/font/default.json", def),
+                (
+                    "assets/minecraft/font/mono.ttf",
+                    horizon_theme::fonts::GEIST_MONO,
+                ),
+            ],
+        );
+        let font = load(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let a = font.glyph('A');
+        assert!(a.rect.is_none());
+        assert_eq!(a.advance, 6.0, "the missing glyph");
+        assert!(font.take_patches().is_empty());
+    }
+
+    /// A `space` advance too big for an `f32` would be infinite: the glyph is left out.
+    #[test]
+    fn a_space_advance_too_big_for_a_float_is_ignored() {
+        let def = br#"{"providers":[{"type":"space","advances":{"a":1e300,"b":3}}]}"#;
+        let root = root("space-huge", &[("assets/minecraft/font/default.json", def)]);
+        let font = load(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(font.glyph('a').advance, 6.0, "the missing glyph");
+        assert_eq!(font.glyph('b').advance, 3.0);
+    }
+
     /// A bitmap provider's `file` can name any texture. When the atlas has that
     /// texture (HUD packs keep their glyph sheets outside `textures/font`), the
     /// glyphs are read from it instead of being copied into the small run-time
@@ -1900,6 +1950,25 @@ mod tests {
             6.0,
             "excluded from what obfuscated text draws"
         );
+    }
+
+    /// Server packs pair a cell with its copy at a negative `height` so the two advance a fixed
+    /// amount whatever the cell's width: `(w + 1) + ((int) (0.5 - w) + 1)` is 3 in vanilla.
+    #[test]
+    fn a_negative_height_cell_advances_as_vanilla_truncates() {
+        let sheet = png(8, 8, |x, _| x < 4);
+        let def = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/cell.png","height":8,"ascent":7,"chars":["a"]},{"type":"bitmap","file":"minecraft:font/cell.png","height":-8,"ascent":-32768,"chars":["b"]}]}"#;
+        let root = root(
+            "negative-height",
+            &[
+                ("assets/minecraft/font/default.json", def),
+                ("assets/minecraft/textures/font/cell.png", &sheet),
+            ],
+        );
+        let font = load(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(font.glyph('a').advance, 5.0);
+        assert_eq!(font.glyph('b').advance, -2.0);
     }
 
     /// A font whose first provider is `first` (its sheet `sheet`), then a
