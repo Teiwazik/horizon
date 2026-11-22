@@ -132,7 +132,12 @@ impl Game<'_> {
             Target::Mob(id) => self.mobs.iter().find(|m| m.id == id && !m.removed)?,
             _ => return None,
         };
-        skin_regions(&self.gui.atlas.sprites, mob.skin.as_deref()?, mob.slim, mob.cape.as_deref())
+        skin_regions(
+            &self.gui.atlas.sprites,
+            mob.skin.as_deref()?,
+            mob.slim,
+            mob.cape.as_deref(),
+        )
     }
     fn native_sprite_lookup(&self) -> Lookup<'_> {
         // (no renderer, no arrays: every layer counts as array 0's)
@@ -574,7 +579,14 @@ mod player_skin_tests {
     use horizon_client::hud::Rect;
 
     fn rect(u0: f32, v0: f32) -> Rect {
-        Rect { u0, v0, u1: u0 + 0.25, v1: v0 + 0.25, w: 64, h: 64 }
+        Rect {
+            u0,
+            v0,
+            u1: u0 + 0.25,
+            v1: v0 + 0.25,
+            w: 64,
+            h: 64,
+        }
     }
 
     #[test]
@@ -584,11 +596,22 @@ mod player_skin_tests {
             ("capes/def".to_owned(), rect(0.0, 0.5)),
         ]);
         let skin = skin_regions(&sprites, "skins/abc", true, Some("capes/def")).unwrap();
-        assert_eq!(skin.skin, AtlasRegion::new([0.5, 0.0, 0.75, 0.25], [64, 64]));
+        assert_eq!(
+            skin.skin,
+            AtlasRegion::new([0.5, 0.0, 0.75, 0.25], [64, 64])
+        );
         assert!(skin.slim);
-        assert_eq!(skin.cape, Some(AtlasRegion::new([0.0, 0.5, 0.25, 0.75], [64, 64])));
+        assert_eq!(
+            skin.cape,
+            Some(AtlasRegion::new([0.0, 0.5, 0.25, 0.75], [64, 64]))
+        );
         // A cape whose slot was taken is left out; a skin whose slot was taken answers none.
-        assert_eq!(skin_regions(&sprites, "skins/abc", false, Some("capes/x")).unwrap().cape, None);
+        assert_eq!(
+            skin_regions(&sprites, "skins/abc", false, Some("capes/x"))
+                .unwrap()
+                .cape,
+            None
+        );
         assert_eq!(skin_regions(&sprites, "skins/gone", false, None), None);
     }
 }
