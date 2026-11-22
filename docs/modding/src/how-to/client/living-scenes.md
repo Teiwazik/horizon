@@ -31,6 +31,26 @@ if let Err(why) = event.batch.draw_scene([12.0, 20.0, 140.0, 110.0], &scene, vie
 }
 ```
 
+## Lit blocks
+
+A scene's blocks are drawn full bright unless a block carries light levels.
+`SceneBlock::with_light(sky, block)` draws the block's model and its block entity with their
+colours times this frame's lightmap at those levels, the same texel the world's terrain takes:
+night darkens a sky-lit block, a torch's flicker and night vision show. A scene that shows a
+piece of the client's world reads each block's levels from the world (`level_brightness` with
+`LightLayer::Sky` and `LightLayer::Block`, which a client answers for the level it shows) and
+passes them on:
+
+```rust
+let blocks = picked
+    .iter()
+    .map(|&(pos, state, sky, block)| SceneBlock::new(pos, state, None).with_light(sky, block))
+    .collect();
+```
+
+There is no smooth lighting between scene blocks: a block is lit as one. Before the window has
+drawn its first frame there is no lightmap, and lit blocks are drawn full bright.
+
 ## Entities
 
 A `SceneEntity` holds the same `GuiEntity` that `DrawContext::entity` draws: a new entity
@@ -97,5 +117,5 @@ returns a `SceneError`:
 ## Not yet
 
 - Additive (glowing) particle quads and pack (Polytone) particles are not drawn in scenes.
-- A scene's blocks have no light, so a block whose animate tick reads light behaves as
-  it would in the dark.
+- `with_light` only colours the drawing: a block whose animate tick reads light still
+  behaves as it would in the dark.

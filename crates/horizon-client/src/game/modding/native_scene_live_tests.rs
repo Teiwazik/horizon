@@ -152,6 +152,7 @@ fn a_scene_starts_over_when_its_blocks_change() {
             pos: [0, 0, 0],
             state: BlockStateId(state),
             entity: None,
+            light: None,
         }]
     };
     assert_eq!(scene_key(&blocks(5)), scene_key(&blocks(5)));

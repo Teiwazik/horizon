@@ -42,6 +42,7 @@ pub(in crate::game) fn scene_blocks(
                     .to_engine(block.state)
                     .map_err(|_| mod_api::SceneError::BadBlock { index: at })?,
                 entity: block.entity.as_ref(),
+                light: block.light,
             })
         })
         .collect()
@@ -112,7 +113,7 @@ mod tests {
         let mut scene = vec![
             mod_api::SceneBlock::new([0, 0, 0], north, None),
             mod_api::SceneBlock::new([1, 0, 0], east, Some(entity)),
-            mod_api::SceneBlock::new([2, 0, 0], north, None),
+            mod_api::SceneBlock::new([2, 0, 0], north, None).with_light(16, 7),
         ];
         let original = scene.clone();
         let prepared = scene_blocks(&scene).unwrap();
@@ -121,6 +122,10 @@ mod tests {
             [BlockStateId(2), BlockStateId(1), BlockStateId(2)]
         );
         assert_eq!(prepared[1].pos, [1, 0, 0]);
+        assert_eq!(
+            prepared.iter().map(|b| b.light).collect::<Vec<_>>(),
+            [None, None, Some([15, 7])]
+        );
         assert!(std::ptr::eq(
             prepared[1].entity.unwrap(),
             scene[1].entity.as_ref().unwrap()

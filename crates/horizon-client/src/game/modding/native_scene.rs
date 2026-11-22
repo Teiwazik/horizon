@@ -14,6 +14,8 @@ pub(super) struct SceneBlock<'a> {
     pub pos: [i32; 3],
     pub state: horizon_world::registry::BlockStateId,
     pub entity: Option<&'a mod_api::SceneBlockEntity>,
+    /// Sky and block light levels, or none for full bright.
+    pub light: Option<[u8; 2]>,
 }
 
 /// A quad in the scene's blocks, before it is seen: its corners, UVs in the
@@ -65,6 +67,15 @@ pub(super) fn face_shade(normal: Vec3) -> f32 {
     (normal.x * normal.x * 0.6 + normal.y * normal.y * up + normal.z * normal.z * 0.8).min(1.0)
 }
 
+/// `color` (ABGR) with its red, green and blue times the `lightmap`'s texel
+/// for sky level `sky` and block level `block` (RGBA rows of sky level by
+/// block level, `Renderer::lightmap_pixels`), as terrain samples it.
+pub(super) fn lit(color: u32, lightmap: &[u8; 16 * 16 * 4], [sky, block]: [u8; 2]) -> u32 {
+    let i = (usize::from(sky.min(15)) * 16 + usize::from(block.min(15))) * 4;
+    let ch = |s: u32, l: u8| ((color >> s & 255) * u32::from(l) / 255) << s;
+    (color & 0xFF00_0000) | ch(0, lightmap[i]) | ch(8, lightmap[i + 1]) | ch(16, lightmap[i + 2])
+}
+
 /// `color` (ABGR) with its red, green and blue times `shade`.
 pub(super) fn shaded(color: u32, shade: f32) -> u32 {
     let ch = |s: u32| (((color >> s & 255) as f32 * shade) as u32).min(255) << s;
@@ -75,7 +86,9 @@ impl Game<'_> {
     /// Draws `blocks`, a scene of block states at positions of its own (not
     /// the world's), into the box `rect` (x0, y0, x1, y1, GUI pixels) of a
     /// screen's `batch`, seen as `view` says: Create's Ponder scenes. Each
-    /// block is drawn with its model, full bright and shaded by face, a face
+    /// block is drawn with its model, shaded by face and full bright or, with
+    /// `light`, times this frame's lightmap at its levels (full bright while
+    /// the window has no lightmap yet), a face
     /// against a solid neighbour in the scene left out; a block with an
     /// `entity` (a mod's) is drawn by `native_block_entity_submit` as in the
     /// world too, its `spin` parts turning with the game time. What lies
@@ -109,8 +122,10 @@ impl Game<'_> {
         };
         let grass = self.pack.item_renderer.grass_color(0.5, 1.0) as u32;
         let tables = &self.pack.context.tables;
+        let lightmap = self.renderer.as_ref().map(|r| &r.lightmap_pixels);
         let mut quads = Vec::new();
         for block in blocks {
+            let first = quads.len();
             let at = Vec3::new(
                 block.pos[0] as f32,
                 block.pos[1] as f32,
@@ -208,6 +223,11 @@ impl Game<'_> {
                     });
                 }
             }
+            if let (Some(light), Some(lightmap)) = (block.light, lightmap) {
+                for q in &mut quads[first..] {
+                    q.color = lit(q.color, lightmap, light);
+                }
+            }
         }
         extra(&mut quads);
         let m = scene_matrix(rect, view);
@@ -291,5 +311,18 @@ mod tests {
         assert!((face_shade(Vec3::Z) - 0.8).abs() < 1e-6);
         assert!((face_shade(Vec3::X) - 0.6).abs() < 1e-6);
         assert_eq!(shaded(0xFF80_4020, 0.5), 0xFF40_2010);
+    }
+
+    /// A lit block takes the lightmap's colour at its sky and block levels,
+    /// its alpha kept; levels past 15 read the brightest row and column.
+    #[test]
+    fn a_lit_block_takes_the_lightmaps_texel_at_its_levels() {
+        let mut lightmap = [0u8; 16 * 16 * 4];
+        let at = |sky: usize, block: usize| (sky * 16 + block) * 4;
+        lightmap[at(3, 12)..at(3, 12) + 4].copy_from_slice(&[255, 128, 0, 255]);
+        lightmap[at(15, 15)..at(15, 15) + 4].copy_from_slice(&[255, 255, 255, 255]);
+        assert_eq!(lit(0x80FF_FFFF, &lightmap, [3, 12]), 0x8000_80FF);
+        assert_eq!(lit(0xFF80_4020, &lightmap, [0, 0]), 0xFF00_0000);
+        assert_eq!(lit(0xFF80_4020, &lightmap, [200, 99]), 0xFF80_4020);
     }
 }

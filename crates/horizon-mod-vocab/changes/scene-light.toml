@@ -1,0 +1,2 @@
+ids = ["type:SceneBlock.light"]
+why = "A scene block can be drawn under sky and block light levels (SceneBlock::with_light), its colours times the frame's lightmap as the world's terrain is lit; without it a scene stays full bright as before."

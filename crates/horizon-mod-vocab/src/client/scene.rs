@@ -34,12 +34,29 @@ pub struct SceneBlock {
     pub state: BlockState,
     /// Optional owned block entity drawing data.
     pub entity: Option<SceneBlockEntity>,
+    /// The sky and block light levels (0 to 15) the block is drawn under: its colours
+    /// times this frame's lightmap at those levels, as the world's terrain is lit
+    /// (time of day, night vision, a torch's flicker). None draws it full bright.
+    pub light: Option<[u8; 2]>,
 }
 
 impl SceneBlock {
-    /// Describe one scene-local block and optional entity.
+    /// Describe one scene-local block and optional entity, drawn full bright.
     pub fn new(pos: [i32; 3], state: BlockState, entity: Option<SceneBlockEntity>) -> Self {
-        Self { pos, state, entity }
+        Self {
+            pos,
+            state,
+            entity,
+            light: None,
+        }
+    }
+
+    /// The same block drawn under sky light `sky` and block light `block`, each
+    /// 0 to 15 (higher levels count as 15): a scene of the world's blocks lit as
+    /// they are there, from the client level's `level_brightness`.
+    pub fn with_light(mut self, sky: u8, block: u8) -> Self {
+        self.light = Some([sky.min(15), block.min(15)]);
+        self
     }
 }
 
