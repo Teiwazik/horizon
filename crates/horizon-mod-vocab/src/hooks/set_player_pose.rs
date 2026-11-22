@@ -5,7 +5,8 @@ pub trait Hooks {
     /// other player in the level and for this window's player, before any of them is drawn, and
     /// only while a mod listens. `player` is its render state at the frame's partial tick (its
     /// `partial` and `age` time an animation between ticks), `who` its profile name and whether it
-    /// is this window's own player. `pose` holds the head, body, arms and legs at rest and as
+    /// is this window's own player, and `player_uuid` its profile's UUID, as the server knows the
+    /// player (`ServerPlayer::uuid`, what a mod's payloads name it by). `pose` holds the head, body, arms and legs at rest and as
     /// vanilla posed them this frame (a Horizon emote included); `pose.set(part, part_pose)` draws
     /// that part as the mod wants it this frame, `pose.reset(part)` as vanilla again. The model's
     /// outer layers follow the part they cover, and so do its armour, held items, cape, the layers

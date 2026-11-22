@@ -200,13 +200,14 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
 
 ### Posing a player's body
 
-`set_player_pose(player, who, pose)` lets a mod pose a player's head, body, arms and legs, as an emote
+`set_player_pose(player, who, player_uuid, pose)` lets a mod pose a player's head, body, arms and legs, as an emote
 or a body tracker does. It is asked once a frame for each other player in the level and for this
 window's own player, before the frame draws any of them, and only while a mod listens: with none,
 nothing is posed or built. `player` is the render state at the frame's partial tick (`partial`,
 `age`), so a mod times its animation between ticks itself; `who` is the profile name and whether it
-is this window's own player. A player whose name the client doesn't know yet is not asked, as for
-`render_player_pre`.
+is this window's own player, and `player_uuid` the profile's UUID, the one the server knows the player
+by, so a pose a mod's payload names by UUID finds its model. A player whose name or UUID the client
+doesn't know yet is not asked, as for `render_player_pre`.
 
 `pose` is a `PlayerBodyPose` holding the six `POSABLE_PARTS` (`Head`, `Body`, `RightArm`,
 `LeftArm`, `RightLeg`, `LeftLeg`): `at_rest(part)` before any animation, `vanilla(part)` as vanilla
