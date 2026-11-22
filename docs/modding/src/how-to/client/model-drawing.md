@@ -198,6 +198,42 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
   armour, held items and other layers keep every part, and the cape, a layer of its own, stays.
 
+### Posing a player's body
+
+`set_player_pose(player, who, pose)` lets a mod pose a player's head, body, arms and legs, as an emote
+or a body tracker does. It is asked once a frame for each other player in the level and for this
+window's own player, before the frame draws any of them, and only while a mod listens: with none,
+nothing is posed or built. `player` is the render state at the frame's partial tick (`partial`,
+`age`), so a mod times its animation between ticks itself; `who` is the profile name and whether it
+is this window's own player. A player whose name the client doesn't know yet is not asked, as for
+`render_player_pre`.
+
+`pose` is a `PlayerBodyPose` holding the six `POSABLE_PARTS` (`Head`, `Body`, `RightArm`,
+`LeftArm`, `RightLeg`, `LeftLeg`): `at_rest(part)` before any animation, `vanilla(part)` as vanilla
+posed it this frame (walking, swinging, sneaking, a Horizon emote laid over it) and `get(part)` as
+it draws. Each is a `PartPose` relative to the part's parent, in model pixels (y down) and radians.
+`set(part, part_pose)` draws the part with that pose this frame; it says `PoseError::NotPosable` for
+an outer layer and `PoseError::NotFinite` for a pose with a NaN or infinite number. `reset(part)`
+gives the part back to vanilla. A part no listener set draws as vanilla posed it.
+
+```rust,ignore
+fn set_player_pose(&self, _: &dyn ClientHost, event: &mut SetPlayerPoseEvent<'_>) {
+    // Wave: the right arm up, swinging at the frame's partial tick.
+    let t = event.player.age;
+    let mut arm = event.pose.vanilla(HumanoidPart::RightArm).unwrap();
+    arm.x_rot = -2.8;
+    arm.z_rot = 0.4 * (t * 0.5).sin();
+    let _ = event.pose.set(HumanoidPart::RightArm, arm);
+}
+```
+
+- What a mod sets lasts this frame only: to hold a pose, set it every frame.
+- The outer layers follow the part they cover (the hat its head, a sleeve its arm), and so do
+  the armour, held items, cape, the layers mods added and the `parts` the post hooks get.
+- It is drawn the same on the GPU-posed path as on the CPU one; parts only turn, move and scale
+  whole, so a limb does not bend at the elbow or knee.
+- It is visual only, on this client: the server and other players see nothing of it.
+
 ## Text and animation in block entities
 
 `BlockEntityDrawContext::text` draws a component under the current pose in font pixels,

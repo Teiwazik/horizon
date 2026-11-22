@@ -878,19 +878,60 @@ fn swim(p: &mut Poses, pos: f32, h: &Hum) {
 /// the hook's own types (`horizon_hooks::players`), kept here under their old path.
 pub use horizon_hooks::players::{BODY_PARTS, BodyPose};
 
-/// Apply the mob's model animation to `p` (at rest), then the pose laid over it, if any.
+/// The parts of [`BODY_PARTS`] a mod posed for a frame (`Mob::mod_pose`), each as `ModelPart`'s
+/// nine numbers: None leaves the part as the animation and the emote left it.
+pub type ModPose = [Option<[f32; 9]>; 6];
+
+/// Apply the mob's model animation to `p` (at rest), then the emote laid over it and the parts a
+/// mod posed, if any.
 pub fn setup(
     m: &Mob,
     s: &State,
     p: &mut Poses,
     w_anims: &HashMap<String, super::keyframes::Animation>,
 ) {
-    let Some(over) = &m.emote else {
+    setup_posed(m, s, p, w_anims, m.mod_pose.as_deref());
+}
+
+/// [`setup`] without the parts a mod posed: the body a mod's `set_player_pose` starts from.
+pub fn setup_unposed(
+    m: &Mob,
+    s: &State,
+    p: &mut Poses,
+    w_anims: &HashMap<String, super::keyframes::Animation>,
+) {
+    setup_posed(m, s, p, w_anims, None);
+}
+
+fn setup_posed(
+    m: &Mob,
+    s: &State,
+    p: &mut Poses,
+    w_anims: &HashMap<String, super::keyframes::Animation>,
+    posed: Option<&ModPose>,
+) {
+    if m.emote.is_none() && posed.is_none() {
         return vanilla_setup(m, s, p, w_anims);
-    };
+    }
     let rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
     vanilla_setup(m, s, p, w_anims);
-    body_pose(&**over, s.age, rest, p);
+    if let Some(over) = &m.emote {
+        body_pose(&**over, s.age, rest, p);
+    }
+    if let Some(posed) = posed {
+        mod_pose(posed, rest, p);
+    }
+}
+
+/// Lays the parts a mod posed over `p`, those of `rest`'s parts the model has.
+fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], p: &mut Poses) {
+    for (i, pose) in posed.iter().enumerate() {
+        if let Some(pose) = pose
+            && rest[i].is_some()
+        {
+            *p.get(BODY_PARTS[i]) = *pose;
+        }
+    }
 }
 
 /// Poses the parts `rest` names (those the model has; at rest) as `over` has them at `age`.
@@ -1211,6 +1252,31 @@ mod body_pose_tests {
         body_pose(&raise, 30.0, at_rest, &mut p);
         assert_eq!(p.version(), version);
         assert_eq!(p.get("right_arm")[5], 1.5);
+    }
+
+    #[test]
+    fn a_mod_pose_is_laid_over_the_emote_on_the_parts_it_set() {
+        let rest = |x: f32| [x, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut p = Poses {
+            map: [("head", rest(0.0)), ("right_arm", rest(-5.0))]
+                .into_iter()
+                .map(|(n, pose)| (key(n), pose))
+                .collect(),
+            dummy: [0.0; 9],
+            skipped: Default::default(),
+            hidden: Default::default(),
+            version: 0,
+        };
+        let at_rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
+        body_pose(&Raise::default(), 10.0, at_rest, &mut p);
+        let mut posed: ModPose = [None; 6];
+        // The mod raises the right arm and poses the left leg, which the model lacks.
+        posed[2] = Some([-5.0, 1.0, 0.0, -3.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        posed[5] = Some(rest(9.0));
+        mod_pose(&posed, at_rest, &mut p);
+        assert_eq!(*p.get("right_arm"), posed[2].unwrap());
+        assert_eq!(*p.get("head"), rest(0.0));
+        assert_eq!(p.map.len(), 2);
     }
 }
 

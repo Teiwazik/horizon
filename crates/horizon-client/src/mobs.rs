@@ -1622,6 +1622,10 @@ pub struct Mob {
     /// A pose laid over this player's body after the vanilla animation (`anim::setup`), timed on
     /// `age`: a Horizon emote (docs/cosmetics.md), given by the game. Visual only.
     pub emote: Option<Arc<dyn anim::BodyPose>>,
+    /// The parts of [`anim::BODY_PARTS`] a mod posed for this frame (`set_player_pose`), laid over the
+    /// emote by `anim::setup`: None for a part it left to vanilla, and for the whole body while
+    /// no mod poses it. Set by the game once a frame before drawing. Visual only.
+    pub mod_pose: Option<Box<anim::ModPose>>,
     /// A mannequin's `DATA_PROFILE` (ResolvableProfile): the profile's
     /// `textures` property resolves to `skin` like a player's.
     pub profile: Option<horizon_protocol::entity_data::Profile>,
@@ -3589,6 +3593,7 @@ impl Mob {
     ) -> Self {
         let mut mob = Self {
             emote: None,
+            mod_pose: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
