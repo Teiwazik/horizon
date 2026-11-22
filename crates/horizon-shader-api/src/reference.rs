@@ -671,6 +671,9 @@ pub fn markdown() -> String {
          R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture its two\n  \
          versions at their size, `2 × scale² × bytes a texel / 8` (`rgba16float` at scale 0.5 takes 0.5, `r32uint` at\n  \
          scale 1 takes 1, `rgba32float` at scale 1 takes 4).\n\
+         - The device: each pass binds the earlier `output`s beside the frame's textures, so a device's sampled textures a\n  \
+         stage can refuse a chain the check passes (sixteen `output`s and the final pass take 23 where a device may give\n  \
+         16); the game then refuses the pack with the device's error.\n\
          - {} KiB per WGSL file, {} MiB per pack.\n\
          - Per stage: {MAX_EXPRESSIONS} naga expressions over all its functions, {MAX_TEXTURE_READS} texture reads (samples,\n  \
          gathers and loads, the prelude's included).\n\n\

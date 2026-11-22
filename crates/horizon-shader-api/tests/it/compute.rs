@@ -564,11 +564,16 @@ fn pass_counts_are_bounded() {
         &computes(9),
         "9 compute [[post]] entries; a pack may have 8",
     );
-    // Compute entries don't count against the 12 post passes.
-    let passes = (0..12)
-        .map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"))
-        .collect::<String>();
-    Manifest::parse(&format!("{HEAD}{}{passes}", computes(8))).unwrap();
+    // Compute entries don't count against the 40 post passes: 40 raster passes and 8 compute
+    // entries read, a 41st raster pass is refused.
+    let passes = |n: usize| {
+        (0..n)
+            .map(|i| format!("[[post]]\nfile = \"p{i}.wgsl\"\n"))
+            .collect::<String>()
+    };
+    Manifest::parse(&format!("{HEAD}{}{}", computes(8), passes(40))).unwrap();
+    let e = Manifest::parse(&format!("{HEAD}{}{}", computes(8), passes(41))).unwrap_err();
+    assert!(e.contains("41 post passes; a pack may chain 40"), "{e}");
 }
 
 #[test]

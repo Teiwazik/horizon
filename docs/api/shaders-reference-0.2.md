@@ -889,6 +889,9 @@ Each `[[options]]` entry sets the WGSL `override` of the same name when the pipe
   R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture its two
   versions at their size, `2 × scale² × bytes a texel / 8` (`rgba16float` at scale 0.5 takes 0.5, `r32uint` at
   scale 1 takes 1, `rgba32float` at scale 1 takes 4).
+- The device: each pass binds the earlier `output`s beside the frame's textures, so a device's sampled textures a
+  stage can refuse a chain the check passes (sixteen `output`s and the final pass take 23 where a device may give
+  16); the game then refuses the pack with the device's error.
 - 256 KiB per WGSL file, 8 MiB per pack.
 - Per stage: 24000 naga expressions over all its functions, 64 texture reads (samples,
   gathers and loads, the prelude's included).

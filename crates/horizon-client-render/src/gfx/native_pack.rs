@@ -834,6 +834,60 @@ file = \"material.wgsl\"
         assert!(built.is_err(), "the pack should be refused");
     }
 
+    /// The check passes 16 quarter-size `[[post]]` outputs and the pass that draws the picture
+    /// (they fit the target memory), but each pass's layout then binds every output beside the
+    /// frame's textures, past the 16 sampled textures a stage a device may expose: such a device
+    /// refuses the pack with its error, as the docs' limits say, and one with room builds it.
+    #[test]
+    fn sixteen_post_outputs_are_refused_by_a_device_with_sixteen_textures_a_stage() {
+        use horizon_shader_api::{MANIFEST, Pack, check};
+        let _gpu = crate::gfx::test_gpu::lock();
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let mut manifest =
+            String::from("schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n");
+        let mut files = std::collections::BTreeMap::new();
+        let post = "fn post(input: PostInput) -> vec4<f32> { return input.color; }\n";
+        for i in 0..17 {
+            manifest += &format!("[[post]]\nfile = \"p{i}.wgsl\"\n");
+            if i < 16 {
+                manifest += &format!("output = \"o{i}\"\nscale = 0.25\n");
+            }
+            files.insert(format!("p{i}.wgsl"), post.as_bytes().to_vec());
+        }
+        files.insert(MANIFEST.to_owned(), manifest.into_bytes());
+        let report = || check(&Pack::from_files(files.clone()).unwrap()).unwrap();
+        let build = |limit: u32| {
+            let mut limits = adapter.limits();
+            if limits.max_sampled_textures_per_shader_stage < limit {
+                return None;
+            }
+            limits.max_sampled_textures_per_shader_stage = limit;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    required_limits: limits,
+                    ..Default::default()
+                }))
+                .ok()?;
+            let (globals, empty) = terrain_layouts(&device);
+            let shape = terrain_shape(&globals, &empty);
+            Some(
+                NativePack::new(&device, &queue, &shape, report(), &[], Default::default()).is_ok(),
+            )
+        };
+        if let Some(built) = build(16) {
+            assert!(
+                !built,
+                "a device with 16 textures a stage should refuse the pack"
+            );
+        }
+        if let Some(built) = build(32) {
+            assert!(built, "a device with 32 textures a stage builds the pack");
+        }
+    }
+
     /// OpenGL can't translate a stage that loads from a depth texture (naga's GLSL writer has
     /// no `textureLoad` for them): a material that reads `opaque_depth`, and any post stage
     /// (its entry reads `scene_depth` through `depth_at`), refuse the pack instead of reaching

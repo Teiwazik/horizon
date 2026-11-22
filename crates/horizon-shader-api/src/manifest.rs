@@ -76,7 +76,8 @@ impl Primaries {
 }
 /// Full-screen passes a pack may chain: room for a traced GI chain (bloom, AO, ReSTIR pick,
 /// neighbours, shade and filter, a temporal denoise, light probes, bounce, each with its kept
-/// copy), which takes about 32; `budget.gpu_ms` still bounds what they cost.
+/// copy), which takes about 32. Nothing bounds what they cost: `budget.gpu_ms` is metadata a
+/// pack declares, only its range is checked; the post target memory bounds their outputs.
 pub const MAX_POST_PASSES: usize = 40;
 /// Options a pack may declare: a ray-traced pack with pages for water, clouds, sky, lights and
 /// materials declares about 80.
