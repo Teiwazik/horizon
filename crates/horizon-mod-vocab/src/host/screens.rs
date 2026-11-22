@@ -76,6 +76,27 @@ pub trait ScreensClientHost {
     #[access(WorldOnly)]
     fn mod_screen_close(&mut self, mod_id: &str);
     /// Side: client.
+    /// Grabs (`grab`) or frees the pointer over mod `mod_id`'s own screen,
+    /// as the world grabs it: hidden and held in the window, its motion read
+    /// with `mod_screen_mouse_motion` instead of turning the player (a mod
+    /// screen that looks around a map or a model with the mouse). True when the
+    /// pointer is grabbed after the call: false when releasing, when `mod_id`'s
+    /// screen is not open, or when the window cannot grab it now (it is not
+    /// focused); that wish is kept, and the pointer is grabbed when the focus
+    /// returns. Any change of screen ends the grab, and Escape or
+    /// `mod_screen_close` back to the world grabs it for the world as before.
+    #[access(WorldOnly)]
+    fn mod_screen_grab_pointer(&mut self, mod_id: &str, grab: bool) -> bool;
+    /// Side: client.
+    /// The motion the grabbed pointer made over mod `mod_id`'s own screen
+    /// since that screen opened, summed: `[x, y]` in the raw device units the
+    /// world's mouse look turns by (right and down are positive). It doesn't
+    /// change while the pointer is free; a mod reads `cursor` then. A mod
+    /// keeps the last value and turns by the difference. None when `mod_id`'s
+    /// screen is not open.
+    #[access(ClientSetup)]
+    fn mod_screen_mouse_motion(&self, mod_id: &str) -> Option<[f64; 2]>;
+    /// Side: client.
     /// Closes the open screen as its Escape key does: a container screen
     /// closes as the player's container close (`ServerboundContainerClosePacket`
     /// with the menu's id, then the client menu closed), a pause menu closes

@@ -1691,6 +1691,8 @@ struct Game<'a> {
     native_net: native_net::NativeNet,
     /// The mod whose own screen is open (`Screen::Mod`).
     native_mod_screen: Option<String>,
+    /// The pointer grab a mod asked for on its own screen, and the motion since.
+    native_screen_pointer: native_hooks::ModScreenPointer,
     /// Meshed sections waiting for an upload budget (Horizon settings).
     pending_uploads: Vec<((i32, i32, i32), horizon_client::mesher::SectionMesh)>,
     upload_pace: upload_pace::UploadPace,
@@ -10981,6 +10983,7 @@ impl<'a> Game<'a> {
             mod_phase,
             native_net: Default::default(),
             native_mod_screen: None,
+            native_screen_pointer: Default::default(),
             sky_darken_memo: Default::default(),
             water_plane_memo: Default::default(),
             water_plane_scan: Default::default(),

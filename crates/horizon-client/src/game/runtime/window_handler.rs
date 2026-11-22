@@ -556,6 +556,18 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn device_event(&mut self, event_loop: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        // A mod's own screen that grabbed the pointer reads its motion itself.
+        if self.captured
+            && self.focused
+            && self.keyboard_mouse
+            && self.screen == Screen::Mod
+            && self.native_screen_pointer.grab
+            && let DeviceEvent::MouseMotion { delta: (x, y) } = event
+        {
+            self.native_screen_pointer.moved(x, y);
+            self.last_input = Instant::now();
+            return;
+        }
         // A composited view renders offscreen but its keyboard/mouse owner still
         // controls a visible native window. A headless offscreen run never does.
         if self.pending_save.is_none()

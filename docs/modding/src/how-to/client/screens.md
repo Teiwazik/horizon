@@ -40,6 +40,34 @@ the sign's block position and whether its front side is being edited. It returns
 editor open, or outside a world. A close of the sign editor always sends the sign update, however it
 closes; there is no close that skips it, because the vanilla client never omits that packet.
 
+## Grabbing the pointer on a mod's own screen
+
+A mod's own screen (`mod_screen_open`) frees the pointer, as every screen does. A screen that turns a
+view with the mouse (a world map that tilts, a model viewer) grabs it back for as long as it wants
+mouse look, and reads the motion itself:
+
+```rust
+// client_tick_pre or an input hook (a `&mut dyn ClientHost`): hold the pointer while dragging.
+host.mod_screen_grab_pointer(ID, dragging);
+
+// Any hook, the screen's render included: the motion since the screen opened, summed.
+if let Some([x, y]) = host.mod_screen_mouse_motion(ID) {
+    let [dx, dy] = [x - self.last[0], y - self.last[1]];
+    self.last = [x, y];
+    self.turn(dx, dy);
+}
+```
+
+`ClientHost::mod_screen_grab_pointer(mod_id, grab)` grabs or frees the window's pointer the way the world
+grabs it: hidden, held in the window, its motion no longer moving the cursor. The player doesn't turn: the
+motion goes to `ClientHost::mod_screen_mouse_motion(mod_id)`, in the raw device units the world's mouse look
+turns by (right and down positive), summed from the screen's opening; it stays still while the pointer is free,
+when a mod reads `cursor()` instead. The call returns `true` when the pointer is grabbed afterwards. It returns
+`false` for a release, for a mod whose screen is not open, and for a window that cannot grab now (it is not
+focused): the grab is then asked for again when the window gets the focus back. Any change of screen ends the
+grab; Escape or `mod_screen_close` back to the world grabs the pointer for the world as before, and a screen
+that replaces the mod's gets a free pointer.
+
 ## Quit Game
 
 A native client mod with its own Quit Game confirmation can call `host.request_client_quit()`

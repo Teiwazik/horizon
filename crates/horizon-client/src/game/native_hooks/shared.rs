@@ -144,6 +144,12 @@ impl Game<'_> {
         if let Some(owner) = owner {
             self.native_mod_screen = Some(owner.to_owned());
         }
+        let had_grab = self.native_screen_pointer.grab;
+        self.native_screen_pointer.screen_changed(screen);
+        if had_grab && !matches!(screen, Screen::Mod | Screen::Playing) {
+            // Another screen replaced a grabbing mod screen: it takes a free pointer.
+            self.capture(false);
+        }
         if screen == Screen::Mod {
             self.keys.clear();
             self.left = false;
@@ -3601,6 +3607,43 @@ fn mod_screen_opens(
     None
 }
 
+/// The pointer of a mod's own screen: whether its mod asked for it grabbed
+/// (`mod_screen_grab_pointer`), and the raw motion the grabbed pointer made
+/// since the screen opened (`mod_screen_mouse_motion`).
+#[derive(Default)]
+pub(in crate::game) struct ModScreenPointer {
+    pub(in crate::game) grab: bool,
+    motion: [f64; 2],
+}
+
+impl ModScreenPointer {
+    /// The screen became `screen`: a mod screen opening starts with a free
+    /// pointer and no motion, and any other screen ends the grab.
+    pub(in crate::game) fn screen_changed(&mut self, screen: Screen) {
+        self.grab = false;
+        if screen == Screen::Mod {
+            self.motion = [0.0; 2];
+        }
+    }
+    /// A grabbed pointer moved by `(x, y)` device units; motion with the
+    /// pointer free is the cursor's, not this.
+    pub(in crate::game) fn moved(&mut self, x: f64, y: f64) {
+        if self.grab {
+            self.motion[0] += x;
+            self.motion[1] += y;
+        }
+    }
+    pub(in crate::game) fn motion(&self) -> [f64; 2] {
+        self.motion
+    }
+}
+
+/// Whether a window that gets the focus back takes the pointer again: in the
+/// world where it held it, and on a mod's screen whose mod still asks for it.
+pub(in crate::game) fn refocus_regrabs(held: bool, screen: Screen, mod_grab: bool) -> bool {
+    held && (screen == Screen::Playing || (screen == Screen::Mod && mod_grab))
+}
+
 fn client_packet_view(packet: &horizon_protocol::packets::play::Clientbound) -> ClientPacket {
     use horizon_protocol::packets::play::Clientbound;
     use mod_api::Identifier;
@@ -4491,6 +4534,38 @@ mod tests {
             mod_screen_opens(Screen::Mod, false, Some("b"), "a"),
             Some(false)
         );
+    }
+
+    /// A mod screen's pointer motion counts only while grabbed, adds up from
+    /// the screen's opening, and the grab ends with any change of screen.
+    #[test]
+    fn a_mod_screen_counts_grabbed_motion_from_its_opening() {
+        use super::{ModScreenPointer, Screen};
+        let mut pointer = ModScreenPointer::default();
+        pointer.screen_changed(Screen::Mod);
+        pointer.moved(5.0, 5.0);
+        assert_eq!(pointer.motion(), [0.0, 0.0], "a free pointer moves the cursor");
+        pointer.grab = true;
+        pointer.moved(3.0, -2.0);
+        pointer.moved(1.5, 4.0);
+        assert_eq!(pointer.motion(), [4.5, 2.0]);
+        pointer.screen_changed(Screen::Inventory);
+        assert!(!pointer.grab);
+        assert_eq!(pointer.motion(), [4.5, 2.0], "kept until a screen opens");
+        pointer.screen_changed(Screen::Mod);
+        assert_eq!(pointer.motion(), [0.0, 0.0]);
+    }
+
+    /// The focus coming back grabs the pointer in the world, and on a mod's
+    /// screen only while its mod asks for the grab.
+    #[test]
+    fn refocus_regrabs_the_world_and_a_grabbing_mod_screen() {
+        use super::{Screen, refocus_regrabs};
+        assert!(refocus_regrabs(true, Screen::Playing, false));
+        assert!(refocus_regrabs(true, Screen::Mod, true));
+        assert!(!refocus_regrabs(true, Screen::Mod, false));
+        assert!(!refocus_regrabs(true, Screen::Inventory, true));
+        assert!(!refocus_regrabs(false, Screen::Mod, true));
     }
 
     /// The characters a `ScreenEvent.CharacterTyped.Pre` sees are the

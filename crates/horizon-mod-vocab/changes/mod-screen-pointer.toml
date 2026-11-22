@@ -1,0 +1,2 @@
+ids = ["method:prelude::ScreensClientHost::mod_screen_grab_pointer", "method:prelude::ScreensClientHost::mod_screen_mouse_motion"]
+why = "A mod's own screen can hide and grab the pointer and read the raw mouse motion since it opened, for mouse look in a mod's view (a map flight camera, a model viewer) without turning the player."

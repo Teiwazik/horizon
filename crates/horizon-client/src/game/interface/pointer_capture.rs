@@ -187,7 +187,8 @@ impl Game<'_> {
             self.capture_mode = None;
             return;
         }
-        if capture && !self.captured && !cfg!(target_os = "macos") {
+        // A mod screen that grabs the pointer keeps the world's keys up.
+        if capture && !self.captured && !cfg!(target_os = "macos") && self.screen != Screen::Mod {
             // MouseHandler.grabMouse: KeyMapping.setAll unless
             // InputQuirks.RESTORE_KEY_STATE_AFTER_MOUSE_GRAB is off (macOS).
             self.restore_held_keys();
@@ -430,7 +431,8 @@ impl Game<'_> {
             self.capture(false);
             return;
         }
-        if std::mem::take(&mut self.regrab_on_refocus) && self.screen == Screen::Playing {
+        let held = std::mem::take(&mut self.regrab_on_refocus);
+        if native_hooks::refocus_regrabs(held, self.screen, self.native_screen_pointer.grab) {
             self.capture(true);
         }
     }

@@ -4681,6 +4681,35 @@ impl Game<'_> {
             .as_deref()
             .filter(|_| self.screen == Screen::Mod)
     }
+    /// Grabs (`grab`) or frees the pointer over mod `mod_id`'s own screen,
+    /// as the world grabs it: hidden and held, its motion read with
+    /// `mod_screen_mouse_motion` instead of turning the player. True when the
+    /// pointer is grabbed after the call: false when releasing, when `mod_id`'s
+    /// screen is not open, or when the window cannot grab it now (unfocused);
+    /// the wish is kept, so the pointer is grabbed when the focus returns. Any
+    /// change of screen ends the grab, and closing the screen to the world
+    /// grabs the pointer for the world as before.
+    pub(in crate::game) fn mod_screen_grab_pointer(&mut self, mod_id: &str, grab: bool) -> bool {
+        if self.mod_screen() != Some(mod_id) {
+            return false;
+        }
+        self.native_screen_pointer.grab = grab;
+        if grab != self.captured {
+            self.capture(grab);
+        }
+        if grab && !self.captured {
+            // Refused: the window keeps the wish for its focus.
+            self.regrab_on_refocus = true;
+        }
+        grab && self.captured
+    }
+    /// The motion of the grabbed pointer over mod `mod_id`'s own screen since
+    /// it opened, summed, in the raw device units the world's mouse look turns
+    /// by; it doesn't change while the pointer is free (read `cursor` then).
+    /// None when `mod_id`'s screen is not open.
+    pub(in crate::game) fn mod_screen_mouse_motion(&self, mod_id: &str) -> Option<[f64; 2]> {
+        (self.mod_screen() == Some(mod_id)).then(|| self.native_screen_pointer.motion())
+    }
     /// The open menu's title (the block's name, or the one it was given),
     /// as plain text.
     pub(in crate::game) fn screen_title(&self) -> Option<String> {
