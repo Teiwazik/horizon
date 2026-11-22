@@ -5420,6 +5420,8 @@ impl Game<'_> {
         // LevelExtractor.extract: the transient blocks queued since the last frame.
         self.drain_transient_block_queue();
         self.prepare_entity_culling(camera);
+        // The mods' `set_player_pose`: each player model's body for this frame, before any is drawn.
+        self.pose_players(alpha as f32);
         self.prepare_occlusion_culling(camera);
         self.prepare_trims();
         self.begin_skinning();

@@ -53,7 +53,7 @@ pub(in crate::game) fn begin_entity_frame() {
 /// The entity id a mod is told for a drawn mob. This window's own player is
 /// drawn from a model made for the frame (`Mob::new(0, ..)`), so it is told
 /// `own_id` instead of the model's 0; every other entity carries its own id.
-fn render_id(mob_id: u32, local: bool, own_id: i32) -> u32 {
+pub(super) fn render_id(mob_id: u32, local: bool, own_id: i32) -> u32 {
     match local {
         true => u32::try_from(own_id).unwrap_or(mob_id),
         false => mob_id,
