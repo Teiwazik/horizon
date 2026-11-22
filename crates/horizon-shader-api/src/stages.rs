@@ -218,7 +218,7 @@ const POST_RESOURCES: [Resource; 11] = [
         binding: 11,
         name: "scene_surface",
         ty: "var scene_surface: texture_2d<u32>",
-        doc: "What the material stage's `set_surface` stored for the solid terrain at each pixel, unfiltered (`textureLoad`; its texels are the bits of floats, so `bitcast<vec4<f32>>` them): read it through the prelude's `surface_at`, which knows its layout and where it no longer shows. Blank without a material stage that calls `set_surface`.",
+        doc: "What the material stage's `set_surface` stored for the solid terrain at each pixel (and under `[entity] surface = true` the entity stage's for entities), unfiltered (`textureLoad`; its texels are the bits of floats, so `bitcast<vec4<f32>>` them): read it through the prelude's `surface_at`, which knows its layout and where it no longer shows. Blank without a material stage that calls `set_surface` or `[entity] surface = true`.",
     },
 ];
 
@@ -331,6 +331,36 @@ fn block_light_color(position: vec3<f32>) -> vec4<f32> {
     };
 }
 
+/// `set_surface` and the value it leaves, for the material prelude and, under `[entity] surface`,
+/// the entity prelude: the post stage's `surface_at` decodes it (`POST_SURFACE`).
+macro_rules! set_surface {
+    () => {
+        "\
+var<private> horizon_surface: vec4<f32>;
+fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32) {
+    // Octahedral, y up: the upper half folds onto xz, the lower half unfolds around it.
+    let n = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
+    var e = n.xz;
+    if n.y < 0.0 {
+        e = (1.0 - abs(n.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
+    }
+    horizon_surface = vec4<f32>(bitcast<f32>(pack2x16snorm(e)), smoothness, data, 1.0);
+}
+"
+    };
+}
+
+/// The entity prelude's `set_surface`, under `[entity] surface = true`.
+const ENTITY_SURFACE: &str = concat!(
+    "\
+// What the post stage's `surface_at` reads for this point of an entity: its `normal` (a unit
+// vector in world axes), `smoothness` (0..1, say for reflections) and `data`, a value of the
+// pack's own passed through. Unset, the point keeps the normal its triangle faces and 0 for
+// both; translucent entities store their frontmost point.
+",
+    set_surface!()
+);
+
 /// The entity prelude's helpers: the coloured-light grid, and the normal its entries give.
 const ENTITY_HELPERS: &str = concat!(
     block_light_color!("block_light_sampler"),
@@ -355,16 +385,9 @@ const MATERIAL_HELPERS: &str = concat!(
 // unit vector in world axes), `smoothness` (0..1, say for reflections) and `data`, a value of
 // the pack's own passed through. Unset, the point keeps the face's own normal and 0 for both;
 // translucent terrain stores none.
-var<private> horizon_surface: vec4<f32>;
-fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32) {
-    // Octahedral, y up: the upper half folds onto xz, the lower half unfolds around it.
-    let n = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
-    var e = n.xz;
-    if n.y < 0.0 {
-        e = (1.0 - abs(n.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
-    }
-    horizon_surface = vec4<f32>(bitcast<f32>(pack2x16snorm(e)), smoothness, data, 1.0);
-}
+",
+    set_surface!(),
+    "\
 // The point being shaded: its sprite's layer and mip level (the entries set them).
 var<private> horizon_block_layer: u32;
 var<private> horizon_block_lod: f32;
@@ -2462,6 +2485,9 @@ pub(crate) fn compose_traced(
     }
     if kind == StageKind::Post && pack.manifest.motion.is_some() {
         prelude += MOTION;
+    }
+    if kind == StageKind::Entity && pack.manifest.entity_surface {
+        prelude += ENTITY_SURFACE;
     }
     if let Some(stage) = stage {
         prelude += &kept_declarations(m, stage);
