@@ -1675,6 +1675,24 @@ const BODY_PARTS: [&str; 6] = [
 /// The cubes of a part as `ModelPart.cubes` has them: min and max corners in
 /// model units. The part keeps six faces per cube, in cube order.
 fn cube_bounds(part: &Part) -> Vec<[f32; 6]> {
+    // A player limb split at the joint (`Part::split_limbs`) is still the one cube.
+    if let Some(limb) = super::LIMBS.iter().find(|l| l.upper == part.name)
+        && let Some(lower) = part.children.iter().find(|c| c.name == limb.lower)
+    {
+        let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
+        for v in part
+            .polygons
+            .iter()
+            .chain(&lower.polygons)
+            .flat_map(|f| f.vertices)
+        {
+            for k in 0..3 {
+                b[k] = b[k].min(v[k]);
+                b[3 + k] = b[3 + k].max(v[k]);
+            }
+        }
+        return vec![b];
+    }
     let size = if part.polygons.len().is_multiple_of(6) {
         6
     } else {
@@ -2602,6 +2620,17 @@ fn hand_base(
     } else {
         part_matrix(model, base, poses, arm, offset)?
     };
+    // A bent arm (`set_player_pose`) carries the item on its forearm, about the arm's own
+    // joint: the hand's offset stays the one the arm gives it.
+    if avatar(m) {
+        let limb = &super::LIMBS[usize::from(left)];
+        if let Some(lower) = poses.pose_of(limb.lower)
+            && lower != find_part(model, limb.lower).map_or(lower, |p| p.pose)
+        {
+            let arm_m = part_matrix(model, base, poses, arm, 0.0)?;
+            t = arm_m * posed(glam::Mat4::IDENTITY, lower) * arm_m.inverse() * t;
+        }
+    }
     if m.species() == Species::Vex {
         // `VexModel.translateToHand`: the held item is drawn at 0.55 scale.
         t *= glam::Mat4::from_scale(glam::Vec3::splat(0.55));

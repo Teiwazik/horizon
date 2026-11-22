@@ -215,7 +215,15 @@ posed it this frame (walking, swinging, sneaking, a Horizon emote laid over it) 
 it draws. Each is a `PartPose` relative to the part's parent, in model pixels (y down) and radians.
 `set(part, part_pose)` draws the part with that pose this frame; it says `PoseError::NotPosable` for
 an outer layer and `PoseError::NotFinite` for a pose with a NaN or infinite number. `reset(part)`
-gives the part back to vanilla. A part no listener set draws as vanilla posed it.
+gives the part back to vanilla, straight. A part no listener set draws as vanilla posed it.
+
+The arms and legs (`BENDABLE_PARTS`) also bend half way down, at the elbow or knee, as bendy-lib
+bends them: `set_bend(part, axis, angle)` turns the limb's lower half by `angle` radians about the
+horizontal axis through the joint that is the model's x axis turned by `axis` radians about y.
+At `axis` 0 it bends as `x_rot` turns the limb, a negative angle forwards (a forearm raised to
+the chest); at `axis` π/2 it bends sideways. It says `PoseError::NotBendable` for any other part
+and `bend(part)` gives back `(axis, angle)`. The bend is relative to the limb's own pose, vanilla's
+or the one a mod set, and the sleeve or trouser leg, armour and a held item follow the lower half.
 
 ```rust,ignore
 fn set_player_pose(&self, _: &dyn ClientHost, event: &mut SetPlayerPoseEvent<'_>) {
@@ -225,14 +233,19 @@ fn set_player_pose(&self, _: &dyn ClientHost, event: &mut SetPlayerPoseEvent<'_>
     arm.x_rot = -2.8;
     arm.z_rot = 0.4 * (t * 0.5).sin();
     let _ = event.pose.set(HumanoidPart::RightArm, arm);
+    // And the forearm bent forward, as far as it waves sideways.
+    let _ = event.pose.set_bend(HumanoidPart::RightArm, 0.0, -1.0 - arm.z_rot);
 }
 ```
 
 - What a mod sets lasts this frame only: to hold a pose, set it every frame.
 - The outer layers follow the part they cover (the hat its head, a sleeve its arm), and so do
   the armour, held items, cape, the layers mods added and the `parts` the post hooks get.
-- It is drawn the same on the GPU-posed path as on the CPU one; parts only turn, move and scale
-  whole, so a limb does not bend at the elbow or knee.
+- It is drawn the same on the GPU-posed path as on the CPU one. A bend turns the lower half whole
+  (the limb is two boxes, not a bent mesh): a band between the halves fills the outer side, and at
+  a sharp bend its corners show a little past the limb. A pack's custom player model (`.jem`) and
+  the first-person arms do not bend, and the `parts` the post hooks get give the arm, not the
+  forearm.
 - It is visual only, on this client: the server and other players see nothing of it.
 
 ## Text and animation in block entities
