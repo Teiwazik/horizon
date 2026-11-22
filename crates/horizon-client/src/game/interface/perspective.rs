@@ -184,7 +184,15 @@ pub(super) fn player_type_with_document(
 }
 /// `player_type` from the document: the model and its layers from one parse.
 fn load_player_type(models: &horizon_client::mobs::EntityModelDocument) -> Option<Arc<MobType>> {
-    models.model("minecraft:player#main").map(|model| {
+    // The limbs split at the joint, as `MobTypes` loads them, so a mod can bend them.
+    let load = |key: &str| {
+        let mut part = models.model(key)?;
+        if horizon_client::mobs::bends_limbs(key) {
+            part.split_limbs();
+        }
+        Some(part)
+    };
+    load("minecraft:player#main").map(|model| {
         Arc::new(MobType {
             shadow: None,
             id: "minecraft:player".into(),
@@ -225,7 +233,7 @@ fn load_player_type(models: &horizon_client::mobs::EntityModelDocument) -> Optio
             layers: ["player_slim#main", "player#cape"]
                 .into_iter()
                 .filter_map(|key| {
-                    let model = models.model(&format!("minecraft:{key}"))?;
+                    let model = load(&format!("minecraft:{key}"))?;
                     Some((key.to_owned(), Arc::new(model)))
                 })
                 .collect(),

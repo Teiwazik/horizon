@@ -182,7 +182,9 @@ impl ArmorStandAssets {
         let mut layers = HashMap::new();
         let mut player = HashMap::new();
         for slot in ["helmet", "chestplate", "leggings", "boots"] {
-            if let Some(part) = load(&format!("minecraft:player#{slot}")) {
+            if let Some(mut part) = load(&format!("minecraft:player#{slot}")) {
+                // The player's armour bends with its limbs (`set_player_pose`).
+                part.split_limbs();
                 player.insert(slot, part);
             }
             for (small, model) in [(false, "armor_stand"), (true, "armor_stand_small")] {

@@ -878,9 +878,57 @@ fn swim(p: &mut Poses, pos: f32, h: &Hum) {
 /// the hook's own types (`horizon_hooks::players`), kept here under their old path.
 pub use horizon_hooks::players::{BODY_PARTS, BodyPose};
 
-/// The parts of [`BODY_PARTS`] a mod posed for a frame (`Mob::mod_pose`), each as `ModelPart`'s
-/// nine numbers: None leaves the part as the animation and the emote left it.
-pub type ModPose = [Option<[f32; 9]>; 6];
+/// What a mod posed on a player for a frame (`Mob::mod_pose`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModPose {
+    /// The parts of [`BODY_PARTS`], each as `ModelPart`'s nine numbers: None leaves the part as
+    /// the animation and the emote left it.
+    pub parts: [Option<[f32; 9]>; 6],
+    /// The bends of the limbs of [`super::LIMBS`] (right arm, left arm, right leg, left leg) at
+    /// the elbow or knee, each `[axis, angle]` in radians: the lower half turns by `angle` about
+    /// the horizontal axis that is the model's x axis turned by `axis` about y (0 bends it
+    /// forwards and backwards as `x_rot` turns the limb, a negative angle forwards). None leaves
+    /// the limb straight.
+    pub bends: [Option<[f32; 2]>; 4],
+}
+
+/// The joint a limb of [`super::LIMBS`] bends about, in its part's pixels: half way down the
+/// limb, in the middle of its width (a slim arm is a pixel narrower, on the outer side).
+pub fn joint(limb: usize, slim: bool) -> glam::Vec3 {
+    let arm_x = if slim { 0.5 } else { 1.0 };
+    match limb {
+        0 => glam::Vec3::new(-arm_x, 4.0, 0.0),
+        1 => glam::Vec3::new(arm_x, 4.0, 0.0),
+        _ => glam::Vec3::new(0.0, 6.0, 0.0),
+    }
+}
+
+/// The poses of a bent limb's lower half and of the band that fills the bend: `bend` (`[axis,
+/// angle]`, as [`ModPose::bends`]) about `joint`.
+pub fn bend_poses(joint: glam::Vec3, bend: [f32; 2]) -> ([f32; 9], [f32; 9]) {
+    let [axis, angle] = bend;
+    let axis = glam::Quat::from_rotation_y(axis) * glam::Vec3::X;
+    let pose = |rotation: glam::Quat, scale: glam::Vec3| {
+        // The part's matrix is T(t) * R * S: keep the joint where it was.
+        let t = joint - rotation * (scale * joint);
+        let (z, y, x) = rotation.to_euler(glam::EulerRot::ZYX);
+        [t.x, t.y, t.z, x, y, z, scale.x, scale.y, scale.z]
+    };
+    let lower = pose(glam::Quat::from_axis_angle(axis, angle), glam::Vec3::ONE);
+    // The band turns half way and stretches along the limb over the gap the outer side opens,
+    // `2 * sin(angle / 2)` times the half width at the band's half height of a quarter width,
+    // pulled in a little so its sides stay under the halves' own.
+    let stretch = 2.0 * (angle * 0.5).sin().abs();
+    let filler = if stretch == 0.0 {
+        [0.0; 9]
+    } else {
+        pose(
+            glam::Quat::from_axis_angle(axis, angle * 0.5),
+            glam::Vec3::new(0.95, stretch, 0.95),
+        )
+    };
+    (lower, filler)
+}
 
 /// Apply the mob's model animation to `p` (at rest), then the emote laid over it and the parts a
 /// mod posed, if any.
@@ -919,17 +967,37 @@ fn setup_posed(
         body_pose(&**over, s.age, rest, p);
     }
     if let Some(posed) = posed {
-        mod_pose(posed, rest, p);
+        mod_pose(posed, rest, m.slim, p);
     }
 }
 
-/// Lays the parts a mod posed over `p`, those of `rest`'s parts the model has.
-fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], p: &mut Poses) {
-    for (i, pose) in posed.iter().enumerate() {
+/// Lays the parts a mod posed over `p`, those of `rest`'s parts the model has, and bends the
+/// limbs it bent that the model split at the joint (`Part::split_limbs`).
+fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], slim: bool, p: &mut Poses) {
+    for (i, pose) in posed.parts.iter().enumerate() {
         if let Some(pose) = pose
             && rest[i].is_some()
         {
             *p.get(BODY_PARTS[i]) = *pose;
+        }
+    }
+    for (i, (bend, limb)) in posed.bends.iter().zip(&super::LIMBS).enumerate() {
+        let Some(bend) = *bend else {
+            continue;
+        };
+        if !p.has(limb.lower) {
+            continue;
+        }
+        let (lower, filler) = bend_poses(joint(i, slim), bend);
+        for name in [limb.lower, limb.lower_overlay] {
+            if p.has(name) {
+                *p.get(name) = lower;
+            }
+        }
+        for name in [limb.filler, limb.filler_overlay] {
+            if p.has(name) {
+                *p.get(name) = filler;
+            }
         }
     }
 }
@@ -1269,14 +1337,47 @@ mod body_pose_tests {
         };
         let at_rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
         body_pose(&Raise::default(), 10.0, at_rest, &mut p);
-        let mut posed: ModPose = [None; 6];
-        // The mod raises the right arm and poses the left leg, which the model lacks.
-        posed[2] = Some([-5.0, 1.0, 0.0, -3.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        posed[5] = Some(rest(9.0));
-        mod_pose(&posed, at_rest, &mut p);
-        assert_eq!(*p.get("right_arm"), posed[2].unwrap());
+        let mut posed = ModPose::default();
+        // The mod raises the right arm and poses the left leg, which the model lacks, and bends
+        // the right elbow, which the model has no forearm for.
+        posed.parts[2] = Some([-5.0, 1.0, 0.0, -3.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        posed.parts[5] = Some(rest(9.0));
+        posed.bends[0] = Some([0.0, -1.0]);
+        mod_pose(&posed, at_rest, false, &mut p);
+        assert_eq!(*p.get("right_arm"), posed.parts[2].unwrap());
         assert_eq!(*p.get("head"), rest(0.0));
         assert_eq!(p.map.len(), 2);
+    }
+
+    #[test]
+    fn a_bend_turns_the_lower_half_about_the_joint() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+        let at = |pose: [f32; 9], v: glam::Vec3| {
+            super::super::render::posed(glam::Mat4::IDENTITY, pose).transform_point3(v / 16.0)
+                * 16.0
+        };
+        let joint = joint(0, false);
+        assert_eq!(joint, glam::Vec3::new(-1.0, 4.0, 0.0));
+        // A quarter turn forwards: the hand, 6 pixels below the joint, comes up in front of it.
+        let (lower, filler) = bend_poses(joint, [0.0, -FRAC_PI_2]);
+        assert!(at(lower, joint).distance(joint) < 1e-5);
+        let hand = at(lower, joint + glam::Vec3::new(0.0, 6.0, 0.0));
+        assert!(
+            hand.distance(joint + glam::Vec3::new(0.0, 0.0, -6.0)) < 1e-4,
+            "{hand}"
+        );
+        // Turned by `axis` a quarter about y, it bends sideways instead.
+        let (side, _) = bend_poses(joint, [FRAC_PI_2, -FRAC_PI_2]);
+        let hand = at(side, joint + glam::Vec3::new(0.0, 6.0, 0.0));
+        assert!(
+            (hand.y - joint.y).abs() < 1e-4 && (hand.x - joint.x).abs() > 5.9,
+            "{hand}"
+        );
+        // The band turns half way and stretches over the gap; straight, it is not drawn.
+        assert!((filler[3] + FRAC_PI_4).abs() < 1e-6);
+        assert!((filler[7] - 2.0 * FRAC_PI_4.sin()).abs() < 1e-6);
+        assert!(at(filler, joint).distance(joint) < 1e-5);
+        assert_eq!(bend_poses(joint, [0.3, 0.0]).1, [0.0; 9]);
     }
 }
 

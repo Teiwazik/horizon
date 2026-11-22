@@ -1,6 +1,6 @@
 //! The mods' `set_player_pose` hook: once a frame, before the entity pass draws, each player model (this
 //! window's own and the other players of the level) is posed as vanilla and its emote pose it, and
-//! the mods may set its head, body, arms and legs. What they set is kept on the model for the
+//! the mods may set its head, body, arms and legs and bend its elbows and knees. What they set is kept on the model for the
 //! frame (`Mob::mod_pose`) and laid over by `anim::setup`, which every draw of the model asks:
 //! the body, its outer layers, armour, held items, cape, the mods' layers and the GPU-posed skin.
 //! With no listener nothing is posed or built.
@@ -98,15 +98,19 @@ impl Game<'_> {
         if pose.is_empty() {
             return None;
         }
-        Some(Box::new(mod_api::POSABLE_PARTS.map(|part| {
-            pose.is_set(part)
-                .then(|| pose.get(part))
-                .flatten()
-                .map(|p| {
-                    [
-                        p.x, p.y, p.z, p.x_rot, p.y_rot, p.z_rot, p.x_scale, p.y_scale, p.z_scale,
-                    ]
-                })
-        })))
+        Some(Box::new(anim::ModPose {
+            parts: mod_api::POSABLE_PARTS.map(|part| {
+                pose.is_set(part)
+                    .then(|| pose.get(part))
+                    .flatten()
+                    .map(|p| {
+                        [
+                            p.x, p.y, p.z, p.x_rot, p.y_rot, p.z_rot, p.x_scale, p.y_scale,
+                            p.z_scale,
+                        ]
+                    })
+            }),
+            bends: mod_api::BENDABLE_PARTS.map(|part| pose.bend(part).map(|(a, b)| [a, b])),
+        }))
     }
 }
