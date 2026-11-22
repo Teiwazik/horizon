@@ -45,18 +45,19 @@ impl Game<'_> {
                 name: &name,
                 local: true,
             };
-            self.player_mod_pose(m, &who, partial)
+            self.player_mod_pose(m, &who, self.own_uuid(), partial)
         });
         let others: Vec<(u32, Option<Box<anim::ModPose>>)> = self
             .mobs
             .iter()
             .filter(|m| is_player(m))
             .map(|m| {
-                // As `render_player_pre`: a player is told by its name, and one whose name the
-                // client doesn't know is asked nothing.
-                let posed = self.remote_player_name(m.id).and_then(|name| {
+                // As `render_player_pre`: a player is told by its name and UUID, and one whose
+                // name or UUID the client doesn't know is asked nothing.
+                let name = self.remote_player_name(m.id);
+                let posed = name.zip(self.remote_player_uuid(m.id)).and_then(|(name, uuid)| {
                     let who = PlayerRender { name, local: false };
-                    self.player_mod_pose(m, &who, partial)
+                    self.player_mod_pose(m, &who, uuid, partial)
                 });
                 (m.id, posed)
             })
@@ -72,11 +73,12 @@ impl Game<'_> {
         }
     }
 
-    /// The parts the mods set on `m` this frame (`who`), or None when they set none.
+    /// The parts the mods set on `m` this frame (`who`, `uuid`), or None when they set none.
     fn player_mod_pose(
         &self,
         m: &Mob,
         who: &PlayerRender<'_>,
+        uuid: u128,
         partial: f32,
     ) -> Option<Box<anim::ModPose>> {
         let (key, _) = render::body(m);
@@ -92,7 +94,7 @@ impl Game<'_> {
         anim::setup_unposed(m, &state, &mut poses, &self.res.mob_data().animations);
         let mut pose = PlayerBodyPose::new(at_rest, read(&poses));
         let render = mob_render(m, render_id(m.id, who.local, self.own_entity_id()), partial);
-        self.native_set_player_pose(&render, who, &mut pose);
+        self.native_set_player_pose(&render, who, uuid, &mut pose);
         if pose.is_empty() {
             return None;
         }
