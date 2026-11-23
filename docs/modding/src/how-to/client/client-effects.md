@@ -88,6 +88,34 @@ A new call replaces the current muffle; `ticks` of 0 ends it immediately. The ef
 
 Play the accompanying sound through `ClientHost::play_local_sound` with a `SoundPlay`.
 
+## Playing your own samples
+
+`ClientHost::play_local_pcm(&sound, samples, rate, channels, start, after)` plays audio the mod decoded or made
+itself, such as an emote's song, a recorded clip or a synthesised tune, for this player only:
+
+- `samples` is signed 16-bit PCM, interleaved, with `channels` (1 or 2) samples to a frame at `rate` frames a
+  second (8000 to 192000). The host copies them during the call.
+- Playback begins `start` frames in, so a player who joins a song already under way hears it from the right
+  place.
+- `sound` is a `SoundPlay`, as for `play_local_sound`: its source's volume slider, volume, pitch, position,
+  attenuation and looping apply, and the sound pauses with the game. Its event is not loaded. It names the
+  play for `play_sound` hooks and `muffle_sounds` exemptions, and its subtitle shows if the resources have one.
+
+The returned `SoundRef` works as `play_local_sound`'s does (`state`, `stop`, `fade`). `SoundRef::set_position`
+moves a playing sound from the next audio update, so a song played at its player can follow them:
+
+```rust
+let play = mod_api::SoundPlay::at("mymod:emote.song", mod_api::SoundSource::Players, player_pos);
+// 48 kHz mono, joined 2.5 seconds in.
+if let Some(song) = host.play_local_pcm(&play, &pcm, 48_000, 1, 120_000, 0) {
+    // Each tick, while it plays:
+    song.set_position(&*host, player_pos);
+}
+```
+
+The call returns `None` and plays nothing for an empty clip, a `start` past its end, a rate or channel count
+out of range, or more than 28 800 000 samples (ten minutes of mono at 48 kHz). Server code cannot call it.
+
 ## Showing another time or weather
 
 `sky_environment` lets a client mod show the local player another time of day or weather, for example noon

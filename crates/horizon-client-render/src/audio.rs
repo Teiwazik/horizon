@@ -424,7 +424,22 @@ pub struct MixerBackend {
     world: u32,
     /// How many other players share this output: alone, a sound never looks for its copy.
     shares: Arc<std::sync::atomic::AtomicUsize>,
+    /// Client mods' own samples (`Audio::play_mod_pcm`) by their sound's location, kept while
+    /// their instance may still start (a delayed play, or a loop's repeat after its delay).
+    mod_pcm: HashMap<String, ModPcm>,
+    /// The last `mod_pcm` location's number; never reused.
+    mod_pcm_next: u64,
 }
+/// A client mod's samples for one play (`Audio::play_mod_pcm`).
+struct ModPcm {
+    samples: Samples,
+    /// The frame its first start begins at; later repeats begin at 0.
+    start: u64,
+    /// Its engine instance, once added.
+    instance: Option<InstanceId>,
+}
+/// The namespace of client mods' sample locations (`Audio::play_mod_pcm`): no sound file has it.
+const MOD_PCM_LOCATION: &str = "horizon:mod_pcm/";
 /// A splitscreen player's backend leaving: its camera and sounds go with it.
 impl Drop for MixerBackend {
     fn drop(&mut self) {
@@ -503,13 +518,23 @@ struct Decode {
 /// the buffer future attaching and playing the source. A source stopped or
 /// released meanwhile stays so.
 fn attach(mixer: &Mutex<Mixer>, channel: ChannelId, samples: Samples, looping: bool) {
+    attach_at(mixer, channel, samples, looping, 0);
+}
+/// [`attach`], starting `start` frames in.
+fn attach_at(
+    mixer: &Mutex<Mixer>,
+    channel: ChannelId,
+    samples: Samples,
+    looping: bool,
+    start: u64,
+) {
     if let Some(samples) = samples
         && let Ok(mut m) = mixer.lock()
         && let Some(c) = m.channels.get_mut(&channel)
         && c.state == State::Initial
     {
         c.samples = Some(samples);
-        c.position = 0.0;
+        c.position = start as f64;
         c.state = State::Playing;
         c.looping |= looping;
     }
@@ -892,6 +917,12 @@ impl Backend for MixerBackend {
     /// as a failed buffer future does in vanilla.
     fn start(&mut self, channel: ChannelId, sound: &Sound, looping: bool) {
         if !self.live {
+            return;
+        }
+        // A client mod's own samples: nothing to load, and no other player has a copy.
+        if let Some(pcm) = self.mod_pcm.get_mut(sound.location.as_str()) {
+            let start = std::mem::take(&mut pcm.start);
+            attach_at(&self.mixer, channel, pcm.samples.clone(), looping, start);
             return;
         }
         // A looping sound follows its entity in one client's tracking only: each keeps its own.
@@ -1825,6 +1856,8 @@ impl Audio {
                 owner: 0,
                 world: 0,
                 shares: Arc::default(),
+                mod_pcm: HashMap::new(),
+                mod_pcm_next: 0,
             },
             record_heard: false,
             listener: [0.0; 3],
@@ -1996,6 +2029,8 @@ impl Audio {
                 owner,
                 world: self.backend.world,
                 shares: self.backend.shares.clone(),
+                mod_pcm: HashMap::new(),
+                mod_pcm_next: 0,
             },
             record_heard: false,
             listener: [0.0; 3],
@@ -2165,6 +2200,9 @@ impl Audio {
     }
     /// `SoundManager.tick(paused)`, once per client tick.
     pub fn tick(&mut self, paused: bool, ctx: &TickContext) {
+        if !self.backend.mod_pcm.is_empty() {
+            self.forget_mod_pcm();
+        }
         #[cfg(feature = "audio")]
         if self.backend.owner == 0 {
             // A splitscreen share leaves the output to the first player's. Lock the mixer
@@ -2431,6 +2469,83 @@ impl Audio {
             self.stop_mod_sound(id);
         } else if let Some(instance) = self.engine.instance_mut(id) {
             instance.fade_to(volume, ticks);
+        }
+    }
+    /// A client mod's own samples (`ClientHost::play_local_pcm`): `samples` interleaved, -1 to
+    /// 1, `channels` to a frame at `rate`, played as `sound` says (its event names the play for
+    /// hooks, muffle exemptions and a subtitle, but no file of it is loaded), beginning `start`
+    /// frames in. It goes through the engine as `play_mod_sound`'s: the source's volume slider,
+    /// pausing, fades and the channel limits all apply.
+    pub fn play_mod_pcm(
+        &mut self,
+        sound: &mod_api::SoundPlay,
+        samples: Arc<Vec<f32>>,
+        rate: u32,
+        channels: u16,
+        start: u64,
+        after: u32,
+    ) -> InstanceId {
+        self.backend.mod_pcm_next += 1;
+        let location = format!("{MOD_PCM_LOCATION}{}", self.backend.mod_pcm_next);
+        self.backend.mod_pcm.insert(
+            location.clone(),
+            ModPcm {
+                samples: Some((samples, rate, channels)),
+                start,
+                instance: None,
+            },
+        );
+        let seed = self.random.next_long();
+        self.record_heard(&sound.identifier);
+        let mut instance = SoundInstance::from_play(sound, LegacyRandom::new(seed));
+        instance.identifier = crate::sound_events::normalize(&sound.identifier);
+        instance.ticking = crate::sound_engine::Ticking::Mod { fade: None };
+        instance.can_start_silent = true;
+        instance.event = Some(
+            self.engine
+                .registry
+                .get(&instance.identifier)
+                .and_then(|event| event.subtitle.clone()),
+        );
+        instance.sound = Some(Sound {
+            location: location.clone(),
+            volume: crate::sound_events::Sampled::Constant(1.0),
+            pitch: crate::sound_events::Sampled::Constant(1.0),
+            weight: 1,
+            event: false,
+            stream: false,
+            preload: false,
+            attenuation_distance: 16,
+            sentinel: crate::sound_events::Sentinel::None,
+        });
+        instance.chosen = true;
+        let id = if after == 0 {
+            self.play_instance(instance, false).0
+        } else {
+            self.sync_volumes();
+            let id = self.engine.add(instance, false);
+            self.engine.play_delayed(id, after as i32);
+            id
+        };
+        if let Some(pcm) = self.backend.mod_pcm.get_mut(&location) {
+            pcm.instance = Some(id);
+        }
+        self.forget_mod_pcm();
+        id
+    }
+    /// Lets go of client mods' samples whose instance is over (a playing channel keeps its own).
+    fn forget_mod_pcm(&mut self) {
+        let engine = &self.engine;
+        self.backend.mod_pcm.retain(|_, pcm| {
+            pcm.instance
+                .is_none_or(|id| engine.mod_sound_state(id) != mod_api::SoundState::Stopped)
+        });
+    }
+    /// A client mod's `SoundRef::set_position`: the sound moves there from the next tick it
+    /// plays, as a tickable sound following its entity does.
+    pub fn move_mod_sound(&mut self, id: InstanceId, position: [f64; 3]) {
+        if let Some(instance) = self.engine.instance_mut(id) {
+            instance.position = position;
         }
     }
     /// `SoundManager.playDelayed` of an instance the caller made: it starts
@@ -3498,6 +3613,8 @@ mod tests {
             owner,
             world: 0,
             shares: shares.clone(),
+            mod_pcm: HashMap::new(),
+            mod_pcm_next: 0,
         };
         let (mut p1, mut p2) = (backend(0), backend(1));
         // P2 is listening (its camera is in the mixer), so two players share the speakers.
@@ -3870,6 +3987,59 @@ mod tests {
         audio.stop_mod_sound(sound);
         audio.tick(false, &ctx);
         assert_eq!(audio.mod_sound_state(sound), Stopped);
+    }
+
+    /// A mod's own samples (`play_mod_pcm`) need no file: they start at once from the frame
+    /// asked, follow `move_mod_sound`, repeat from the first frame after a loop's delay, and are
+    /// let go once the play is over.
+    #[test]
+    fn a_mod_pcm_play_starts_where_asked_follows_and_is_let_go() {
+        use mod_api::SoundState::*;
+        let mut audio = live_audio();
+        let ctx = TickContext::default();
+        let samples = Arc::new((0..4800).map(|i| i as f32 / 4800.0).collect::<Vec<_>>());
+        let play = mod_api::SoundPlay::at(
+            "mymod:song",
+            mod_api::SoundSource::Players,
+            [1.0, 64.0, 2.0],
+        )
+        .looping(2);
+        let song = audio.play_mod_pcm(&play, samples, 48_000, 1, 1200, 0);
+        assert_eq!(audio.mod_sound_state(song), Playing);
+        let channel = |audio: &Audio| {
+            let m = audio.backend.mixer.lock().unwrap();
+            m.channels.values().find(|c| c.samples.is_some()).map(|c| {
+                let (samples, rate, channels) = c.samples.as_ref().unwrap();
+                (c.state, c.position, c.at, samples.len(), *rate, *channels)
+            })
+        };
+        assert_eq!(
+            channel(&audio),
+            Some((State::Playing, 1200.0, [1.0, 64.0, 2.0], 4800, 48_000, 1))
+        );
+        audio.move_mod_sound(song, [5.0, 70.0, -3.0]);
+        audio.tick(false, &ctx);
+        assert_eq!(channel(&audio).map(|c| c.2), Some([5.0, 70.0, -3.0]));
+        // The clip ends; after the loop's delay it plays again from its first frame.
+        for channel in audio.backend.mixer.lock().unwrap().channels.values_mut() {
+            channel.state = State::Stopped;
+        }
+        let mut states = Vec::new();
+        for _ in 0..30 {
+            audio.tick(false, &ctx);
+            states.push(audio.mod_sound_state(song));
+        }
+        assert_eq!(states.last(), Some(&Playing), "repeated: {states:?}");
+        assert_eq!(
+            channel(&audio).map(|c| (c.0, c.1)),
+            Some((State::Playing, 0.0))
+        );
+        assert_eq!(audio.backend.mod_pcm.len(), 1, "kept for its repeats");
+        audio.stop_mod_sound(song);
+        audio.tick(false, &ctx);
+        assert_eq!(audio.mod_sound_state(song), Stopped);
+        audio.tick(false, &ctx);
+        assert!(audio.backend.mod_pcm.is_empty(), "let go");
     }
 
     /// A mod sound at volume 0 starts silent and keeps its handle, so a fade raises it.
