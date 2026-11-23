@@ -51,7 +51,10 @@ pub fn extrude(model: &Part, skin: &[u8], size: usize, depth: f32) -> Option<Par
 }
 
 fn explode(part: &mut Part, skin: &[u8], size: usize, depth: f32, changed: &mut bool) {
-    if OUTER_PARTS.contains(&part.name.as_str()) {
+    // A limb split to bend (`Part::split_limbs`) keeps the lower half of its sleeve or trouser
+    // leg in a child of its own.
+    let name = part.name.as_str();
+    if OUTER_PARTS.contains(&name) || super::LIMBS.iter().any(|l| l.lower_overlay == name) {
         let mut polygons = Vec::with_capacity(part.polygons.len() * 8);
         for polygon in &part.polygons {
             polygons.extend(extrude_polygon(polygon, skin, size, depth, changed));
