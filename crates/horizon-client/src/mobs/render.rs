@@ -1624,8 +1624,17 @@ pub fn cape(
     let now = glam::Quat::from_euler(glam::EulerRot::ZYX, pose[5], pose[4], pose[3]);
     let (z, y, x) = (now * by).to_euler(glam::EulerRot::ZYX);
     (pose[3], pose[4], pose[5]) = (x, y, z);
+    // It hangs from the shoulders: a body a mod bent (`set_player_pose`) carries it on its chest.
+    if let Some(upper) = anim::upper_body(m.mod_pose.as_deref()) {
+        *pose = anim::carried(upper, *pose);
+    }
     // RenderTypes.entitySolid with OverlayTexture.NO_OVERLAY.
     draw(model, base, &poses, uv, 0xFFFF_FFFF, light, 0, out);
+}
+/// The matrix (in blocks) of the upper half of `m`'s body in the body's space when a mod bent it
+/// at the waist (`set_player_pose`), for what hangs from the shoulders: the elytra's wings.
+pub fn upper_body(m: &Mob) -> Option<glam::Mat4> {
+    anim::upper_body(m.mod_pose.as_deref())
 }
 /// `Deadmau5EarsLayer.submit` with `PlayerEarsModel`: the player model's
 /// head carrying two 6x6x1 ears (the model's other cubes are cleared),
@@ -1675,15 +1684,15 @@ const BODY_PARTS: [&str; 6] = [
 /// The cubes of a part as `ModelPart.cubes` has them: min and max corners in
 /// model units. The part keeps six faces per cube, in cube order.
 fn cube_bounds(part: &Part) -> Vec<[f32; 6]> {
-    // A player limb split at the joint (`Part::split_limbs`) is still the one cube.
-    if let Some(limb) = super::LIMBS.iter().find(|l| l.upper == part.name)
-        && let Some(lower) = part.children.iter().find(|c| c.name == limb.lower)
+    // A player limb or body split at the joint (`Part::split_limbs`) is still the one cube.
+    if let Some(limb) = super::LIMBS.iter().find(|l| l.part == part.name)
+        && let Some(half) = part.children.iter().find(|c| c.name == limb.half)
     {
         let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
         for v in part
             .polygons
             .iter()
-            .chain(&lower.polygons)
+            .chain(&half.polygons)
             .flat_map(|f| f.vertices)
         {
             for k in 0..3 {
@@ -2624,8 +2633,8 @@ fn hand_base(
     // joint: the hand's offset stays the one the arm gives it.
     if avatar(m) {
         let limb = &super::LIMBS[usize::from(left)];
-        if let Some(lower) = poses.pose_of(limb.lower)
-            && lower != find_part(model, limb.lower).map_or(lower, |p| p.pose)
+        if let Some(lower) = poses.pose_of(limb.half)
+            && lower != find_part(model, limb.half).map_or(lower, |p| p.pose)
         {
             let arm_m = part_matrix(model, base, poses, arm, 0.0)?;
             t = arm_m * posed(glam::Mat4::IDENTITY, lower) * arm_m.inverse() * t;

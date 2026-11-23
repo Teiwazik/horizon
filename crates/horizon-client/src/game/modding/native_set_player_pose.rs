@@ -1,6 +1,6 @@
 //! The mods' `set_player_pose` hook: once a frame, before the entity pass draws, each player model (this
 //! window's own and the other players of the level) is posed as vanilla and its emote pose it, and
-//! the mods may set its head, body, arms and legs and bend its elbows and knees. What they set is kept on the model for the
+//! the mods may set its head, body, arms and legs and bend its elbows, knees and waist. What they set is kept on the model for the
 //! frame (`Mob::mod_pose`) and laid over by `anim::setup`, which every draw of the model asks:
 //! the body, its outer layers, armour, held items, cape, the mods' layers and the GPU-posed skin.
 //! With no listener nothing is posed or built.
@@ -55,10 +55,12 @@ impl Game<'_> {
                 // As `render_player_pre`: a player is told by its name and UUID, and one whose
                 // name or UUID the client doesn't know is asked nothing.
                 let name = self.remote_player_name(m.id);
-                let posed = name.zip(self.remote_player_uuid(m.id)).and_then(|(name, uuid)| {
-                    let who = PlayerRender { name, local: false };
-                    self.player_mod_pose(m, &who, uuid, partial)
-                });
+                let posed = name
+                    .zip(self.remote_player_uuid(m.id))
+                    .and_then(|(name, uuid)| {
+                        let who = PlayerRender { name, local: false };
+                        self.player_mod_pose(m, &who, uuid, partial)
+                    });
                 (m.id, posed)
             })
             .collect();
