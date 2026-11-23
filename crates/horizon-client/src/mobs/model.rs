@@ -295,13 +295,16 @@ impl Part {
     /// vertices where they were and the identity pose, so unbent it draws as before; the limb
     /// (not its outer layer) closes both cut ends, hidden inside the box until it bends. A second
     /// child (`Limb::filler`) holds the sides of a band about the joint, at a zero scale until a
-    /// bend opens a gap for it to fill.
+    /// bend opens a gap for it to fill. An armour's limb (one without a sleeve or trouser leg)
+    /// gets no band: its texture stops about the joint, so a band would show only a sliver of the
+    /// edge above it, a thin outline off to the side of the bent limb.
     pub fn split_limbs(&mut self) {
         for limb in &LIMBS {
             if let Some(upper) = self.find_mut(limb.upper) {
-                upper.split_at_joint(limb.lower, limb.filler, true);
+                let body = upper.children.iter().any(|c| c.name == limb.overlay);
+                upper.split_at_joint(limb.lower, body.then_some(limb.filler), true);
                 if let Some(overlay) = upper.find_mut(limb.overlay) {
-                    overlay.split_at_joint(limb.lower_overlay, limb.filler_overlay, false);
+                    overlay.split_at_joint(limb.lower_overlay, Some(limb.filler_overlay), false);
                 }
             }
         }
@@ -314,9 +317,9 @@ impl Part {
         self.children.iter_mut().find_map(|c| c.find_mut(name))
     }
 
-    /// Moves the lower half of this one-cube part into a child `lower` and adds the band `filler`
-    /// (first among the children when `first`, so the halves draw before an outer layer).
-    fn split_at_joint(&mut self, lower: &str, filler: &str, first: bool) {
+    /// Moves the lower half of this one-cube part into a child `lower` and adds the band `filler`,
+    /// if any (first among the children when `first`, so the halves draw before an outer layer).
+    fn split_at_joint(&mut self, lower: &str, filler: Option<&str>, first: bool) {
         let sides = |p: &&Polygon| p.normal[1] == 0.0;
         let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
         for v in self.polygons.iter().flat_map(|p| p.vertices) {
@@ -378,16 +381,17 @@ impl Part {
             polygons: lower_half,
             children: Vec::new(),
         };
-        let filler = Part {
-            name: filler.to_owned(),
+        let filler = filler.map(|name| Part {
+            name: name.to_owned(),
             pose: HIDDEN,
             polygons: fill,
             children: Vec::new(),
-        };
+        });
+        let halves = std::iter::once(lower).chain(filler);
         if first {
-            self.children.splice(0..0, [lower, filler]);
+            self.children.splice(0..0, halves);
         } else {
-            self.children.extend([lower, filler]);
+            self.children.extend(halves);
         }
     }
 }
@@ -564,6 +568,21 @@ mod limb_tests {
             (sleeve.polygons.len(), sleeve.children[0].polygons.len()),
             (5, 5)
         );
+        // An armour's limb, without a sleeve, gets no band: it would show only the edge of the
+        // texture above the joint, an outline beside the bent limb.
+        let mut armour = Part {
+            name: "root".into(),
+            pose: IDENTITY,
+            polygons: Vec::new(),
+            children: vec![arm("right_arm", Vec::new())],
+        };
+        armour.split_limbs();
+        let names: Vec<_> = armour.children[0]
+            .children
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["right_forearm"]);
         // A limb without a box (a helmet layer's arm) is left as it is.
         let mut empty = Part {
             name: "root".into(),
