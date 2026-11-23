@@ -350,6 +350,23 @@ fn max_map_bytes() -> u64 {
         PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
     )
 }
+/// The side a sheet's LabPBR maps are laid out at, from its largest map and its colours' side,
+/// for given budgets in bytes (`pbr_budget` 0 for unset). An explicit `pbrBudgetMiB` may keep
+/// maps sharper than the colours; without it the maps never exceed them.
+fn pbr_side(
+    largest_map: u32,
+    colour_side: u32,
+    layers: u64,
+    texture_budget: u64,
+    pbr_budget: u64,
+) -> u32 {
+    let cap = if pbr_budget == 0 {
+        largest_map.min(colour_side)
+    } else {
+        largest_map
+    };
+    side_within(cap, layers, map_budget(texture_budget, pbr_budget))
+}
 /// [`max_map_bytes`] for given budgets: `pbr_budget` in bytes, 0 for unset.
 fn map_budget(texture_budget: u64, pbr_budget: u64) -> u64 {
     match pbr_budget {
@@ -667,14 +684,13 @@ impl Sprites {
         self.specular.clear();
         let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
         self.pbr_size = largest_map.map_or(SPRITE_SIZE, |l| {
-            // An explicit `pbrBudgetMiB` may keep maps sharper than the colours; without it the
-            // maps never exceed them.
-            let cap = if PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                l.min(size)
-            } else {
-                l
-            };
-            side_within(cap, layers, max_map_bytes())
+            pbr_side(
+                l,
+                size,
+                layers,
+                TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+                PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+            )
         });
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
@@ -1777,19 +1793,24 @@ mod tests {
     }
     #[test]
     fn an_explicit_pbr_budget_keeps_maps_sharper_than_the_colours() {
-        let sheet = |pbr_budget: u32| {
-            set_pbr_budget(pbr_budget);
-            let mut sprites = Sprites {
-                native: vec![(16, Arc::new(vec![vec![0; 16 * 16 * 4]]), 0)],
-                pbr: vec![[Some((64, vec![[9, 8, 7, 6].repeat(64 * 64)])), None]],
-                ..Default::default()
-            };
-            sprites.finish();
-            set_pbr_budget(0);
-            sprites.pbr_size
+        // `pbr_side` takes the budgets as arguments, so this never sets the process-wide
+        // `PBR_BUDGET` that the other `finish()` tests read in parallel.
+        let side = |pbr_mib: u64| pbr_side(64, 16, 1, DEFAULT_TEXTURE_BUDGET, pbr_mib << 20);
+        assert_eq!(side(0), 16);
+        assert_eq!(side(64), 64);
+        let mut sprites = Sprites {
+            native: vec![(16, Arc::new(vec![vec![0; 16 * 16 * 4]]), 0)],
+            pbr: vec![[
+                Some((64, Arc::new(vec![[9, 8, 7, 6].repeat(64 * 64)]))),
+                None,
+            ]],
+            ..Default::default()
         };
-        assert_eq!(sheet(0), 16);
-        assert_eq!(sheet(64), 64);
+        sprites.finish();
+        assert_eq!(
+            sprites.pbr_size, 16,
+            "without pbrBudgetMiB the maps follow the colours"
+        );
     }
     #[test]
     fn companion_grid_and_static_map_follow_colour_frame_selection() {
