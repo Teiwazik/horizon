@@ -292,7 +292,13 @@ impl Game<'_> {
                     from_server,
                 } => {
                     self.reset_book_view();
-                    log::info!("Horizon: disconnected: {reason}");
+                    log::info!(
+                        "Horizon: disconnected: {}",
+                        horizon_client::logging::one_line(&horizon_client::net::logged_reason(
+                            &reason,
+                            key.as_deref()
+                        ))
+                    );
                     // ClientboundTransferPacket left a target: connect there
                     // instead of showing the disconnect, the stored cookies
                     // carried over (ClientCommonPacketListenerImpl.
