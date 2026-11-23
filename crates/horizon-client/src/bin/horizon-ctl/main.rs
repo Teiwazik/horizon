@@ -146,6 +146,7 @@ pub struct Session {
     pub paced: bool,
     /// The pause menu `--paced` opened, which the next action closes.
     pub(crate) held: bool,
+    exporting: bool,
 }
 
 impl Session {
@@ -158,6 +159,7 @@ impl Session {
             client: None,
             paced: false,
             held: false,
+            exporting: false,
         }
     }
     /// A failure while No AI is on: every command refuses (help aside).
@@ -182,6 +184,11 @@ impl Session {
             self.client = None;
         }
         let reply = result?;
+        if line.starts_with("export ")
+            && let Some(active) = reply["active"].as_bool()
+        {
+            self.exporting = active;
+        }
         if reply.get("error").is_some() {
             return Err(Failure {
                 reply,
@@ -435,12 +442,7 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs_f64(limit.max(0.0));
         loop {
             let status = self.game("status")?;
-            // On a server (single player's server thread too), also the
-            // level around the player.
-            if !status["player"].is_null()
-                && status["pending_chunks"] == 0
-                && status["server"]["loaded"] != false
-            {
+            if world_ready(&status) {
                 return Ok(status);
             }
             if Instant::now() > deadline {
@@ -452,6 +454,23 @@ impl Session {
             thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+/// Whether `status` says a world has arrived: the player is in it, no chunk
+/// work waits here (`pending_chunks`), it holds the columns its render
+/// distance's view has (`view_chunks`), and the terrain has settled
+/// (`terrain_loading`: the view's outermost columns, generation, meshes,
+/// uploads or the server's backlog). A server sends a view's columns nearest
+/// first, so `pending_chunks` alone reads 0 while most of them are unsent.
+fn world_ready(status: &Value) -> bool {
+    !status["player"].is_null()
+        && status["pending_chunks"] == 0
+        && status["server"]["loaded"] != false
+        && !status["terrain_loading"].as_bool().unwrap_or(false)
+        && status["chunks"].as_u64().unwrap_or(0)
+            >= horizon_client::benchmark::view_chunks(
+                status["render_distance"].as_u64().unwrap_or(0),
+            )
 }
 
 /// Whether `look` (a `look-at entity` reply) put entity `id` under the crosshair; if not,
@@ -848,6 +867,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wait_ready_waits_for_the_view_s_chunks_and_terrain_to_settle() {
+        let status = |chunks: u64, pending: u64, loading: bool| {
+            json!({
+                "player": {"position": [0.0, 64.0, 0.0]},
+                "pending_chunks": pending,
+                "server": {"loaded": true},
+                "render_distance": 12,
+                "chunks": chunks,
+                "terrain_loading": loading,
+            })
+        };
+        // A brand-new world: nothing is queued here yet, the server is still
+        // sending the view (76 of 3725 columns in the issue's runs).
+        assert!(!world_ready(&status(0, 0, false)));
+        assert!(
+            !world_ready(&status(360, 0, false)),
+            "below view_chunks(12)"
+        );
+        // The view's columns are in, but their meshes and uploads are not.
+        assert!(!world_ready(&status(400, 0, true)));
+        assert!(!world_ready(&status(400, 1, false)));
+        // Nothing is left: the world is ready.
+        assert!(world_ready(&status(400, 0, false)));
+        // A game before `terrain_loading` existed is judged by its columns and queue.
+        let mut old = status(400, 0, false);
+        old.as_object_mut().unwrap().remove("terrain_loading");
+        assert!(world_ready(&old));
+        // No player, or a player the server has not loaded, is not ready.
+        assert!(!world_ready(&json!({
+            "pending_chunks": 0, "chunks": 400, "render_distance": 12, "server": {"loaded": true},
+        })));
+        let mut unloaded = status(400, 0, false);
+        unloaded["server"]["loaded"] = json!(false);
+        assert!(!world_ready(&unloaded));
+    }
+
+    #[test]
     fn aimed_at_names_what_is_under_the_crosshair_instead() {
         let on = json!({ "target": { "entity": { "id": 91, "type": "minecraft:sheep" } } });
         assert_eq!(aimed_at(&on, 91), Ok(()));
@@ -987,6 +1043,14 @@ mod tests {
         name: &str,
         reply: &'static str,
     ) -> (PathBuf, std::thread::JoinHandle<Vec<String>>) {
+        fake_game_with(name, move |_| reply)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn fake_game_with(
+        name: &str,
+        reply: impl Fn(&str) -> &'static str + Send + 'static,
+    ) -> (PathBuf, std::thread::JoinHandle<Vec<String>>) {
         let path = std::env::temp_dir().join(format!("hctl-{name}-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -997,9 +1061,10 @@ mod tests {
             let mut out = stream;
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                lines.push(line.trim_end().to_owned());
+                let command = line.trim_end();
+                writeln!(out, "{}", reply(command)).unwrap();
+                lines.push(command.to_owned());
                 line.clear();
-                writeln!(out, "{reply}").unwrap();
             }
             lines
         });

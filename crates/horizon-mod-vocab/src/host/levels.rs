@@ -61,12 +61,54 @@ pub trait LevelsBackend {
         structure: &str,
         parameters: StructureSearch,
     ) -> Option<StructureSearchResult>;
+    /// Side: server.
+    /// `StructureManager.getStructureAt` and `getStructureWithPieceAt` in one read: every
+    /// structure the chunk at `pos` refers to whose start's box or one of whose pieces, as
+    /// placed, holds `pos`, with which of the two (`in_box`, `in_piece`). Reads the level in place or
+    /// parked from the starts the generator holds: loads no chunk and builds no start. Empty
+    /// for a chunk that refers to no structure there; None on a client, for a stale or
+    /// unavailable level, for a chunk that isn't loaded and for one whose references the level
+    /// can't resolve now (a level without generated terrain, or starts the generator no longer
+    /// holds).
+    #[access(WorldOnly)]
+    fn level_structures_at(&self, level: LevelRef, pos: [i32; 3]) -> Option<Vec<StructureAt>>;
+    /// Side: server.
+    /// The block entities in the box from `min` to `max`, maxima exclusive, in the chunks of it
+    /// that are loaded (`LevelChunk.getBlockEntities` over those chunks; Paper's
+    /// `Chunk.getTileEntities`): each one's position and type id, sorted by position (x, then y,
+    /// then z). Reads the level in place or parked and loads nothing; a block entity out for its
+    /// own tick is not listed during that tick. None on a client, for a stale or unavailable
+    /// level, for an empty box (a minimum not below its maximum), for one wholly outside the
+    /// level's height and for one over more than 64 chunks.
+    #[access(WorldOnly)]
+    fn level_block_entities(
+        &self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Option<Vec<BlockEntityAt>>;
     /// Side: both.
     /// `Level.getSkyDarken`: the sky-light reduction from dimension, time and weather.
     /// Reads any loaded server level, including parked levels, or the current client level.
     /// None for a stale or unavailable level. Does not load chunks.
     #[access(WorldOnly)]
     fn level_get_sky_darken(&self, level: LevelRef) -> Option<i32>;
+    /// Side: server.
+    /// `level.environmentAttributes().getValue(attribute, pos)` for a float environment
+    /// attribute (`visual/sky_light_factor`, `gameplay/sky_light_level`; the `minecraft:`
+    /// namespace may be left out): the level's stack of dimension type, timelines on its clock
+    /// and weather, with the one biome at `pos` and no spatial interpolation (the noise biome,
+    /// or the block's biome for an attribute with full-resolution biomes). Reads an active or
+    /// parked server level and loads nothing; a biome layer of an unloaded column is skipped.
+    /// None on a client, for a stale or unavailable level, an unknown attribute and one that
+    /// isn't a float.
+    #[access(WorldOnly)]
+    fn level_environment_float(
+        &self,
+        level: LevelRef,
+        attribute: &str,
+        pos: [f64; 3],
+    ) -> Option<f32>;
     /// Side: both.
     /// `BlockGetter.getBlockFloorHeight` with the normal collision shapes and an empty
     /// entity context. The result is relative to the block: negative infinity means no floor.
@@ -268,9 +310,11 @@ pub trait LevelsBackend {
     /// finite (NaN or infinite). A minimum above its maximum is the same box
     /// with the two swapped, as vanilla's `AABB`. On a client (`ClientLevel`),
     /// the entities the server tracks to it, other players among them, and the
-    /// window's own player, with the same walk.
+    /// window's own player, with the same walk. A display's zero-size physical
+    /// box intersects when its position is strictly inside the query.
     /// None there before login and for a level it does not show. The walk
-    /// is in entity-list order followed by players. Every entity list is walked
+    /// is in entity-list order, with displays (by entity id on a client)
+    /// before the dragon and the final player entries. Every entity list is walked
     /// once per call: O(entities) regardless of the box. Each overlapping mob
     /// resolves through a mob-list scan: O(K*N) for K overlapping mobs and N mobs. Tridents do not
     /// resolve; frames, paintings and other special entities
@@ -657,6 +701,15 @@ pub trait LevelsBackend {
     #[access(WorldOnly)]
     fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
     /// Side: server.
+    /// `LevelReader.canSeeSkyFromBelowWater`: at or above the level's sea level (`sea_level`)
+    /// the same as `can_see_sky`; below it, whether the column sees the sky at sea level and
+    /// every block from there down to `pos` (not counted) dampens no light or is water, lava or a
+    /// bubble column. Kelp, seagrass and waterlogged blocks stop it. Natural spawning asks it
+    /// (the guardian's rule), and so do mods that tell open water from caves. None for a stale
+    /// handle, a position that isn't loaded and on a client.
+    #[access(WorldOnly)]
+    fn level_can_see_sky_from_below_water(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
+    /// Side: server.
     /// Whether nothing solid lies on the segment `from`..`to`, as
     /// `LivingEntity.hasLineOfSight` clips between two eyes (`ClipContext.Block.COLLIDER`,
     /// `ClipContext.Fluid.NONE`): `clip`'s miss. Fluids, entities and the border don't block it.
@@ -900,6 +953,23 @@ pub trait LevelsBackendMut {
         chunk: ChunkRef,
         controller: TicketController,
         owner: TicketOwner,
+        forced: bool,
+        natural_spawning: bool,
+    ) -> bool;
+    /// Side: server.
+    /// Hold or release a runtime-only ticket of `controller` on this chunk for
+    /// `operation`, an id the mod picks (a teleport search, say): true when the
+    /// controller's tickets changed. It holds the chunk as `chunk_set_mod_forced`
+    /// does, with the same refusals, and is scoped by (controller, operation,
+    /// chunk, natural_spawning). It is never saved, never handed to
+    /// `validate_tickets` and never listed by `mod_forced_chunks`; it ends when
+    /// the level closes.
+    #[access(WorldOnly)]
+    fn chunk_set_transient_forced(
+        &mut self,
+        chunk: ChunkRef,
+        controller: TicketController,
+        operation: u128,
         forced: bool,
         natural_spawning: bool,
     ) -> bool;
@@ -1236,6 +1306,23 @@ pub trait LevelsBackendMut {
         count: i32,
     ) -> bool;
     /// Side: server.
+    /// `level_send_particles` around each of `positions`, in order, in one call:
+    /// every position is checked as the single one is, and all of them are
+    /// queued or none if any would be refused. It saves the mod's calls only:
+    /// each position is still a request of its own. An empty list queues
+    /// nothing and answers true; more than 4096 positions answer false.
+    #[access(WorldOnly)]
+    fn level_send_particles_at(
+        &mut self,
+        level: LevelRef,
+        options: &ParticleOptions,
+        state: Option<BlockState>,
+        positions: &[[f64; 3]],
+        spread: [f64; 3],
+        speed: f64,
+        count: i32,
+    ) -> bool;
+    /// Side: server.
     /// Plays level event `id` at `pos` with `data` for the players near it
     /// (`Level.levelEvent(null, id, pos, data)`): `1000`s are sounds, `2000`s
     /// particles, as vanilla's `LevelEvent` numbers them (`2001` breaks a
@@ -1482,7 +1569,8 @@ pub trait LevelsBackendMut {
     /// they award). True once the orbs are awarded, even if a mod keeps a new
     /// one out (`entity_join_level`). False, with no orbs, for 0, a
     /// value that isn't finite, on a client, for a stale handle or a level
-    /// not in place.
+    /// not in place. One call awards at most 1,000,000 points (about 400
+    /// orbs): a larger `amount` is cut to that, so award in several calls.
     #[access(WorldOnly)]
     fn level_award_experience(
         &mut self,

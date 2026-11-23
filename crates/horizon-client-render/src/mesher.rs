@@ -3,7 +3,9 @@
 //! `ModelBlockRenderer`/`BlockModelLighter` (smooth light, ambient occlusion,
 //! cardinal shading, tint sources, block offsets; see `lighting`). Fluids
 //! follow `FluidRenderer` (see `fluid`).
+mod block_layers;
 pub use crate::render_geometry::Vertex;
+pub use block_layers::BlockLayerTable;
 pub use mod_api::client::mesher::TintSource;
 mod fluid;
 mod leaf_culling;
@@ -385,6 +387,119 @@ mod section_mesh_tests {
             ])
         );
     }
+
+    #[test]
+    fn sort_solid_for_lod_matches_sort_solid_without_meshlets() {
+        let quad = |positions: [[f32; 3]; 4], layer: u16, color: u32| {
+            positions.map(|pos| TerrainVertex::tiled(pos, [0.0, 0.0], layer, color, 0xF0F0))
+        };
+        let mut solid = Vec::new();
+        // +Y opaque face at y = 10
+        solid.extend(quad(
+            [
+                [0.0, 10.0, 0.0],
+                [0.0, 10.0, 4.0],
+                [4.0, 10.0, 4.0],
+                [4.0, 10.0, 0.0],
+            ],
+            OPAQUE_LAYER | 1,
+            0xFF11_2233,
+        ));
+        // +X cutout face at x = 8
+        solid.extend(quad(
+            [
+                [8.0, 0.0, 0.0],
+                [8.0, 4.0, 0.0],
+                [8.0, 4.0, 4.0],
+                [8.0, 0.0, 4.0],
+            ],
+            2,
+            0xFF44_5566,
+        ));
+        // -Z opaque face at z = 0
+        solid.extend(quad(
+            [
+                [4.0, 0.0, 0.0],
+                [4.0, 4.0, 0.0],
+                [0.0, 4.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            OPAQUE_LAYER | 3,
+            0xFF77_8899,
+        ));
+        let translucent = quad(
+            [
+                [0.0, 12.0, 0.0],
+                [0.0, 12.0, 4.0],
+                [4.0, 12.0, 4.0],
+                [4.0, 12.0, 0.0],
+            ],
+            4,
+            0x80AA_BBCC,
+        )
+        .to_vec();
+        let solid_sources = vec![
+            TerrainSource::new(1, [0, 10, 0], 0, false),
+            TerrainSource::new(2, [8, 0, 0], 0, false),
+            TerrainSource::new(3, [0, 0, 0], 0, false),
+        ];
+        let solid_looks = vec![QuadLook([1, 2]), QuadLook([3, 4]), QuadLook([5, 6])];
+
+        let mut expected = SectionMesh {
+            solid: solid.clone(),
+            solid_sources: solid_sources.clone(),
+            translucent: translucent.clone(),
+            solid_looks: solid_looks.clone(),
+            ..Default::default()
+        };
+        expected.sort_solid();
+
+        let mut lod = SectionMesh {
+            solid: solid.clone(),
+            solid_sources,
+            translucent,
+            solid_looks,
+            ..Default::default()
+        };
+        lod.sort_solid_for_lod();
+
+        assert_eq!(
+            bytemuck::cast_slice::<TerrainVertex, u32>(&lod.solid),
+            bytemuck::cast_slice::<TerrainVertex, u32>(&expected.solid),
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TerrainVertex, u32>(&lod.translucent),
+            bytemuck::cast_slice::<TerrainVertex, u32>(&expected.translucent),
+        );
+        assert_eq!(lod.sides, expected.sides);
+        assert_eq!(lod.bounds, expected.bounds);
+        assert_eq!(lod.solid_sources, expected.solid_sources);
+        assert_eq!(lod.solid_looks, expected.solid_looks);
+        assert!(lod.packed.is_empty());
+        assert!(!lod.packed_far);
+        assert!(lod.solid_tints.is_empty());
+        assert!(lod.meshlets.is_empty());
+        assert_eq!(lod.meshlets.capacity(), 0);
+
+        // Pre-populated stale meshlets, packed records, and tints are cleared.
+        let mut recycled = SectionMesh {
+            solid,
+            translucent: expected.translucent.clone(),
+            packed: vec![[1; 6]],
+            packed_far: true,
+            solid_tints: vec![0xFF_FFFF; 3],
+            meshlets: meshlet::build_section_meshlets(&expected.sides, &expected.solid, &[]),
+            ..Default::default()
+        };
+        assert!(!recycled.meshlets.is_empty());
+        recycled.sort_solid_for_lod();
+        assert!(recycled.meshlets.is_empty());
+        assert!(recycled.packed.is_empty());
+        assert!(!recycled.packed_far);
+        assert!(recycled.solid_tints.is_empty());
+        assert_eq!(recycled.sides, expected.sides);
+        assert_eq!(recycled.bounds, expected.bounds);
+    }
 }
 /// A shader terrain quad's unmodified source state and owning section cell. Two words
 /// per quad, kept beside (not in) the native 24-byte vertex format. Word 1 has cell XYZ
@@ -483,6 +598,9 @@ pub struct SectionMesh {
     /// `solid` in the compact layout (`packed`), when the renderer reads it and it is
     /// smaller; empty otherwise. Made by `sort_solid`.
     pub packed: Vec<[u32; 6]>,
+    /// Pre-built sub-section meshlets (`meshlet`) when hardware mesh shaders are enabled
+    /// (`meshlet::packing_meshlets()`), built on the meshing worker thread in `sort_solid`.
+    pub meshlets: Vec<meshlet::MeshletDesc>,
     /// The tint of each solid quad as the mesher multiplied it (`packed::UNKNOWN_TINT` where
     /// it does not say), for `packed`; dropped once that is made.
     pub(crate) solid_tints: Vec<u32>,
@@ -516,6 +634,7 @@ impl Default for SectionMesh {
             solid_looks: Vec::new(),
             translucent_looks: Vec::new(),
             packed: Vec::new(),
+            meshlets: Vec::new(),
             packed_far: false,
             solid_tints: Vec::new(),
             visibility: ALL_VISIBLE,
@@ -555,6 +674,7 @@ impl SectionMesh {
         self.solid_looks.clear();
         self.translucent_looks.clear();
         self.packed.clear();
+        self.meshlets.clear();
         self.packed_far = false;
         self.solid_tints.clear();
         self.block_entities.clear();
@@ -573,6 +693,7 @@ impl SectionMesh {
             + (self.solid_looks.capacity() + self.translucent_looks.capacity())
                 * std::mem::size_of::<QuadLook>()
             + self.packed.capacity() * std::mem::size_of::<[u32; 6]>()
+            + self.meshlets.capacity() * std::mem::size_of::<meshlet::MeshletDesc>()
             + self.solid_tints.capacity() * std::mem::size_of::<u32>()
             + self.block_entities.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.lights.capacity() * std::mem::size_of::<([i32; 3], u32)>()
@@ -594,11 +715,40 @@ impl SectionMesh {
         );
         self.bounds = self.compute_bounds();
         self.packed.clear();
+        self.meshlets.clear();
         self.packed_far = false;
         if packed::packing() && quads > 0 && self.solid_tints.len() == quads {
             packed::layout_into(&self.solid, &self.solid_tints, &mut self.packed);
         }
         self.solid_tints.clear();
+        self.meshlets.clear();
+        if meshlet::packing_meshlets() && quads > 0 {
+            meshlet::build_section_meshlets_into(
+                &self.sides,
+                &self.solid,
+                &self.packed,
+                &mut self.meshlets,
+            );
+        }
+    }
+
+    /// Sorts the solid quads by the side they face for far-terrain (LOD) tiles,
+    /// without building near-section compact records or sub-section meshlets:
+    /// `Renderer::upload_lod` never registers LOD tiles in the mesh-shader
+    /// section store, and `lod::packed::lay_out` lays out the far-terrain
+    /// compact layout immediately after.
+    pub fn sort_solid_for_lod(&mut self) {
+        self.solid_tints.clear();
+        self.sides = sides::sort_sourced(
+            &mut self.solid,
+            &mut self.solid_tints,
+            &mut self.solid_sources,
+            &mut self.solid_looks,
+        );
+        self.bounds = self.compute_bounds();
+        self.packed.clear();
+        self.meshlets.clear();
+        self.packed_far = false;
     }
 
     /// Every face emitted since `start` belongs to this block, including multipart,
@@ -1632,6 +1782,7 @@ pub struct MeshScratch {
     /// Per padded row (`pi(-B, y, z) / P`), bit `x + B` set where the block
     /// is `isSolidRender` (`MeshTables::solid`).
     solid_rows: Vec<u32>,
+    tints: TintScratch,
 }
 /// Fills `rows` with the padded section's `isSolidRender` blocks, one bit each (`MeshScratch::solid_rows`).
 fn solid_rows(pad: &Padded, solid: &[bool], rows: &mut Vec<u32>) {
@@ -1815,12 +1966,14 @@ enum Resolver {
 struct ModCells {
     cells: Vec<u32>,
     colors: Box<[u32; 256]>,
+    ready: bool,
 }
 impl Default for ModCells {
     fn default() -> Self {
         Self {
             cells: Vec::new(),
             colors: Box::new([UNSET; 256]),
+            ready: true,
         }
     }
 }
@@ -1837,6 +1990,9 @@ struct Layer {
     colors: [[u32; 256]; 4],
     /// The mods' resolvers' caches, by registration index, made when one is first asked.
     mods: Vec<ModCells>,
+    /// Bit `i` (0..4) is set once vanilla resolver `i` has been cleared for the
+    /// current section on this layer.
+    vanilla_ready: u8,
 }
 impl Layer {
     /// The `cells` and `colors` caches of `resolver`. Takes the fields it lends, so `get` keeps
@@ -1845,6 +2001,7 @@ impl Layer {
         cells: &'l mut [Vec<u32>; 4],
         colors: &'l mut [[u32; 256]; 4],
         mods: &'l mut Vec<ModCells>,
+        vanilla_ready: &mut u8,
         resolver: Resolver,
     ) -> (&'l mut Vec<u32>, &'l mut [u32; 256]) {
         let vanilla = match resolver {
@@ -1858,11 +2015,31 @@ impl Layer {
                     mods.resize_with(index + 1, ModCells::default);
                 }
                 let caches = &mut mods[index];
+                if !caches.ready {
+                    caches.ready = true;
+                    caches.cells.clear();
+                    caches.colors.fill(UNSET);
+                }
                 return (&mut caches.cells, &mut caches.colors);
             }
         };
+        let bit = 1u8 << vanilla;
+        if *vanilla_ready & bit == 0 {
+            *vanilla_ready |= bit;
+            cells[vanilla].clear();
+            colors[vanilla].fill(UNSET);
+        }
         (&mut cells[vanilla], &mut colors[vanilla])
     }
+}
+/// Reusable heap buffers for [`Tints`], kept in [`MeshScratch`] so `mesh_reusing`
+/// does not allocate or reinitialize per-layer tint caches on every section.
+#[derive(Default)]
+struct TintScratch {
+    layers: [Option<Box<Layer>>; 16],
+    asked_colors: Vec<(i32, u32)>,
+    sampled: crate::fast_hash::FxHashMap<(u16, [i32; 3]), Option<u32>>,
+    cells: crate::fast_hash::FxHashMap<(u16, [i32; 3]), Option<u32>>,
 }
 /// `ClientLevel.calculateBlockTint` behind a per-layer `BlockTintCache`: each
 /// block averages the colours of the biomes `BiomeManager.getBiome` picks (the
@@ -1877,6 +2054,8 @@ struct Tints<'a> {
     /// Chunk x, chunk z and the section's lowest block y.
     origin: [i32; 3],
     layers: [Option<Box<Layer>>; 16],
+    /// Bit `y` (0..16) is set once `layers[y]` has been reset for the current section.
+    layer_ready: u16,
     /// `uniform_biome`, once computed.
     uniform: Option<Option<u16>>,
     /// The block a mod's own source last coloured (section-local position and state) and its
@@ -1908,6 +2087,7 @@ impl<'a> Tints<'a> {
             plains: biomes.id("minecraft:plains"),
             origin,
             layers: Default::default(),
+            layer_ready: 0,
             uniform: None,
             asked: None,
             asked_colors: Vec::new(),
@@ -1916,6 +2096,51 @@ impl<'a> Tints<'a> {
             sampled: Default::default(),
             cells: Default::default(),
         }
+    }
+    /// Constructs a [`Tints`] reusing `scratch`'s heap buffers without allocating.
+    /// Call [`Self::return_to`] when done to hand the buffers back to `scratch`.
+    fn take_from(
+        scratch: &mut TintScratch,
+        region: &'a [[Option<&'a Chunk>; 3]; 3],
+        biomes: &'a Biomes,
+        zoom: BiomeZoom,
+        radius: i32,
+        origin: [i32; 3],
+    ) -> Self {
+        let mut asked_colors = std::mem::take(&mut scratch.asked_colors);
+        asked_colors.clear();
+        let mut sampled = std::mem::take(&mut scratch.sampled);
+        if !sampled.is_empty() {
+            sampled.clear();
+        }
+        let mut cells = std::mem::take(&mut scratch.cells);
+        if !cells.is_empty() {
+            cells.clear();
+        }
+        Self {
+            region,
+            biomes,
+            zoom,
+            radius: radius.clamp(0, 7),
+            plains: biomes.id("minecraft:plains"),
+            origin,
+            layers: std::mem::take(&mut scratch.layers),
+            layer_ready: 0,
+            uniform: None,
+            asked: None,
+            asked_colors,
+            colormaps: &[],
+            water_colormap: None,
+            sampled,
+            cells,
+        }
+    }
+    /// Moves this [`Tints`]'s heap buffers back into `scratch` for the next section.
+    fn return_to(self, scratch: &mut TintScratch) {
+        scratch.layers = self.layers;
+        scratch.asked_colors = self.asked_colors;
+        scratch.sampled = self.sampled;
+        scratch.cells = self.cells;
     }
     /// With the packs' colormaps of `tables`.
     fn with_colormaps(mut self, tables: &'a MeshTables) -> Self {
@@ -2085,19 +2310,38 @@ impl<'a> Tints<'a> {
         }
         let r = self.radius;
         let dim = (16 + 2 * r) as usize;
-        let layer = self.layers[y as usize].get_or_insert_with(|| {
-            Box::new(Layer {
-                zoomed: vec![NO_BIOME; dim * dim],
-                cells: Default::default(),
-                jitter: Vec::new(),
-                colors: [[UNSET; 256]; 4],
-                mods: Vec::new(),
-            })
-        });
+        let yi = y as usize;
+        let layer_bit = 1u16 << yi;
+        let layer = if self.layer_ready & layer_bit == 0 {
+            self.layer_ready |= layer_bit;
+            match &mut self.layers[yi] {
+                Some(layer) => {
+                    layer.zoomed.clear();
+                    layer.zoomed.resize(dim * dim, NO_BIOME);
+                    layer.jitter.clear();
+                    layer.vanilla_ready = 0;
+                    for m in &mut layer.mods {
+                        m.ready = false;
+                    }
+                    &mut **layer
+                }
+                slot @ None => &mut **slot.insert(Box::new(Layer {
+                    zoomed: vec![NO_BIOME; dim * dim],
+                    cells: Default::default(),
+                    jitter: Vec::new(),
+                    colors: [[UNSET; 256]; 4],
+                    mods: Vec::new(),
+                    vanilla_ready: 0x0F,
+                })),
+            }
+        } else {
+            self.layers[yi].as_deref_mut().expect("layer marked ready")
+        };
         let (cells, colors) = Layer::caches(
             &mut layer.cells,
             &mut layer.colors,
             &mut layer.mods,
+            &mut layer.vanilla_ready,
             resolver,
         );
         let slot = (z * 16 + x) as usize;
@@ -2107,13 +2351,18 @@ impl<'a> Tints<'a> {
         }
         let [cx, cz, base_y] = self.origin;
         let (bx, by, bz) = (cx * 16, base_y + y, cz * 16);
-        let (mut red, mut green, mut blue) = (0, 0, 0);
+        let first_x = (bx - r).wrapping_sub(2) >> 2;
+        let first_z = (bz - r).wrapping_sub(2) >> 2;
+        let span = dim / 4 + 2;
+        let (mut red, mut green, mut blue) = (0u32, 0u32, 0u32);
         if cells.is_empty() {
             cells.resize(dim * dim, UNSET);
         }
         for dz in -r..=r {
+            let row = ((z + dz + r) as usize) * dim;
+            let wz = bz + z + dz;
             for dx in -r..=r {
-                let cell = ((z + dz + r) as usize) * dim + (x + dx + r) as usize;
+                let cell = row + (x + dx + r) as usize;
                 let known = cells[cell];
                 if known != UNSET {
                     red += known >> 16 & 255;
@@ -2121,16 +2370,15 @@ impl<'a> Tints<'a> {
                     blue += known & 255;
                     continue;
                 }
+                let wx = bx + x + dx;
                 let mut biome = layer.zoomed[cell];
                 if biome == NO_BIOME {
                     // BiomeManager.getBiome over the loaded chunks (plains
                     // where there is none): `quart_at_block`, its cell's
                     // corner jitter mixed once per layer.
-                    let block = BlockPos::new(bx + x + dx, by, bz + z + dz);
+                    let block = BlockPos::new(wx, by, wz);
                     let base = [block.x, block.y, block.z].map(|v| v.wrapping_sub(2) >> 2);
-                    let first = [bx - r, bz - r].map(|v| v.wrapping_sub(2) >> 2);
-                    let span = dim / 4 + 2;
-                    let at = (base[2] - first[1]) as usize * span + (base[0] - first[0]) as usize;
+                    let at = (base[2] - first_z) as usize * span + (base[0] - first_x) as usize;
                     if layer.jitter.is_empty() {
                         layer.jitter.resize(span * span, None);
                     }
@@ -2146,18 +2394,15 @@ impl<'a> Tints<'a> {
                     layer.zoomed[cell] = biome;
                 }
                 let c = match resolver {
-                    Resolver::Grass => {
-                        self.biomes
-                            .grass(biome, f64::from(bx + x + dx), f64::from(bz + z + dz))
-                    }
+                    Resolver::Grass => self.biomes.grass(biome, f64::from(wx), f64::from(wz)),
                     Resolver::Foliage => self.biomes.get(biome).foliage,
                     Resolver::Dry => self.biomes.get(biome).dry_foliage,
                     Resolver::Water => self.biomes.get(biome).water,
                     Resolver::Mod(index) => mod_tint::resolve(
                         index,
                         self.biomes.get(biome),
-                        f64::from(bx + x + dx),
-                        f64::from(bz + z + dz),
+                        f64::from(wx),
+                        f64::from(wz),
                     ),
                 };
                 cells[cell] = c;
@@ -2245,11 +2490,12 @@ impl Mesher<'_> {
     ) -> SectionMesh {
         out.clear();
         let center = region[1][1].expect("centre chunk");
-        let section = &center.sections[sy as usize];
+        let section: &crate::chunk::Section = &center.sections[sy as usize];
         let base_y = center.min_y() + sy * 16;
         if section.is_uniform(0) {
             if !self.tables.section_geometry.is_empty() {
-                let mut tints = Tints::new(
+                let mut tints = Tints::take_from(
+                    &mut scratch.tints,
                     region,
                     self.biomes,
                     self.zoom,
@@ -2257,9 +2503,59 @@ impl Mesher<'_> {
                     [center.x, center.z, base_y],
                 );
                 mod_geometry::add(self, &mut tints, &mut out);
+                tints.return_to(&mut scratch.tints);
                 out.finish_sprite_layers();
             }
             return out;
+        }
+        if self.hidden_states.is_empty() && section.blocks.bits() == 0 {
+            let id = section.blocks.get(0);
+            let state = &self.tables.info[id as usize];
+            if !state.block_entity && state.emission == 0 {
+                // Check the six orthogonal neighbour sections (a missing horizontal
+                // chunk copies the centre's edge column, which is `section` itself).
+                let neighbors = [
+                    center.section_at(base_y - 1).ok(),
+                    center.section_at(base_y + 16).ok(),
+                    region[0][1].map_or(Some(section), |c| c.section_at(base_y).ok()),
+                    region[2][1].map_or(Some(section), |c| c.section_at(base_y).ok()),
+                    region[1][0].map_or(Some(section), |c| c.section_at(base_y).ok()),
+                    region[1][2].map_or(Some(section), |c| c.section_at(base_y).ok()),
+                ];
+                let uniform_skip = if state.solid && state.fluid.kind() == FluidKind::Empty {
+                    let surrounded = neighbors.into_iter().all(|n| {
+                        n.is_some_and(|s| {
+                            s.blocks.bits() == 0 && self.tables.solid[s.blocks.get(0) as usize]
+                        })
+                    });
+                    surrounded.then_some(0u64)
+                } else if !state.solid && !state.model && state.fluid.kind() != FluidKind::Empty {
+                    let surrounded = neighbors
+                        .into_iter()
+                        .all(|n| n.is_some_and(|s| s.is_uniform(id)));
+                    surrounded.then_some(ALL_VISIBLE)
+                } else {
+                    None
+                };
+                if let Some(visibility) = uniform_skip {
+                    out.visibility = visibility;
+                    if !self.tables.section_geometry.is_empty() {
+                        let mut tints = Tints::take_from(
+                            &mut scratch.tints,
+                            region,
+                            self.biomes,
+                            self.zoom,
+                            self.blend_radius,
+                            [center.x, center.z, base_y],
+                        )
+                        .with_colormaps(self.tables);
+                        mod_geometry::add(self, &mut tints, &mut out);
+                        tints.return_to(&mut scratch.tints);
+                        out.finish_sprite_layers();
+                    }
+                    return out;
+                }
+            }
         }
         let own = scratch.own.get_or_insert_with(|| Box::new([0; 4096]));
         scratch.padded.fill(region, sy, own);
@@ -2280,7 +2576,9 @@ impl Mesher<'_> {
                 .leaf
                 .prepare(self.leaf_culling, pad, &self.tables.info, region, base_y);
         }
-        let mut tints = Tints::new(
+        let leaf = &scratch.leaf;
+        let mut tints = Tints::take_from(
+            &mut scratch.tints,
             region,
             self.biomes,
             self.zoom,
@@ -2316,29 +2614,40 @@ impl Mesher<'_> {
                         continue;
                     }
                     if state.fluid.kind() != FluidKind::Empty {
-                        let start = [out.solid.len(), out.translucent.len()];
-                        let water = tints.water(x, y, z);
-                        let shade = (
-                            self.nether_shading,
-                            self.shader_pack_lighting,
-                            self.separate_ao,
-                            self.shader_pack,
-                            self.looks,
-                        );
-                        fluid::tesselate(
-                            self.tables,
-                            self.part_tables,
-                            shade,
-                            pad,
-                            water,
-                            &mut out,
-                            [x, y, z],
-                        );
-                        if self.shader_pack {
-                            out.record_source(
-                                start,
-                                TerrainSource::new(id, [x, y, z], state.emission, true),
+                        let blocks = &pad.blocks;
+                        // Fast path: a fluid cell surrounded on all 6 sides by the exact
+                        // same block state shares its fluid family with every neighbour,
+                        // so `fluid::tesselate` would cull every face and emit nothing.
+                        let submerged_same = blocks[cell + P * P] == id
+                            && blocks[cell - P * P] == id
+                            && blocks[cell - P] == id
+                            && blocks[cell + P] == id
+                            && blocks[cell - 1] == id
+                            && blocks[cell + 1] == id;
+                        if !submerged_same {
+                            let start = [out.solid.len(), out.translucent.len()];
+                            let shade = (
+                                self.nether_shading,
+                                self.shader_pack_lighting,
+                                self.separate_ao,
+                                self.shader_pack,
+                                self.looks,
                             );
+                            fluid::tesselate(
+                                self.tables,
+                                self.part_tables,
+                                shade,
+                                pad,
+                                || tints.water(x, y, z),
+                                &mut out,
+                                [x, y, z],
+                            );
+                            if self.shader_pack {
+                                out.record_source(
+                                    start,
+                                    TerrainSource::new(id, [x, y, z], state.emission, true),
+                                );
+                            }
                         }
                     }
                     if !state.model {
@@ -2365,54 +2674,75 @@ impl Mesher<'_> {
                         ],
                         None => [x as f32, y as f32, z as f32],
                     };
+                    let mut cull_mask = 0u8;
+                    for model in &models {
+                        for face in &model.faces {
+                            if let Some(d) = face.quad.cull {
+                                cull_mask |= 1 << (d as u8);
+                            }
+                        }
+                    }
                     let mut visible = [false; 6];
+                    if cull_mask != 0 {
+                        for (d, [dx, dy, dz], opposite) in DIRECTIONS {
+                            if cull_mask & (1 << (d as u8)) == 0 {
+                                continue;
+                            }
+                            let neighbor =
+                                pad.blocks[(cell as isize + OFFSETS[d as usize]) as usize];
+                            if neighbor == 0 {
+                                visible[d as usize] = true;
+                                continue;
+                            }
+                            // `should_render_face`'s first test, without its lookups: a
+                            // full occlusion face toward this block hides the face.
+                            if full_faces[neighbor as usize] >> opposite & 1 != 0 {
+                                continue;
+                            }
+                            let other = &info[neighbor as usize];
+                            // LeavesBlock.skipRendering with opaque leaves.
+                            let opaque_leaves = !self.cutout_leaves && state.leaves && other.leaves;
+                            // Opaque Ice: faces between two ice blocks are hidden, as they are
+                            // between two opaque blocks.
+                            let opaque_ice =
+                                self.opaque_ice && state.opaque_ice && other.opaque_ice;
+                            let culled_leaf = match self.leaf_culling {
+                                LeafCullingMode::Hollow | LeafCullingMode::Hidden => {
+                                    state.leaves
+                                        && other.leaves
+                                        && leaf_culling::in_section(x + dx, y + dy, z + dz)
+                                        && (self.leaf_culling == LeafCullingMode::Hollow
+                                            || leaf_culling::backed(
+                                                pad,
+                                                info,
+                                                region,
+                                                base_y,
+                                                [x + 2 * dx, y + 2 * dy, z + 2 * dz],
+                                            ))
+                                }
+                                _ => false,
+                            };
+                            if opaque_leaves || opaque_ice || culled_leaf {
+                                continue;
+                            }
+                            visible[d as usize] = (state.leaves && state.face[d as usize] == 0)
+                                || self
+                                    .visibility
+                                    .should_render_face(
+                                        BlockStateId(id),
+                                        BlockStateId(neighbor),
+                                        d,
+                                        true,
+                                    )
+                                    .unwrap_or(true);
+                        }
+                    }
                     let interior_leaf = state.leaves
                         && self.leaf_culling.is_interior()
-                        && scratch.leaf.interior(self.leaf_culling, x, y, z);
-                    for (d, [dx, dy, dz], opposite) in DIRECTIONS {
-                        let neighbor = pad.blocks[(cell as isize + OFFSETS[d as usize]) as usize];
-                        // `should_render_face`'s first test, without its lookups: a
-                        // full occlusion face toward this block hides the face.
-                        if full_faces[neighbor as usize] >> opposite & 1 != 0 {
-                            continue;
-                        }
-                        let other = &info[neighbor as usize];
-                        // LeavesBlock.skipRendering with opaque leaves.
-                        let opaque_leaves = !self.cutout_leaves && state.leaves && other.leaves;
-                        // Opaque Ice: faces between two ice blocks are hidden, as they are
-                        // between two opaque blocks.
-                        let opaque_ice = self.opaque_ice && state.opaque_ice && other.opaque_ice;
-                        let culled_leaf = match self.leaf_culling {
-                            LeafCullingMode::Hollow | LeafCullingMode::Hidden => {
-                                state.leaves
-                                    && other.leaves
-                                    && leaf_culling::in_section(x + dx, y + dy, z + dz)
-                                    && (self.leaf_culling == LeafCullingMode::Hollow
-                                        || leaf_culling::backed(
-                                            pad,
-                                            info,
-                                            region,
-                                            base_y,
-                                            [x + 2 * dx, y + 2 * dy, z + 2 * dz],
-                                        ))
-                            }
-                            _ => false,
-                        };
-                        visible[d as usize] = !opaque_leaves
-                            && !opaque_ice
-                            && !culled_leaf
-                            && self
-                                .visibility
-                                .should_render_face(
-                                    BlockStateId(id),
-                                    BlockStateId(neighbor),
-                                    d,
-                                    true,
-                                )
-                                .unwrap_or(true);
-                    }
+                        && leaf.interior(self.leaf_culling, x, y, z);
                     let connected = &self.render.connected;
                     let start = [out.solid.len(), out.translucent.len()];
+                    let mut tint0: Option<Option<u32>> = None;
                     for model in &models {
                         for face in &model.faces {
                             if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
@@ -2441,9 +2771,10 @@ impl Mesher<'_> {
                                     continue;
                                 }
                             }
-                            self.face(
+                            self.face_with_tint(
                                 pad,
                                 &mut tints,
+                                &mut tint0,
                                 &mut out,
                                 [x, y, z],
                                 cell,
@@ -2468,14 +2799,46 @@ impl Mesher<'_> {
         if !self.tables.section_geometry.is_empty() {
             mod_geometry::add(self, &mut tints, &mut out);
         }
+        tints.return_to(&mut scratch.tints);
         out.finish_sprite_layers();
         out
     }
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn face(
         &self,
         pad: &Padded,
         tints: &mut Tints,
+        out: &mut SectionMesh,
+        pos: [i32; 3],
+        cell: usize,
+        origin: [f32; 3],
+        face: &BakedFace,
+        ao: bool,
+        (id, state): (u32, &Info),
+        world: BlockPos,
+        interior_leaf: bool,
+    ) {
+        self.face_with_tint(
+            pad,
+            tints,
+            &mut None,
+            out,
+            pos,
+            cell,
+            origin,
+            face,
+            ao,
+            (id, state),
+            world,
+            interior_leaf,
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn face_with_tint(
+        &self,
+        pad: &Padded,
+        tints: &mut Tints,
+        tint0: &mut Option<Option<u32>>,
         out: &mut SectionMesh,
         pos: [i32; 3],
         cell: usize,
@@ -2524,14 +2887,23 @@ impl Mesher<'_> {
             };
             ([lighting::gray(directional); 4], [coords; 4], [1.0f32; 4])
         };
-        let tint = self.tables.tint_at(
-            (id, state),
-            q.tint_index,
-            tints,
-            pos,
-            self.nether_shading,
-            false,
-        );
+        let tint = if q.tint_index < 0 {
+            None
+        } else if q.tint_index == 0 {
+            *tint0.get_or_insert_with(|| {
+                self.tables
+                    .tint_at((id, state), 0, tints, pos, self.nether_shading, false)
+            })
+        } else {
+            self.tables.tint_at(
+                (id, state),
+                q.tint_index,
+                tints,
+                pos,
+                self.nether_shading,
+                false,
+            )
+        };
         let tint = match q.color {
             Some(c) => {
                 let t = tint.unwrap_or(0xFF_FFFF);

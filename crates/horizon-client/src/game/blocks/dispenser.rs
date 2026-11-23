@@ -3,8 +3,8 @@
 //! entities for. A behaviour returns what is left in the slot and the level
 //! event it plays (`DefaultDispenseItemBehavior.dispense` then plays that
 //! event and the smoke animation, event 2000).
-use super::level_sounds::LevelSound;
 use super::{Game, item_abilities::ability};
+use super::{entity_sections::section_order, level_sounds::LevelSound};
 use horizon_client::{
     Result,
     collisions::SceneCollisions,
@@ -85,14 +85,6 @@ fn block_box(p: Pos) -> Aabb {
         Vec3::new(f64::from(p.0 + 1), f64::from(p.1 + 1), f64::from(p.2 + 1)),
     )
 }
-/// `EntitySectionStorage.forEachAccessibleNonEmptySection`: x ascending, then
-/// the packed key (`SectionPos.asLong`: z as 22 unsigned bits, then y as 20);
-/// within a section the entities go in the order they joined, which ids follow.
-fn section_order(at: Vec3) -> (i32, u32, u32) {
-    let s = |v: f64| (v.floor() as i32) >> 4;
-    let (x, y, z) = (s(at.x), s(at.y), s(at.z));
-    (x, z as u32 & 0x3F_FFFF, y as u32 & 0xF_FFFF)
-}
 fn overlaps(a: Aabb, b: Aabb) -> bool {
     let (a0, a1, b0, b1) = (
         a.min_position(),
@@ -159,6 +151,18 @@ pub(super) enum Slot {
     Saddle,
 }
 impl Slot {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::MainHand => "mainhand",
+            Self::OffHand => "offhand",
+            Self::Feet => "feet",
+            Self::Legs => "legs",
+            Self::Chest => "chest",
+            Self::Head => "head",
+            Self::Body => "body",
+            Self::Saddle => "saddle",
+        }
+    }
     pub(super) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "mainhand" => Self::MainHand,
@@ -602,17 +606,26 @@ impl Game<'_> {
     ) -> Result<Option<ItemStack>> {
         let mut answer = None;
         if self.serving.is_some() || self.options.dedicated.is_some() {
-            // The block the dispenser faces has the first say (`dispense_method`), then the
-            // item's own part (`dispense_item`); the first answer wins.
-            let front = self.block_at(offset(pos, facing));
-            self.native_dispense_method(
+            // A mod's global `dispenser_acts` first, then the block the dispenser faces
+            // (`dispense_method`), then the item's part (`dispense_item`); the first answer wins.
+            self.native_dispenser_acts(
                 self.dim.id(),
                 [pos.0, pos.1, pos.2],
                 facing,
-                front,
                 &stack,
                 &mut answer,
             );
+            if answer.is_none() {
+                let front = self.block_at(offset(pos, facing));
+                self.native_dispense_method(
+                    self.dim.id(),
+                    [pos.0, pos.1, pos.2],
+                    facing,
+                    front,
+                    &stack,
+                    &mut answer,
+                );
+            }
             if answer.is_none() {
                 self.native_dispense_item(
                     self.dim.id(),
@@ -1068,6 +1081,7 @@ impl Game<'_> {
             stack.count -= 1;
         }
         // setItemSlot: onEquipItem plays the equip sound and the equip event.
+        let hook_stack = one.clone();
         let (at, sound) = match target {
             Target::Guest(conn) => {
                 // The guest's own turn: their state in place, so the slot, the
@@ -1100,6 +1114,7 @@ impl Game<'_> {
                 return true;
             }
             Target::Stand(i) => {
+                let sound = self.mod_equip_sound(&hook_stack, slot.name(), sound);
                 let stand = &mut self.armor_stands[i];
                 if let Some(s) = slot.stand_index() {
                     stand.equipment[s] = Some(one);
@@ -1111,12 +1126,15 @@ impl Game<'_> {
                 mob_set_slot(m, slot, one);
                 // setGuaranteedDrop / setPersistenceRequired.
                 m.persistent = true;
-                let sound = if m.silent {
+                let silent = m.silent;
+                let at = m.position;
+                let sound = if silent {
                     None
                 } else {
                     equip_sound(m, slot, sound)
                 };
-                (Some(m.position), sound)
+                let sound = self.mod_equip_sound(&hook_stack, slot.name(), sound);
+                (Some(at), sound)
             }
         };
         if let Some(at) = at {
@@ -2034,7 +2052,7 @@ impl Game<'_> {
         at: Vec3,
         y_offset: f64,
         stack: ItemStack,
-    ) -> [f64; 3] {
+    ) -> Option<(u32, [f64; 3])> {
         self.spawn_item_own(stack, [at.x, at.y + y_offset, at.z], 10)
     }
     /// `MushroomCow.shear`: `player` is who sheared it, none for a dispenser.
@@ -2155,20 +2173,21 @@ impl Game<'_> {
                                 count: 1,
                                 ..stack.clone()
                             };
-                            self.spawn_at_location(at, 1.0, one);
-                            // Sheep.shear nudges each item with the sheep's own random.
-                            let r = &mut self.mobs[i].random;
-                            let push = [
-                                f64::from((r.next_float() - r.next_float()) * 0.1),
-                                f64::from(r.next_float() * 0.05),
-                                f64::from((r.next_float() - r.next_float()) * 0.1),
-                            ];
-                            if let Some(item) = self.just_spawned_item() {
-                                item.velocity = Vec3::new(
-                                    item.velocity.x + push[0],
-                                    item.velocity.y + push[1],
-                                    item.velocity.z + push[2],
-                                );
+                            if let Some((id, _)) = self.spawn_at_location(at, 1.0, one) {
+                                // Sheep.shear nudges each item with the sheep's own random.
+                                let r = &mut self.mobs[i].random;
+                                let push = [
+                                    f64::from((r.next_float() - r.next_float()) * 0.1),
+                                    f64::from(r.next_float() * 0.05),
+                                    f64::from((r.next_float() - r.next_float()) * 0.1),
+                                ];
+                                if let Some(item) = self.dropped_item_mut(id) {
+                                    item.velocity = Vec3::new(
+                                        item.velocity.x + push[0],
+                                        item.velocity.y + push[1],
+                                        item.velocity.z + push[2],
+                                    );
+                                }
                             }
                         }
                     }

@@ -67,15 +67,47 @@ use std::{
     sync::Arc,
 };
 
-/// Enchantment id and level, in insertion order.
+/// Enchantment id and level, in insertion order (kept for saving and sending; stacks compare
+/// them as a map, see [`same_levels`]).
 pub type Levels = Vec<(Arc<str>, u32)>;
+
+/// Whether `levels` names an id twice (say, saved as both `minecraft:sharpness` and
+/// `sharpness`): the lookup reads the first entry, saving keeps the last.
+fn repeats_an_id(levels: &Levels) -> bool {
+    levels
+        .iter()
+        .enumerate()
+        .any(|(i, (id, _))| levels[..i].iter().any(|(seen, _)| seen == id))
+}
+
+/// `ItemEnchantments.equals`: vanilla keeps the levels in a map, so two lists with the same
+/// enchantments at the same levels are equal in any order. A list repeating an id has no single
+/// map (the lookup and the saved form disagree), so it only equals the very same list.
+fn same_levels(a: &Levels, b: &Levels) -> bool {
+    if repeats_an_id(a) || repeats_an_id(b) {
+        return a == b;
+    }
+    a.len() == b.len() && a.iter().all(|entry| b.contains(entry))
+}
+
+/// A hash agreeing with [`same_levels`]: in no particular order for a list of distinct ids,
+/// as the list is for one repeating an id.
+fn hash_levels<H: Hasher>(levels: &Levels, state: &mut H) {
+    if repeats_an_id(levels) {
+        levels.hash(state);
+        return;
+    }
+    let mut sorted: Vec<_> = levels.iter().collect();
+    sorted.sort_unstable();
+    sorted.hash(state);
+}
 pub mod trim;
 pub use trim::Trim;
 
 /// A stack's modelled and preserved components. Start with `Default` (or
 /// `ItemStack::data_mut`) and use the fields and setters; component storage may
 /// gain private decoded data alongside its saved form.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct StackData {
     /// An explicit zero damage component overriding a damaged prototype.
@@ -147,6 +179,75 @@ pub struct StackData {
     /// What the server sent for this stack, for sending it back unchanged.
     pub wire: Wire,
 }
+/// Field by field, except that the enchantment lists compare as maps ([`same_levels`]).
+impl PartialEq for StackData {
+    fn eq(&self, rhs: &Self) -> bool {
+        let Self {
+            damage_set,
+            enchantments,
+            stored_enchantments,
+            repair_cost,
+            explicit_zero_damage,
+            custom_name,
+            kinetic_weapon,
+            consumable,
+            death_protection,
+            potion,
+            potion_extra,
+            trim,
+            container,
+            charged,
+            fireworks,
+            map_id,
+            writable_pages,
+            written,
+            banner_patterns,
+            base_color,
+            ominous_banner,
+            ominous_amplifier,
+            dyed_color,
+            firework_explosion,
+            pot_decorations,
+            bundle_contents,
+            bundle_selected,
+            stew_effects,
+            map_post_processing,
+            other,
+            wire,
+        } = self;
+        same_levels(enchantments, &rhs.enchantments)
+            && same_levels(stored_enchantments, &rhs.stored_enchantments)
+            && *damage_set == rhs.damage_set
+            && *repair_cost == rhs.repair_cost
+            && *explicit_zero_damage == rhs.explicit_zero_damage
+            && *custom_name == rhs.custom_name
+            && *kinetic_weapon == rhs.kinetic_weapon
+            && *consumable == rhs.consumable
+            && *death_protection == rhs.death_protection
+            && *potion == rhs.potion
+            && *potion_extra == rhs.potion_extra
+            && *trim == rhs.trim
+            && *container == rhs.container
+            && *charged == rhs.charged
+            && *fireworks == rhs.fireworks
+            && *map_id == rhs.map_id
+            && *writable_pages == rhs.writable_pages
+            && *written == rhs.written
+            && *banner_patterns == rhs.banner_patterns
+            && *base_color == rhs.base_color
+            && *ominous_banner == rhs.ominous_banner
+            && *ominous_amplifier == rhs.ominous_amplifier
+            && *dyed_color == rhs.dyed_color
+            && *firework_explosion == rhs.firework_explosion
+            && *pot_decorations == rhs.pot_decorations
+            && *bundle_contents == rhs.bundle_contents
+            && *bundle_selected == rhs.bundle_selected
+            && *stew_effects == rhs.stew_effects
+            && *map_post_processing == rhs.map_post_processing
+            && *other == rhs.other
+            && *wire == rhs.wire
+    }
+}
 impl Hash for StackData {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
@@ -183,8 +284,8 @@ impl Hash for StackData {
             wire: _,
         } = self;
         damage_set.hash(state);
-        enchantments.hash(state);
-        stored_enchantments.hash(state);
+        hash_levels(enchantments, state);
+        hash_levels(stored_enchantments, state);
         repair_cost.hash(state);
         explicit_zero_damage.hash(state);
         custom_name.hash(state);
@@ -917,6 +1018,21 @@ impl ItemStack {
     pub fn matches(&self, other: &Self) -> bool {
         self.count == other.count && self.same_item_same_components(other)
     }
+    /// Check that a reloaded stack retains this stack's persistent data.
+    pub fn matches_saved(&self, saved: &Self) -> bool {
+        if self.count != saved.count || self.damage != saved.damage {
+            return false;
+        }
+        if self.same_item_same_components(saved) {
+            return true;
+        }
+        let mut planned = self.clone();
+        let mut saved = saved.clone();
+        normalize_saved_stack(&mut planned);
+        normalize_saved_stack(&mut saved);
+        planned.same_item_same_components(&saved)
+    }
+
     /// `getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS)`: the stack's own
     /// `attribute_modifiers` component when it has one (none at all when it
     /// removed the component), else its item type's. Borrowed unless the stack
@@ -960,6 +1076,8 @@ fn level_in(list: &[(Arc<str>, u32)], id: &str) -> u32 {
 }
 /// `ItemEnchantments.Mutable.upgrade`.
 pub fn upgrade(list: &mut Levels, id: &str, level: u32) {
+    // ItemEnchantments.Mutable.upgrade: Math.min(level, 255).
+    let level = level.min(255);
     if level == 0 {
         return;
     }
@@ -970,6 +1088,8 @@ pub fn upgrade(list: &mut Levels, id: &str, level: u32) {
 }
 /// `ItemEnchantments.Mutable.set` (level 0 removes).
 pub fn set_level(list: &mut Levels, id: &str, level: u32) {
+    // ItemEnchantments.Mutable.set: Math.min(level, 255).
+    let level = level.min(255);
     if level == 0 {
         list.retain(|(e, _)| &**e != id);
     } else {
@@ -1374,63 +1494,159 @@ pub fn encode_extra_components(stack: &ItemStack) -> Option<Tag> {
 
 fn encode_stack_components(stack: &ItemStack, include_damage: bool) -> Option<Tag> {
     let mut components = components_tag_inner(stack.damage, stack.data(), include_damage)?;
-    // MobEffectInstance.Details' codec always saves the resolved icon flag.
-    // An omitted icon follows show_particles, whose default is true.
     if let Some(Tag::List(effects)) = components
         .get_mut("minecraft:potion_contents")
         .and_then(|potion| potion.get_mut("custom_effects"))
     {
-        for effect in effects {
-            let shown = effect.get("show_particles").and_then(int).unwrap_or(1) != 0;
-            if let Tag::Compound(fields) = effect {
-                fields
-                    .entry(JavaString::from("show_icon"))
-                    .or_insert(Tag::Byte(i8::from(shown)));
-            }
-        }
+        canonical_effect_icons(effects);
     }
-    // LodestoneTracker.CODEC: optionalFieldOf("tracked", true).
-    if let Some(Tag::Compound(tracker)) = components.get_mut("minecraft:lodestone_tracker")
-        && tracker.get(&JavaString::from("tracked")) == Some(&Tag::Byte(1))
-    {
-        tracker.remove(&JavaString::from("tracked"));
+    if let Some(tracker) = components.get_mut("minecraft:lodestone_tracker") {
+        canonical_lodestone_tracker(tracker);
     }
-    if &*stack.item == "minecraft:filled_map"
-        && matches!(components.get("minecraft:map_decorations"), Some(Tag::Compound(entries)) if entries.is_empty())
+    if let Some(key) = elided_prototype_key(&stack.item)
+        && components
+            .get(key)
+            .is_some_and(|value| is_prototype_patch(key, value))
         && let Tag::Compound(entries) = &mut components
     {
-        entries.remove(&JavaString::from("minecraft:map_decorations"));
-        if entries.is_empty() {
-            return None;
-        }
-    }
-    // Items.ENCHANTED_BOOK has empty stored enchantments in its prototype.
-    // Keep the live presence marker; only the saved component patch elides it.
-    if &*stack.item == "minecraft:enchanted_book"
-        && matches!(components.get("minecraft:stored_enchantments"), Some(Tag::Compound(entries)) if entries.is_empty())
-        && let Tag::Compound(entries) = &mut components
-    {
-        entries.remove(&JavaString::from("minecraft:stored_enchantments"));
-        if entries.is_empty() {
-            return None;
-        }
-    }
-    // Items.BEEHIVE/BEE_NEST use this whole block-state map as their prototype.
-    // Empty maps and maps with extra properties are distinct, nondefault patches.
-    if matches!(&*stack.item, "minecraft:beehive" | "minecraft:bee_nest")
-        && matches!(components.get("minecraft:block_state"), Some(Tag::Compound(state))
-            if state.len() == 1
-                && matches!(state.get(&JavaString::from("honey_level")),
-                    Some(Tag::String(level)) if level.to_string_lossy() == "0"))
-        && let Tag::Compound(entries) = &mut components
-    {
-        entries.remove(&JavaString::from("minecraft:block_state"));
+        entries.remove(&JavaString::from(key));
         if entries.is_empty() {
             return None;
         }
     }
     Some(components)
 }
+
+/// The icon follows show_particles when omitted. Its default is true.
+fn canonical_effect_icons(effects: &mut [Tag]) {
+    for effect in effects {
+        let shown = effect.get("show_particles").and_then(int).unwrap_or(1) != 0;
+        if let Tag::Compound(fields) = effect {
+            fields
+                .entry(JavaString::from("show_icon"))
+                .or_insert(Tag::Byte(i8::from(shown)));
+        }
+    }
+}
+
+/// LodestoneTracker.CODEC uses true when tracked is omitted.
+fn canonical_lodestone_tracker(tracker: &mut Tag) {
+    if let Tag::Compound(fields) = tracker {
+        let tracked = JavaString::from("tracked");
+        if fields.get(&tracked) == Some(&Tag::Byte(1)) {
+            fields.remove(&tracked);
+        }
+    }
+}
+
+// These saved patches are redundant for their vanilla item prototypes.
+fn elided_prototype_key(item: &str) -> Option<&'static str> {
+    match item {
+        "minecraft:filled_map" => Some("minecraft:map_decorations"),
+        "minecraft:enchanted_book" => Some("minecraft:stored_enchantments"),
+        "minecraft:beehive" | "minecraft:bee_nest" => Some("minecraft:block_state"),
+        _ if has_empty_banner_patterns_prototype(item) => Some("minecraft:banner_patterns"),
+        _ => None,
+    }
+}
+
+/// `Items.BANNER` and `Items.SHIELD` both have `BannerPatternLayers.EMPTY`.
+fn has_empty_banner_patterns_prototype(item: &str) -> bool {
+    item == "minecraft:shield"
+        || item
+            .strip_prefix("minecraft:")
+            .and_then(|id| id.strip_suffix("_banner"))
+            .is_some_and(|color| horizon_mod_package::content::DYE_COLORS.contains(&color))
+}
+
+fn is_prototype_patch(key: &str, value: &Tag) -> bool {
+    if key == "minecraft:banner_patterns" {
+        return matches!(value, Tag::List(layers) if layers.is_empty());
+    }
+    let Tag::Compound(entries) = value else {
+        return false;
+    };
+    if key == "minecraft:block_state" {
+        entries.len() == 1
+            && matches!(value.get("honey_level"), Some(Tag::String(level)) if level.to_string_lossy() == "0")
+    } else {
+        entries.is_empty()
+    }
+}
+
+/// Normalize equivalent representations directly so a lossy codec cannot hide a change.
+fn normalize_saved_stack(stack: &mut ItemStack) {
+    let canonical_id = |id: &mut Arc<str>| {
+        if let Ok(parsed) = horizon_core::identifier::Identifier::parse(id) {
+            *id = parsed.to_string().into();
+        }
+    };
+    canonical_id(&mut stack.item);
+    let Some(data) = stack.extra.as_deref_mut() else {
+        return;
+    };
+    data.wire = Wire::default();
+    data.map_post_processing = None;
+    data.custom_name = data.custom_name.take().map(collapsed_text);
+    for (id, _) in data
+        .enchantments
+        .iter_mut()
+        .chain(&mut data.stored_enchantments)
+    {
+        canonical_id(id);
+    }
+    for (key, value) in &mut data.potion_extra {
+        if key == "custom_effects"
+            && let Tag::List(effects) = value
+        {
+            canonical_effect_icons(effects);
+        }
+    }
+    data.potion_extra.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(book) = &mut data.written {
+        if book.page_tags.is_empty() {
+            book.page_tags = book
+                .pages
+                .iter()
+                .map(|page| Tag::String(page.as_str().into()))
+                .collect();
+        } else {
+            book.page_tags = book.page_tags.iter().map(plain_component).collect();
+        }
+    }
+    elide_prototype_fireworks(&stack.item, data);
+    if data.pot_decorations.as_deref().is_some_and(all_bricks) {
+        data.pot_decorations = None;
+    }
+    for nested in data
+        .container
+        .iter_mut()
+        .map(|(_, stack)| stack)
+        .chain(&mut data.charged)
+        .chain(&mut data.bundle_contents)
+        .chain(
+            data.pot_decorations
+                .iter_mut()
+                .flat_map(|sides| sides.iter_mut().flatten()),
+        )
+    {
+        normalize_saved_stack(nested);
+    }
+    if let Some(key) = elided_prototype_key(&stack.item) {
+        data.other
+            .retain(|(id, value)| id != key || !is_prototype_patch(key, value));
+    }
+    for (key, value) in &mut data.other {
+        match key.as_str() {
+            "minecraft:map_decorations" => *value = canonical_other_component(key, value),
+            "minecraft:lodestone_tracker" => canonical_lodestone_tracker(value),
+            _ => crate::item_nbt::canonicalize_component_for_comparison(key, value),
+        }
+    }
+    data.other.sort_by(|a, b| a.0.cmp(&b.0));
+    stack.tidy();
+}
+
 /// Saved patch with the loaded item's prototype available.
 /// Context-free callers and the live `components_tag` view stay unchanged.
 pub fn encode_components_with_items(stack: &ItemStack, items: &crate::items::Items) -> Option<Tag> {
@@ -1747,6 +1963,13 @@ impl<'a> Seen<'a> {
 }
 /// Damage and extra components from a stack's `components` compound.
 pub fn decode_components(components: Option<&Tag>) -> (u32, Option<Box<StackData>>) {
+    decode_component_patch(components, None)
+}
+
+fn decode_component_patch(
+    components: Option<&Tag>,
+    item: Option<&str>,
+) -> (u32, Option<Box<StackData>>) {
     let Some(c) = components else {
         return (0, None);
     };
@@ -1899,6 +2122,14 @@ pub fn decode_components(components: Option<&Tag>) -> (u32, Option<Box<StackData
     if let Tag::Compound(map) = c {
         for (k, v) in map {
             let key = k.to_string_lossy();
+            // `PatchedDataComponentMap.applyPatch`: only the positive value
+            // equal to the prototype is redundant, not a `!` removal.
+            if key == "minecraft:banner_patterns"
+                && is_prototype_patch(&key, v)
+                && item.is_some_and(has_empty_banner_patterns_prototype)
+            {
+                continue;
+            }
             if MODELLED.contains(&key.as_str())
                 && key != "minecraft:damage"
                 && !data.sets_component(&key)
@@ -1934,7 +2165,7 @@ pub fn decode_components_for_item(
     item: &str,
     components: Option<&Tag>,
 ) -> (u32, Option<Box<StackData>>) {
-    let (damage, mut extra) = decode_components(components);
+    let (damage, mut extra) = decode_component_patch(components, Some(item));
     if let Some(data) = extra.as_deref_mut() {
         elide_prototype_fireworks(item, data);
         if data.is_empty() {
@@ -1998,6 +2229,74 @@ pub fn command_components(text: &str) -> Result<Tag, String> {
 mod tests {
     use super::*;
     use crate::banner_layer::BannerLayer;
+
+    /// `ItemEnchantments.equals` compares a level map: the same enchantments in
+    /// another order are the same component, so the stacks stack, merge and match
+    /// (and hash alike); another level is still a different component.
+    #[test]
+    fn enchantments_compare_as_a_map_whatever_their_order() {
+        let hash = |stack: &ItemStack| {
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            stack.hash_item_and_components(&mut state);
+            state.finish()
+        };
+        for item in ["minecraft:diamond_sword", "minecraft:enchanted_book"] {
+            let enchanted = |levels: &[(&str, u32)]| {
+                let mut stack = ItemStack::new(item, 1);
+                for (id, level) in levels {
+                    stack.enchant(id, *level);
+                }
+                stack
+            };
+            let a = enchanted(&[("minecraft:sharpness", 5), ("minecraft:unbreaking", 3)]);
+            let b = enchanted(&[("minecraft:unbreaking", 3), ("minecraft:sharpness", 5)]);
+            // Each keeps the order it was given in, for saving and sending.
+            assert_ne!(
+                a.crafting_enchantments(),
+                b.crafting_enchantments(),
+                "{item}"
+            );
+            assert!(a.same_item_same_components(&b), "{item}");
+            assert!(a.matches(&b), "{item}");
+            assert_eq!(hash(&a), hash(&b), "{item}");
+            let c = enchanted(&[("minecraft:unbreaking", 2), ("minecraft:sharpness", 5)]);
+            assert!(!a.same_item_same_components(&c), "{item}");
+            let d = enchanted(&[("minecraft:sharpness", 5)]);
+            assert!(!a.same_item_same_components(&d), "{item}");
+        }
+    }
+
+    /// A list may repeat an id (the vectors are public; two spellings of one id
+    /// decode to one key). The lookup reads the first entry but the saved map
+    /// keeps the last, so such a list only equals the very same list, in order.
+    #[test]
+    fn a_list_repeating_an_id_only_equals_the_same_list() {
+        let hash = |stack: &ItemStack| {
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            stack.hash_item_and_components(&mut state);
+            state.finish()
+        };
+        let sword = |levels: &[(&str, u32)]| {
+            let mut stack = ItemStack::new("minecraft:diamond_sword", 1);
+            stack.data_mut().enchantments =
+                levels.iter().map(|(id, l)| (Arc::from(*id), *l)).collect();
+            stack
+        };
+        let one_five = sword(&[("minecraft:sharpness", 1), ("minecraft:sharpness", 5)]);
+        let five_one = sword(&[("minecraft:sharpness", 5), ("minecraft:sharpness", 1)]);
+        let one = sword(&[("minecraft:sharpness", 1)]);
+        assert!(!one_five.same_item_same_components(&five_one));
+        assert!(!one_five.same_item_same_components(&one));
+        assert!(!one.same_item_same_components(&one_five));
+        let again = sword(&[("minecraft:sharpness", 1), ("minecraft:sharpness", 5)]);
+        assert!(one_five.same_item_same_components(&again));
+        assert_eq!(hash(&one_five), hash(&again));
+        // Distinct ids in another order are still equal, and hash alike.
+        let a = sword(&[("minecraft:sharpness", 1), ("minecraft:unbreaking", 3)]);
+        let b = sword(&[("minecraft:unbreaking", 3), ("minecraft:sharpness", 1)]);
+        assert!(a.same_item_same_components(&b));
+        assert_eq!(hash(&a), hash(&b));
+    }
 
     /// `set_banner_pattern` (and `set_components`) hand a banner's layers over
     /// as a component; the renderer and the tooltip read `banner_patterns`, so
@@ -3013,6 +3312,31 @@ mod tests {
         let extra = extra.expect("data");
         assert_eq!(extra.base_color.as_deref(), Some("red"));
         assert_eq!(extra.banner_patterns, stack.data().unwrap().banner_patterns);
+    }
+
+    #[test]
+    fn banner_pattern_patch_elides_only_the_prototype_value() {
+        let key = "minecraft:banner_patterns";
+        let empty = Tag::List(Vec::new());
+        let patch = Tag::compound([(key, empty.clone())]);
+        let (_, shield) = decode_components_for_item("minecraft:shield", Some(&patch));
+        assert!(shield.is_none());
+        for id in ["minecraft:stone", "example:white_banner"] {
+            let mut stack = ItemStack::new(id, 1);
+            (stack.damage, stack.extra) = decode_components_for_item(id, Some(&patch));
+            assert_eq!(stack.data().unwrap().other(key), Some(&empty));
+            assert_eq!(encode_components(&stack), Some(patch.clone()));
+        }
+
+        let mut banner = ItemStack::new("minecraft:white_banner", 1);
+        banner.data_mut().set_other(key, Some(empty));
+        assert!(encode_components(&banner).is_none());
+
+        let removed = "!minecraft:banner_patterns";
+        let patch = Tag::compound([(removed, Tag::Compound(Default::default()))]);
+        (banner.damage, banner.extra) = decode_components_for_item(&banner.item, Some(&patch));
+        assert_eq!(banner.data().unwrap().other(removed), patch.get(removed));
+        assert_eq!(encode_components(&banner), Some(patch));
     }
 
     #[test]

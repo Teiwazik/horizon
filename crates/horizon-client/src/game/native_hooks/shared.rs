@@ -476,6 +476,16 @@ fn posed_camera(
     )
 }
 
+/// A mod's camera roll (`native_camera_roll`), in degrees, within a turn (-360 to 360): one that
+/// isn't finite is none. Every reader (the view, the billboards, the name tags) then turns by
+/// the same small angle, where a huge one would round differently in each. Neither bounded nor
+/// scaled by Distortion Effects, unlike a shake: it is the camera's pose.
+fn posed_roll(roll: f32) -> f32 {
+    let turn = if roll.is_finite() { roll % 360.0 } else { 0.0 };
+    // -0 (a whole number of turns the other way) is no roll, as 0.
+    if turn == 0.0 { 0.0 } else { turn }
+}
+
 /// The largest turn a shake gives, in degrees, on each axis.
 const SHAKE_MAX_DEGREES: f32 = 10.0;
 /// The largest offset a shake gives, in blocks, along each axis.
@@ -599,6 +609,34 @@ pub(crate) struct NativeRecipeView {
     pub(crate) note: String,
     /// The action button beside it: none, enabled, or shown greyed.
     pub(crate) action: Option<bool>,
+}
+
+impl From<mod_api::RecipeView> for NativeRecipeView {
+    /// A recipe a mod shows through `RecipesClientHost::panel_recipes`, field for field.
+    fn from(view: mod_api::RecipeView) -> Self {
+        Self {
+            layout: match view.layout {
+                mod_api::RecipeLayout::Grid => NativeRecipeLayout::Grid,
+                mod_api::RecipeLayout::Cooking => NativeRecipeLayout::Cooking,
+                mod_api::RecipeLayout::Single => NativeRecipeLayout::Single,
+                mod_api::RecipeLayout::Smithing => NativeRecipeLayout::Smithing,
+                mod_api::RecipeLayout::Brewing => NativeRecipeLayout::Brewing,
+            },
+            width: view.width,
+            height: view.height,
+            slots: view.slots,
+            results: (view.results.into_iter())
+                .map(|r| NativeRecipeResult {
+                    stacks: r.stacks,
+                    chance: r.chance,
+                })
+                .collect(),
+            fluid_inputs: view.fluid_inputs,
+            fluid_outputs: view.fluid_outputs,
+            note: view.note,
+            action: view.action,
+        }
+    }
 }
 
 /// An item of [`NativeRecipes::items`], by its index there, with a count
@@ -1799,7 +1837,7 @@ impl GameLevel<'_> {
         self.native_particles
             .push(super::lan_particles::QueuedParticle {
                 dimension: dimension_id(self.dimension),
-                options: options.clone(),
+                options: options.clone().into(),
                 state,
                 at,
                 spread,
@@ -2172,7 +2210,7 @@ impl Game<'_> {
     /// Whether a box in `corner` shows: F3's debug screen takes both top
     /// corners (its left and right columns), and a bottom corner while one
     /// of its charts is drawn there.
-    pub(super) fn native_corner_shown(&self, corner: Corner) -> bool {
+    pub(in crate::game) fn native_corner_shown(&self, corner: Corner) -> bool {
         let charts = self.debug_charts.corners(!self.has_singleplayer_server());
         !debug_takes(corner, self.debug, charts)
     }
@@ -2661,6 +2699,20 @@ impl Game<'_> {
             return;
         }
         let dimension = self.dim.id();
+        if let Some(host) = self.lan.as_mut() {
+            host.hub
+                .terrain_residency_changed(loaded.iter().map(|&(x, z, _)| (x, z)));
+            let lit = self
+                .world
+                .light_log
+                .iter()
+                .flat_map(|log| log.keys().copied());
+            host.hub.warm_admitted_terrain(
+                &self.world,
+                &self.streaming,
+                loaded.iter().map(|&(x, z, _)| (x, z)).chain(lit),
+            );
+        }
         for (x, z, new) in loaded {
             self.native_chunk_load(dimension, [x, z], new);
         }
@@ -2674,6 +2726,10 @@ impl Game<'_> {
             return;
         }
         let dimension = self.dim.id();
+        if let Some(host) = self.lan.as_mut() {
+            host.hub
+                .terrain_residency_changed(unloaded.iter().map(|chunk| (chunk.x, chunk.z)));
+        }
         for chunk in unloaded {
             self.native_chunk_and_block_entities_unload(dimension, [chunk.x, chunk.z]);
         }
@@ -2687,14 +2743,32 @@ impl Game<'_> {
         if std::mem::replace(&mut host.players_told_left, true) {
             return;
         }
-        let players: Vec<(u128, String)> = host
+        let players: Vec<(u32, u128, String, crate::game::Dim)> = host
             .hub
             .guests
             .iter()
             .filter(|g| g.placed && g.participates_online())
-            .map(|g| (g.uuid, g.name.clone()))
+            .map(|g| {
+                (
+                    g.conn,
+                    g.uuid,
+                    g.name.clone(),
+                    crate::game::Dim::from_id(&g.dimension),
+                )
+            })
             .collect();
-        for (player, name) in players {
+        // They are all still here: each hears of its leave first, then of its logout, in the
+        // level they are in.
+        let back = self.dim;
+        for (conn, player, name, level) in &players {
+            if self.enter_level(*level).is_ok() {
+                self.announce_player_leaving(*conn, *player, name, "Server closed");
+            }
+        }
+        if let Err(e) = self.enter_level(back) {
+            log::error!("could not reopen {}: {e}", back.id());
+        }
+        for (_, player, name, _) in players {
             self.native_player_logged_out(player, &name);
         }
     }
@@ -3099,7 +3173,7 @@ impl Game<'_> {
                 self.container_changed(pos);
             }
         } else {
-            self.drop_unreturned_mod_contents(pos, taken);
+            self.drop_unreturned_tick_contents(pos, taken);
         }
     }
     /// Menu button `id` on the mod container at `pos` (`clickMenuButton`),
@@ -3386,6 +3460,14 @@ impl Game<'_> {
             );
         }
         posed
+    }
+
+    /// The roll native mods draw this frame with (`native_camera_roll`), in degrees about
+    /// the view direction; 0 when no mod rolls it.
+    pub(super) fn native_camera_roll_now(&self, partial: f32) -> f32 {
+        let mut roll = 0.0;
+        self.native_camera_roll(partial, &mut roll);
+        posed_roll(roll)
     }
 
     /// What native mods hand shader packs in this frame (`native_shader_params`),
@@ -4498,6 +4580,24 @@ mod tests {
         );
     }
 
+    /// A mod's roll is kept within a turn, however far it turns (no shake bound, no Distortion
+    /// Effects scale), and one that isn't finite is none.
+    #[test]
+    fn a_mod_camera_roll_is_kept_unless_it_isnt_finite() {
+        use super::posed_roll;
+        for roll in [0.0, 22.5, -22.5, 90.0, -180.0, 359.5] {
+            assert_eq!(posed_roll(roll), roll);
+        }
+        // Whole turns go, keeping the sign of what is left; no roll is +0.
+        assert_eq!(posed_roll(382.5), 22.5);
+        assert_eq!(posed_roll(-382.5), -22.5);
+        assert_eq!(posed_roll(1_000_000_000.0), 1_000_000_000.0 % 360.0);
+        assert!(posed_roll(1_000_000_000.0).abs() < 360.0);
+        for roll in [720.0, -720.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(posed_roll(roll).to_bits(), 0.0f32.to_bits(), "{roll}");
+        }
+    }
+
     /// A shake is scaled by Distortion Effects, bounded on each axis, and a
     /// value that isn't finite is none.
     #[test]
@@ -5139,6 +5239,7 @@ pub(super) mod particle_count_tests {
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
             join: Default::default(),
+            section_order: 0,
             no_gravity: false,
             id: 1,
             position: at,

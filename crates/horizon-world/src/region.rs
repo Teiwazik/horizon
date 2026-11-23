@@ -115,6 +115,21 @@ fn position(region: ChunkPos, index: usize) -> ChunkPos {
 fn external_path(directory: &Path, chunk: ChunkPos) -> PathBuf {
     directory.join(format!("c.{}.{}.mcc", chunk.x, chunk.z))
 }
+
+fn write_region_header(
+    file: &mut File,
+    offsets: &[u32; 1024],
+    timestamps: &[u32; 1024],
+) -> io::Result<()> {
+    let mut header = [0; HEADER];
+    for i in 0..1024 {
+        header[i * 4..i * 4 + 4].copy_from_slice(&offsets[i].to_be_bytes());
+        header[SECTOR + i * 4..SECTOR + i * 4 + 4].copy_from_slice(&timestamps[i].to_be_bytes());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&header)
+}
+
 /// The header of a region file, from its start: each chunk's place (sector
 /// and sector count) and timestamp.
 fn read_header(file: &mut File) -> io::Result<([u32; 1024], [u32; 1024])> {
@@ -390,14 +405,7 @@ impl RegionFile {
     /// `RegionFile.writeHeader`: both header sectors from memory, so the
     /// entries dropped as invalid when the file was opened are zero on disk too.
     fn write_header(&mut self) -> io::Result<()> {
-        let mut header = [0; HEADER];
-        for i in 0..1024 {
-            header[i * 4..i * 4 + 4].copy_from_slice(&self.offsets[i].to_be_bytes());
-            header[SECTOR + i * 4..SECTOR + i * 4 + 4]
-                .copy_from_slice(&self.timestamps[i].to_be_bytes());
-        }
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&header)
+        write_region_header(&mut self.file, &self.offsets, &self.timestamps)
     }
 
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, u32)> + '_ {
@@ -420,6 +428,55 @@ impl RegionFile {
             self.offsets[i],
             self.timestamps[i],
         )
+    }
+
+    /// The chunk as [`read`](Self::read) would give it with its `c.X.Z.mcc`
+    /// taken from `directory`: `None` unless its stub marks it as stored in
+    /// that file (and that file is there).
+    pub fn read_external_from(
+        &mut self,
+        chunk: ChunkPos,
+        directory: &Path,
+    ) -> io::Result<Option<ChunkRecord>> {
+        if !self.is_external(chunk)? {
+            return Ok(None);
+        }
+        let i = slot(self.position, chunk)?;
+        read_record(
+            &mut self.file,
+            directory,
+            chunk,
+            self.offsets[i],
+            self.timestamps[i],
+        )
+    }
+
+    /// Whether the chunk's stub marks it as stored in its own `c.X.Z.mcc`.
+    pub fn is_external(&mut self, chunk: ChunkPos) -> io::Result<bool> {
+        let offset = self.offsets[slot(self.position, chunk)?];
+        if offset == 0 {
+            return Ok(false);
+        }
+        self.file
+            .seek(SeekFrom::Start(u64::from(offset >> 8) * SECTOR as u64))?;
+        let mut header = [0; 5];
+        Ok(self.file.read(&mut header)? == header.len() && header[4] & 128 != 0)
+    }
+
+    /// The `c.X.Z.mcc` files this region's oversized chunks are stored in
+    /// (`createExternalChunkPath`): one per chunk whose stub marks it as
+    /// external ([`is_external`](Self::is_external)), in the folder this
+    /// region was opened from. Empty when none of its chunks is oversized.
+    pub fn external_payloads(&mut self) -> io::Result<Vec<PathBuf>> {
+        let directory = self.path.parent().unwrap_or(Path::new(".")).to_owned();
+        let positions: Vec<ChunkPos> = self.chunks().map(|(pos, _)| pos).collect();
+        let mut out = Vec::new();
+        for pos in positions {
+            if self.is_external(pos)? {
+                out.push(external_path(&directory, pos));
+            }
+        }
+        Ok(out)
     }
 
     /// Export all chunks, preserving untouched compressed bytes and timestamps.
@@ -606,9 +663,9 @@ impl RegionWriter {
         } else {
             record.compressed.len() as u32 + 1
         };
-        self.file.write_all(&len.to_be_bytes())?;
-        self.file
-            .write_all(&[record.compression as u8 | if external { 128 } else { 0 }])?;
+        let [a, b, c, d] = len.to_be_bytes();
+        let compression = record.compression as u8 | if external { 128 } else { 0 };
+        self.file.write_all(&[a, b, c, d, compression])?;
         if !external {
             self.file.write_all(&record.compressed)?;
         }
@@ -618,19 +675,19 @@ impl RegionWriter {
         Ok(())
     }
 
+    /// The `c.X.Z.mcc` files written so far beside the destination, one per
+    /// oversized chunk.
+    pub fn external_files(&self) -> &[PathBuf] {
+        &self.externals
+    }
+
     pub fn finish(mut self) -> io::Result<()> {
         if self.failed {
             return Err(invalid("cannot publish a failed region writer"));
         }
         self.file
             .set_len(u64::from(self.next_sector) * SECTOR as u64)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        for value in self.offsets {
-            self.file.write_all(&value.to_be_bytes())?;
-        }
-        for value in self.timestamps {
-            self.file.write_all(&value.to_be_bytes())?;
-        }
+        write_region_header(&mut self.file, &self.offsets, &self.timestamps)?;
         self.file.sync_all()?;
         // Hard-link publication fails atomically if another writer won the name.
         fs::hard_link(&self.temporary, &self.destination)?;

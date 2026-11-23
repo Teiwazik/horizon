@@ -2708,7 +2708,7 @@ impl BlockEntityRenderer {
             _ => (open, None),
         }
     }
-    /// One block entity of `state` drawn under `base` (minecart contents).
+    /// The special model of `state` under `base` for a display or minecart.
     pub fn render_state(
         &self,
         scene: &Scene,
@@ -2718,6 +2718,25 @@ impl BlockEntityRenderer {
         out: &mut Vec<Vertex>,
     ) {
         let kind = self.kind(state);
+        // EndCubeSpecialRenderer submits all six faces for the model and its outline.
+        let portal = match kind {
+            Kind::EndPortal => Some((end_portal_transform(base), END_PORTAL_LAYER)),
+            Kind::EndGateway { .. } => Some((base, END_GATEWAY_LAYER)),
+            _ => None,
+        };
+        if let Some((matrix, layer)) = portal {
+            let first = out.len();
+            portal_cube(matrix, &Direction::ALL, layer, out);
+            if let Some(font) = scene.font {
+                // The portal shader projects its textures, but the outline samples atlas alpha.
+                let white = font.white();
+                let uv = [(white.u0 + white.u1) * 0.5, (white.v0 + white.v1) * 0.5];
+                for v in &mut out[first..] {
+                    v.uv = uv;
+                }
+            }
+            return;
+        }
         if !matches!(kind, Kind::None) {
             let lights = diffuse_lights(scene.nether);
             self.render_one(
@@ -3114,12 +3133,13 @@ impl BlockEntityRenderer {
                 }
             }
             Kind::EndPortal => {
-                // TheEndPortalRenderer.TRANSFORMATION: y from 6/16 to 12/16; only the
-                // vertical faces (TheEndPortalBlockEntity.shouldRenderFace).
-                let m = base
-                    * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
-                    * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0));
-                portal_cube(m, &[Direction::Down, Direction::Up], END_PORTAL_LAYER, out);
+                // TheEndPortalBlockEntity.shouldRenderFace keeps the two Y faces.
+                portal_cube(
+                    end_portal_transform(base),
+                    &[Direction::Down, Direction::Up],
+                    END_PORTAL_LAYER,
+                    out,
+                );
             }
             Kind::EndGateway { state } => {
                 let anim = (scene.anim)(pos);
@@ -3537,7 +3557,7 @@ pub fn beam(base: Mat4, b: BeamShape, s: Rect, out: &mut Vec<Vertex>) {
         s,
         wrap,
     };
-    part.emit(out, corners, [v1, v2], abgr(255));
+    part.emit(out, corners, [v1, v2], abgr(255), 6);
     // Glow, translucent.
     let g = b.glow_radius;
     let corners = [
@@ -3547,7 +3567,9 @@ pub fn beam(base: Mat4, b: BeamShape, s: Rect, out: &mut Vec<Vertex>) {
         Vec3::new(g, 0.0, g),
     ];
     let v1 = b.height as f32 * b.scale + v2;
-    part.emit(out, corners, [v1, v2], abgr(32));
+    // RenderTypes.beaconBeam only supplies OIT_BEACON_BEAM for the glow.
+    // Leave the core in the ordinary depth-writing pass.
+    part.emit(out, corners, [v1, v2], abgr(32), 6 | crate::gfx::OIT_ENTITY);
 }
 struct BeamPart {
     base: Mat4,
@@ -3564,6 +3586,7 @@ impl BeamPart {
         [wn, en, ws, es]: [Vec3; 4],
         [v1, v2]: [f32; 2],
         color: u32,
+        layer: u32,
     ) {
         let s = self.s;
         for (a, b) in [(wn, en), (es, ws), (en, es), (ws, wn)] {
@@ -3583,7 +3606,7 @@ impl BeamPart {
                     normal: CULL_BACK,
                     pos: p.to_array(),
                     uv,
-                    layer: 6,
+                    layer,
                     color,
                     light: self.wrap,
 
@@ -3635,6 +3658,12 @@ pub fn gateway_beam(
 /// layers of `end_portal.png` over `end_sky.png`, End gateways 16.
 pub const END_PORTAL_LAYER: u32 = 9;
 pub const END_GATEWAY_LAYER: u32 = 10;
+/// `TheEndPortalRenderer.TRANSFORMATION`: the slab from y=6/16 to y=12/16.
+fn end_portal_transform(base: Mat4) -> Mat4 {
+    base * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+        * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0))
+}
+
 /// `AbstractEndPortalRenderer.FACES`: the unit cube's corners for each face
 /// (`Direction` order) in `FaceInfo` vertex order.
 #[rustfmt::skip]
@@ -3646,10 +3675,8 @@ const PORTAL_FACES: [[[f32; 3]; 4]; 6] = [
     [[0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0]],
     [[1.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
 ];
-/// `AbstractEndPortalRenderer.submitCube`: position-only quads (the portal
-/// shader projects its textures from the screen; uv, colour and light are unused).
-/// `rendertype_end_portal` culls back faces, as `entitySolid` does, so the cube's
-/// two Y faces are one-sided: only the one facing the camera draws.
+/// `AbstractEndPortalRenderer.submitCube`: outward-facing quads with projected
+/// textures. `rendertype_end_portal` culls back faces.
 fn portal_cube(m: Mat4, faces: &[Direction], layer: u32, out: &mut Vec<Vertex>) {
     for &d in faces {
         for c in PORTAL_FACES[d as usize] {

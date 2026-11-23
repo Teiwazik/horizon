@@ -83,17 +83,14 @@ const SHARED: [&str; 9] = [
     "servers.dat",
     "optionsshaders.txt",
 ];
-/// What is never copied from an instance's own game folder: logs, the CurseForge app's own
-/// files, and the BlueMap web maps the game asks for tiles around the player
-/// (`horizon_client_render::bluemap::SERVERS_FILE`): only the player names those, never a pack
-/// the other launcher installed.
-const SKIPPED: [&str; 7] = [
+/// What is never copied from an instance's own game folder: logs and the CurseForge app's own
+/// files.
+const SKIPPED: [&str; 6] = [
     "logs",
     "crash-reports",
     "minecraftinstance.json",
     ".curseclient",
-    "horizon-bluemap.txt",
-    // Far terrain's copies of what servers sent, and of their web maps.
+    // Far terrain's copies of what servers sent.
     "server-terrain",
     // The browser's list of what it installed (and may delete): only this launcher writes it.
     "mod-browser.json",
@@ -550,11 +547,30 @@ pub fn copy_game(found: &Found, to: &Path) -> std::io::Result<()> {
         if !wanted {
             continue;
         }
-        if entry.file_type()?.is_dir() {
-            crate::backend::copy_dir(&entry.path(), &to.join(name.as_ref()))?;
-        } else {
-            fs::copy(entry.path(), to.join(name.as_ref()))?;
+        copy_entry(&entry.path(), &to.join(name.as_ref()), entry.file_type()?)?;
+    }
+    Ok(())
+}
+
+/// Copies one file or folder of another launcher's instance. A link is left out: the folder may
+/// come from an archive, and a link in it could carry a file of the player's from elsewhere
+/// into the new instance (and from there into an export).
+fn copy_entry(from: &Path, to: &Path, kind: fs::FileType) -> std::io::Result<()> {
+    if kind.is_symlink() {
+        return Ok(());
+    }
+    if kind.is_dir() {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_entry(
+                &entry.path(),
+                &to.join(entry.file_name()),
+                entry.file_type()?,
+            )?;
         }
+    } else {
+        fs::copy(from, to)?;
     }
     Ok(())
 }

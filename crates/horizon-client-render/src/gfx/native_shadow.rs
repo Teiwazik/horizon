@@ -65,7 +65,7 @@ fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>, @location(2) layer: u32,
     @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonShadowOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 6u]];
     return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin, index,
         index & 3u);
 }
@@ -572,7 +572,8 @@ impl NativeShadow {
                 ("horizon_displace_steps", f64::from(u8::from(g.steps))),
             ]);
         }
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Native shader pack shadow"),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -758,7 +759,8 @@ impl NativeShadow {
                 "horizon_shadow_fs_displaced",
             )
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {

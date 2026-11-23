@@ -685,6 +685,18 @@ fn client_heights_take_a_client_host(host: &dyn ClientHost) -> Result<Vec<Option
     host.client_surface_heights(&[(0, 0), (16, -16)], Heightmap::MotionBlocking)
 }
 
+/// Compile-only: a corner HUD asks whether F3 takes its corner.
+#[allow(dead_code)]
+fn corner_hud_asks_for_its_corner(host: &dyn ClientHost) -> bool {
+    host.native_corner_shown(Corner::TopLeft)
+}
+
+/// Compile-only: an official extra's port reads its old `horizon-extras.txt` settings.
+#[allow(dead_code)]
+fn extra_port_reads_its_old_settings(host: &dyn ClientHost) -> Vec<(String, String)> {
+    host.official_extra_settings()
+}
+
 /// Compile-only: a client mod moves the view onto an entity and back through the `&mut dyn ClientHost`
 /// its hooks get.
 #[allow(dead_code)]
@@ -774,6 +786,20 @@ fn entity_queries_take_a_shared_host(read: &dyn Host, entity: EntityRef) {
     let _: Option<ClipHit> = entity.pick(read, 4.5);
     let _: Option<bool> = entity.is_multipart(read);
     let _: Option<Vec<EntityRef>> = entity.parts(read);
+}
+
+/// Compile-only: what a spawn-control mod's rules read, the entity type's class, the sky from
+/// below water and an unspawned mob's age, all on a shared host.
+#[allow(dead_code)]
+fn spawn_rule_reads_take_a_shared_host(
+    read: &dyn Host,
+    level: LevelRef,
+    mob: crate::UnspawnedMobRef,
+) {
+    let _: bool = read.entity_type_is_enemy("minecraft:zombie");
+    let _: bool = read.entity_type_is_animal("minecraft:cow");
+    let _: Option<bool> = level.can_see_sky_from_below_water(read, [0, 40, 0]);
+    let _: Result<bool, crate::UnspawnedMobError> = mob.baby(read);
 }
 
 /// Compile-only: an entity is sent to another dimension from a server host.

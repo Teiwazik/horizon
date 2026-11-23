@@ -191,10 +191,12 @@ impl Game<'_> {
     fn run_sign_command(&mut self, pos: [i32; 3], command: &str) {
         let source = self.sign_command_source(pos);
         let line = command.strip_prefix('/').unwrap_or(command);
-        self.exec = Default::default();
         let permission = std::mem::replace(&mut self.ui.registries.permission, 2);
-        let _ = self.execute_line(line, source);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.with_command_frame(|game| game.execute_line(line, source))
+        }));
         self.ui.registries.permission = permission;
+        let _ = result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         // InventoryChangeTrigger fires as slots change, not on the next tick.
         if self.player.is_some() {
             self.check_inventory_trigger();
@@ -534,7 +536,7 @@ impl Game<'_> {
     /// `AbstractSignEditScreen.removed`: a server's client sends what it
     /// wrote (ServerboundSignUpdatePacket); the window's own world keeps it
     /// and sends it to its guests (`sendBlockUpdated`).
-    pub(super) fn close_sign_editor(&mut self) {
+    pub(in crate::game) fn close_sign_editor(&mut self) {
         if let Some(edit) = self.sign_edit.take() {
             if self.remote.is_some() {
                 self.send(S::SignUpdate(play::SignUpdate {
@@ -555,10 +557,13 @@ impl Game<'_> {
     /// the block, then the editor, on its client, and the guest may write on it.
     pub(super) fn lan_open_sign_editor(&mut self, conn: u32, edit: SignEditor) {
         let pos = [edit.pos.0, edit.pos.1, edit.pos.2];
-        let state = self.world.block(pos[0], pos[1], pos[2]).0 as i32;
         if let Some(host) = self.lan.as_mut() {
-            host.hub
-                .send_to(conn, &C::BlockUpdate(play::BlockUpdate { pos, state }));
+            if !host.hub.terrain_metadata_visible(conn, &self.world, pos) {
+                // The reservation `open_text_edit` made must not outlive the denied editor.
+                self.world.block_entities.set_sign_editor(edit.pos, None);
+                return;
+            }
+            host.hub.send_block_correction(conn, &self.world, pos);
             host.hub.send_to(
                 conn,
                 &C::OpenSignEditor(play::OpenSignEditor {
@@ -1008,7 +1013,23 @@ impl Game<'_> {
             }
             horizon_client::preedit::report_caret(caret_x, ly, line_height);
         }
+        // The four lines are fields (a click picks one, as `sign_edit_click` does) and Done is a
+        // button, so `ui` lists them and `click-button Done` presses it, as on the book screen.
+        let max_width = sign.max_line_width();
+        for i in 0..text.lines.len() {
+            horizon_client::widgets::target_as(
+                [
+                    cx - max_width / 2.0,
+                    y - midpoint + i as f32 * line_height,
+                    max_width,
+                    line_height,
+                ],
+                horizon_client::widgets::Kind::Field,
+            );
+        }
         let (bx, by) = done_button(w, h);
+        horizon_client::widgets::record(&done_label(), [bx, by, 200.0, 20.0], true);
+        horizon_client::widgets::target([bx, by, 200.0, 20.0]);
         horizon_client::widgets::declare_action(
             horizon_client::widgets::Action::Done,
             [bx, by, 200.0, 20.0],
@@ -1017,9 +1038,16 @@ impl Game<'_> {
         horizon_client::widgets::narratable(|| {
             horizon_client::widgets::Narratable::button(done_label(), [bx, by, 200.0, 20.0], true)
         });
+        // AbstractButton.renderDefaultSprite: the highlighted sprite while hovered.
+        let (mx, my) = self.cursor;
+        let hovered = mx >= bx && mx < bx + 200.0 && my >= by && my < by + 20.0;
         batch.sprite_scaled(
             atlas,
-            "gui/sprites/widget/button",
+            if hovered {
+                "gui/sprites/widget/button_highlighted"
+            } else {
+                "gui/sprites/widget/button"
+            },
             bx,
             by,
             200.0,

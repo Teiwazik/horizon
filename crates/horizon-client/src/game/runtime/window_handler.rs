@@ -2,14 +2,37 @@
 //! and the idle step (`about_to_wait`).
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientQuit {
+    Running,
+    Queued,
+    ShuttingDown,
+}
+
 impl Game<'_> {
+    /// Record the request without saving or entering other mod hooks from this hook.
+    pub(super) fn request_client_quit(&self) -> bool {
+        if !self.options.is_client_start()
+            || self.options.headless
+            || self.error.is_some()
+            || self.client_quit.get() != ClientQuit::Running
+        {
+            return false;
+        }
+        self.client_quit.set(ClientQuit::Queued);
+        true
+    }
+
     /// A run that a person's stray key, click or mouse move would spoil: a screenshot sequence, a
     /// `HORIZON_TICK_SCRIPT` scenario or a `record-replay`. While one runs, the keyboard, mouse
     /// and pad at this computer don't reach the game (`locks_out`, `poll_pads`), the window's
     /// focus stays as the run found it (`held_focus`) and its pointer grab stays inside the game
     /// (`internal_grab`).
     pub(super) fn scripted_run(&self) -> bool {
-        self.screenshot_sequence.is_some() || self.tick_script.playing() || self.repro.replaying()
+        self.export.is_some()
+            || self.screenshot_sequence.is_some()
+            || self.tick_script.playing()
+            || self.repro.replaying()
     }
 }
 
@@ -28,10 +51,33 @@ fn is_input(event: &WindowEvent) -> bool {
     )
 }
 
+fn input_release(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Released,
+        WindowEvent::MouseInput { state, .. } => *state == ElementState::Released,
+        _ => false,
+    }
+}
+
 /// A person's input during a scripted run is dropped. What the run itself sends (the control
 /// socket, a replay, the game's own) still plays.
 fn locks_out(origin: input_trace::InputOrigin, scripted: bool, event: &WindowEvent) -> bool {
     scripted && origin == input_trace::InputOrigin::User && is_input(event)
+}
+
+/// Linux can drop a confined pointer grab while a touchpad is moving and a
+/// movement key is held. Reassert it on the next key press as well as on the
+/// pointer events that already did so.
+fn should_reassert_key(state: ElementState, repeat: bool) -> bool {
+    state == ElementState::Pressed && !repeat
+}
+
+pub(super) fn should_reassert_pointer_capture(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => true,
+        WindowEvent::KeyboardInput { event, .. } => should_reassert_key(event.state, event.repeat),
+        _ => false,
+    }
 }
 
 /// A person clicking into the window or away from it during a scripted run. A replay's look and
@@ -144,17 +190,21 @@ impl Game<'_> {
         if let Some(modifiers) = held_modifiers(origin, self.unclaimed_window, &event) {
             self.unclaimed_modifiers = Some(modifiers);
         }
-        if locks_out(origin, self.scripted_run(), &event) {
-            return;
-        }
-        if let Some(focused) = held_focus(origin, self.scripted_run(), &event) {
-            self.focus_after_run = Some(focused);
-            return;
-        }
-        match at_unclaimed(origin, self.unclaimed_window, &event) {
-            Unclaimed::Claims => self.claim_window(event_loop),
-            Unclaimed::Dropped => return,
-            Unclaimed::Passes => {}
+        let locked = locks_out(origin, self.scripted_run(), &event);
+        if locked {
+            if !input_release(&event) {
+                return;
+            }
+        } else {
+            if let Some(focused) = held_focus(origin, self.scripted_run(), &event) {
+                self.focus_after_run = Some(focused);
+                return;
+            }
+            match at_unclaimed(origin, self.unclaimed_window, &event) {
+                Unclaimed::Claims => self.claim_window(event_loop),
+                Unclaimed::Dropped => return,
+                Unclaimed::Passes => {}
+            }
         }
         follow_keymap(&mut event);
         // MacosUtil.setCtrlClickEmulatesRightClick: Control + left click is a right click.
@@ -170,16 +220,35 @@ impl Game<'_> {
         }
         // Who caused it, before the event is handled: the trace wants the
         // window's own keys, never the ones the socket made up.
-        self.trace_window_event(origin, &event);
+        if !locked {
+            self.trace_window_event(origin, &event);
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
             if event.state == ElementState::Pressed {
                 self.physical_keys.insert(key);
                 horizon_client::keybinds::learn_layout(event);
-            } else {
-                self.physical_keys.remove(&key);
+            } else if self.physical_keys.remove(&key)
+                && locked
+                && let Some(export) = &mut self.export
+            {
+                export
+                    .released_mappings
+                    .extend(self.settings.keys.translate_all(key));
             }
+        }
+        if locked {
+            // Only releases reach here. Keep the physical state current without dispatching clicks.
+            if let WindowEvent::MouseInput { button, .. } = &event
+                && self.physical_buttons.remove(button)
+                && let Some(export) = &mut self.export
+            {
+                export
+                    .released_mappings
+                    .extend(self.settings.keys.translate_mouse_all(*button));
+            }
+            return;
         }
         if matches!(
             &event,
@@ -235,11 +304,16 @@ impl Game<'_> {
 
     /// The loop ended: close the pads' output, save the world.
     pub(super) fn shut_down(&mut self) {
+        self.client_quit.set(ClientQuit::ShuttingDown);
         if self.error.is_none()
             && let Some(renderer) = &mut self.renderer
         {
             renderer.drop_hdr_marker();
         }
+        if self.error.is_none() && self.safe_start_proof.exit() {
+            horizon_client::gfx::safe_start::clear(&Self::options_path());
+        }
+        self.cancel_export_on_quit();
         self.end_screenshot_sequence(Err("cancelled: the game is closing".into()));
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
@@ -258,18 +332,29 @@ impl Game<'_> {
     /// save, world entry, the control socket, pads), then the next frame.
     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
         // A splitscreen player's game has nothing to save: P1's shuts the process down.
-        if horizon_threads::stop_requests() > 0
-            && !self.options.split_guest
-            && self.pending_save.as_ref().is_none_or(|save| !save.quit)
+        let client_quit = self.client_quit.get();
+        if !self.options.split_guest
+            && client_quit != ClientQuit::ShuttingDown
+            && (client_quit == ClientQuit::Queued || horizon_threads::stop_requests() > 0)
         {
-            // SIGTERM, SIGINT or SIGHUP: the shutdown hook's server halt, as a window close.
+            // A mod hook or a signal requested the normal closing save.
             if let Err(error) = self.begin_closing_save(true) {
                 self.error = Some(error);
                 event_loop.exit();
                 return;
             }
         }
+        self.poll_export();
+        // Also runs without a redraw, so a hidden window still handles a server crash.
+        self.exit_after_server_crash();
         if self.pending_save.is_some() {
+            if self
+                .pending_save
+                .as_ref()
+                .is_some_and(|save| save.disconnecting())
+            {
+                self.poll_control_requests(event_loop);
+            }
             match self.poll_closing_save() {
                 Ok(true) => event_loop.exit(),
                 Ok(false) => {
@@ -325,6 +410,12 @@ impl Game<'_> {
             event_loop.exit();
             return;
         }
+        if self.export_held() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(16),
+            ));
+            return;
+        }
         if let Some(w) = &self.window {
             if self.options.offscreen {
                 // Offscreen frames don't wait for the window to be drawn: an
@@ -347,6 +438,12 @@ impl Game<'_> {
                 WindowEvent::RedrawRequested,
                 input_trace::InputOrigin::Game,
             );
+            return;
+        }
+        if self.live_export_waiting() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(1),
+            ));
             return;
         }
         // Consume the last frame's result: a hidden compositor may stop sending
@@ -474,6 +571,10 @@ impl ApplicationHandler for Game<'_> {
             if self.pad_radial_captures() {
                 return;
             }
+            // A replay's first-person view belongs to the recording, not to the mouse.
+            if self.replay.playing() && !self.studio.flying() {
+                return;
+            }
             if x != 0.0 || y != 0.0 {
                 self.pad_yield_input(event_loop);
             }
@@ -487,9 +588,6 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Every event-loop pass, drawn or not: a window that stops redrawing (a lost
-        // device, an occluded window) must still end after a server crash.
-        self.exit_after_server_crash();
         self.idle(event_loop);
     }
     /// The application is ending. On macOS, Quit (Cmd+Q) ends it through
@@ -504,9 +602,182 @@ impl ApplicationHandler for Game<'_> {
 mod tests {
     use super::*;
     use input_trace::InputOrigin;
+    use std::cell::Cell;
     use winit::dpi::{PhysicalPosition, PhysicalSize};
     use winit::event::{Ime, Modifiers, TouchPhase};
     use winit::keyboard::ModifiersState;
+
+    #[derive(Default)]
+    struct TestLoop {
+        exit_requested: Cell<bool>,
+    }
+    impl EventLoopCtl for TestLoop {
+        fn exit(&self) {
+            self.exit_requested.set(true);
+        }
+        fn set_control_flow(&self, _: ControlFlow) {}
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn client_mod_quit_waits_for_the_title_hook_and_runs_normal_shutdown() {
+        use mod_api::{
+            ClientHost, ClientStoppingEvent, Flow, Hooks, ModEntry, ScreenKeyPressedPreEvent,
+        };
+        use std::sync::Mutex;
+
+        struct QuitMod(Arc<Mutex<Vec<(&'static str, bool)>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for QuitMod {
+            fn screen_key_pressed_pre(
+                &self,
+                host: &dyn ClientHost,
+                event: &mut ScreenKeyPressedPreEvent<'_>,
+            ) -> Flow {
+                if event.screen.id != "title" || event.key != "key.keyboard.enter" {
+                    return Flow::Continue;
+                }
+                let accepted = host.request_client_quit();
+                let duplicate = host.request_client_quit();
+                self.0
+                    .lock()
+                    .unwrap()
+                    .extend([("confirm", accepted), ("duplicate", duplicate)]);
+                Flow::Cancel
+            }
+            fn client_stopping(&self, host: &mut dyn ClientHost, _: &mut ClientStoppingEvent) {
+                let accepted = host.request_client_quit();
+                self.0.lock().unwrap().push(("stopping", accepted));
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![ModEntry::new("quit", Box::new(QuitMod(log.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_client_game(|game| {
+                game.title = Some(game.new_title(game.save.root.join("saves")));
+                let batch = HudBatch::scratch([854, 480]);
+                let screen = game.title_screen_view(&batch).unwrap();
+                let event_loop = TestLoop::default();
+                let mut canceled = false;
+                game.native_screen_key_pressed_pre(
+                    &screen,
+                    "key.keyboard.enter",
+                    false,
+                    0,
+                    &mut canceled,
+                );
+                assert!(canceled, "the mod handled the confirmation");
+                assert_eq!(
+                    *log.lock().unwrap(),
+                    [("confirm", true), ("duplicate", false)]
+                );
+                assert!(
+                    game.pending_save.is_none(),
+                    "the hook must not start saving"
+                );
+                assert!(!event_loop.exit_requested.get());
+
+                game.idle(&event_loop);
+                assert!(
+                    event_loop.exit_requested.get(),
+                    "the idle loop must request exit"
+                );
+                assert!(game.error.is_none());
+                game.shut_down();
+                assert_eq!(
+                    *log.lock().unwrap(),
+                    [("confirm", true), ("duplicate", false), ("stopping", false)]
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn client_mod_quit_saves_and_unlocks_the_integrated_world_before_exit() {
+        use horizon_client::save::{Level, SessionLock, WorldPreset};
+        use horizon_client::title::WorldOptions;
+        use mod_api::ClientHost;
+
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            crate::game::native_entity_refs::tests::with_client_game(|game| {
+                let world = game.save.root.join("quit-test");
+                let create = WorldOptions {
+                    world_type: WorldPreset::Flat,
+                    structures: false,
+                    ..WorldOptions::default()
+                };
+                game.options.player_name = Some("QuitTester".into());
+                game.settings.simulation_distance = 2;
+                game.settings.render_distance = 2;
+                game.open_integrated(
+                    world.to_str().unwrap(),
+                    Some("Before quit"),
+                    Some(42),
+                    false,
+                    Some(&create),
+                )
+                .unwrap();
+                let server = game.integrated.as_ref().unwrap();
+                assert!(SessionLock::is_locked(&world));
+                server
+                    .call(|server_game| server_game.level.name = "Saved on quit".into())
+                    .expect("the active integrated server must take the change");
+
+                assert!((game as &dyn ClientHost).request_client_quit());
+                let event_loop = TestLoop::default();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !event_loop.exit_requested.get() {
+                    game.idle(&event_loop);
+                    assert!(game.error.is_none(), "{:?}", game.error);
+                    assert!(
+                        Instant::now() < deadline,
+                        "the integrated save did not finish"
+                    );
+                    if !event_loop.exit_requested.get() {
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                }
+
+                assert!(game.integrated.is_none());
+                assert_eq!(Level::read(&world).unwrap().name, "Saved on quit");
+                assert!(!SessionLock::is_locked(&world));
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn client_mod_quit_refuses_inactive_host_contexts() {
+        use crate::game::execution_role::ExecutionRole;
+        use mod_api::__private::{ModPhase, PhaseOwner};
+        use mod_api::ClientHost;
+
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            crate::game::native_entity_refs::tests::with_client_game(|game| {
+                game.options.headless = true;
+                assert!(!(game as &dyn ClientHost).request_client_quit());
+                game.options.headless = false;
+                game.options.split_guest = true;
+                assert!(!(game as &dyn ClientHost).request_client_quit());
+                game.options.split_guest = false;
+                for role in [
+                    ExecutionRole::IntegratedServer,
+                    ExecutionRole::DedicatedServer,
+                ] {
+                    game.options.execution_role = role;
+                    assert!(!(game as &dyn ClientHost).request_client_quit());
+                }
+                game.options.execution_role = ExecutionRole::Client;
+                {
+                    let _reload = PhaseOwner::scope(ModPhase::Reloading);
+                    assert!(!(game as &dyn ClientHost).request_client_quit());
+                }
+                assert!((game as &dyn ClientHost).request_client_quit());
+            });
+        });
+    }
 
     // A key's `KeyEvent` can't be made outside winit; these are the person's other inputs.
     fn inputs() -> Vec<WindowEvent> {
@@ -529,6 +800,23 @@ mod tests {
             WindowEvent::ModifiersChanged(Modifiers::from(ModifiersState::empty())),
             WindowEvent::Ime(Ime::Commit("a".into())),
         ]
+    }
+
+    #[test]
+    fn pointer_capture_reasserts_for_pointer_events_but_not_cursor_moves() {
+        let events = inputs();
+        assert!(should_reassert_pointer_capture(&events[0]));
+        assert!(should_reassert_pointer_capture(&events[1]));
+        assert!(!should_reassert_pointer_capture(&events[2]));
+        assert!(!should_reassert_pointer_capture(&events[3]));
+        assert!(!should_reassert_pointer_capture(&events[4]));
+    }
+
+    #[test]
+    fn pointer_capture_ignores_key_repeats() {
+        assert!(should_reassert_key(ElementState::Pressed, false));
+        assert!(!should_reassert_key(ElementState::Pressed, true));
+        assert!(!should_reassert_key(ElementState::Released, false));
     }
 
     #[test]
