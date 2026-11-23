@@ -2,7 +2,8 @@
 //! emote or a body tracker turns and moves, each as vanilla posed it and, once a mod sets it, as
 //! the mod wants it drawn. The model's outer layers follow the part they cover (the hat its head,
 //! a sleeve its arm), and so do its armour, held items, cape and the layers mods added. The arms and
-//! legs also bend at the elbow and knee, and the body at the waist.
+//! legs also bend at the elbow and knee, and the body at the waist, and the whole model can move,
+//! turn and scale as one (a back flip, lying down).
 
 use crate::client::posed_parts::HumanoidPart;
 
@@ -47,6 +48,9 @@ pub enum PoseError {
 /// [`set_bend`](Self::set_bend)s it: a limb's lower half turns about the joint, carrying the held
 /// item with a forearm, the body's upper half with the cape and elytra, and a band fills the
 /// outer side of the bend.
+///
+/// The whole model also moves, turns and scales as one once a mod [`set_root`](Self::set_root)s
+/// it, with everything drawn with it (outer layers, armour, held items, cape, elytra).
 #[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
 #[wire(via = PlayerBodyPoseWire)]
 #[non_exhaustive]
@@ -57,6 +61,7 @@ pub struct PlayerBodyPose {
     set: u8,
     bend: [[f32; 2]; 5],
     bent: u8,
+    root: Option<crate::PartPose>,
 }
 
 fn part_pose(v: [f32; 9]) -> crate::PartPose {
@@ -93,6 +98,7 @@ impl PlayerBodyPose {
             set: 0,
             bend: [[0.0; 2]; 5],
             bent: 0,
+            root: None,
         }
     }
 
@@ -162,6 +168,31 @@ impl PlayerBodyPose {
         self.bend(part).is_some()
     }
 
+    /// Moves, turns and scales the whole model this frame, as PlayerAnimationLibrary's `body` bone
+    /// does: `pose`'s x, y, z move it in model pixels (y down, so a negative y lifts it), its
+    /// rotations (radians, z then y then x as a part's) turn it about the middle of the body, 12
+    /// model pixels above the feet, and its scales scale it about that point. Whatever the model
+    /// draws turns with it: outer layers, armour, held items, cape and elytra.
+    /// [`PartPose::ZERO`](crate::PartPose::ZERO) draws the model where vanilla does. A later
+    /// listener may set it again or [`reset_root`](Self::reset_root) it.
+    pub fn set_root(&mut self, pose: crate::PartPose) -> Result<(), PoseError> {
+        if !finite(&pose) {
+            return Err(PoseError::NotFinite);
+        }
+        self.root = Some(pose);
+        Ok(())
+    }
+
+    /// The whole model's move, turn and scale this frame, if a mod [`set_root`](Self::set_root) it.
+    pub fn root(&self) -> Option<crate::PartPose> {
+        self.root
+    }
+
+    /// Draws the whole model where vanilla does again.
+    pub fn reset_root(&mut self) {
+        self.root = None;
+    }
+
     /// Draws `part` as vanilla posed it again, straight.
     pub fn reset(&mut self, part: HumanoidPart) {
         if let Some(i) = Self::index(part) {
@@ -179,9 +210,9 @@ impl PlayerBodyPose {
         Self::index(part).is_some_and(|i| self.set & (1 << i) != 0)
     }
 
-    /// Whether no mod set any part's pose or bent a limb this frame.
+    /// Whether no mod set any part's pose, bent a limb or moved the whole model this frame.
     pub fn is_empty(&self) -> bool {
-        self.set == 0 && self.bent == 0
+        self.set == 0 && self.bent == 0 && self.root.is_none()
     }
 }
 
@@ -193,6 +224,7 @@ struct PlayerBodyPoseWire {
     set: u8,
     bend: [[f32; 2]; 5],
     bent: u8,
+    root: Option<crate::PartPose>,
 }
 impl From<&PlayerBodyPose> for PlayerBodyPoseWire {
     fn from(v: &PlayerBodyPose) -> Self {
@@ -203,6 +235,7 @@ impl From<&PlayerBodyPose> for PlayerBodyPoseWire {
             set: v.set,
             bend: v.bend,
             bent: v.bent,
+            root: v.root,
         }
     }
 }
@@ -231,6 +264,9 @@ impl TryFrom<PlayerBodyPoseWire> for PlayerBodyPose {
                 return Err(WireError::Invalid("PlayerBodyPose pose not finite"));
             }
         }
+        if v.root.as_ref().is_some_and(|r| !finite(r)) {
+            return Err(WireError::Invalid("PlayerBodyPose root not finite"));
+        }
         Ok(Self {
             at_rest: v.at_rest,
             vanilla: v.vanilla,
@@ -238,6 +274,7 @@ impl TryFrom<PlayerBodyPoseWire> for PlayerBodyPose {
             set: v.set,
             bend,
             bent: v.bent,
+            root: v.root,
         })
     }
 }
@@ -305,23 +342,45 @@ mod tests {
     }
 
     #[test]
+    fn the_whole_model_moves_until_reset() {
+        let mut body = PlayerBodyPose::new([nine(0.0); 6], [nine(1.0); 6]);
+        assert_eq!(body.root(), None);
+        // A back flip turns past a full turn; nothing clamps it.
+        let flip = part_pose([0.0, -23.0, 0.0, 6.5, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(body.set_root(flip), Ok(()));
+        assert!(!body.is_empty() && !body.is_set(HumanoidPart::Body));
+        assert_eq!(body.root(), Some(flip));
+        assert_eq!(
+            body.set_root(part_pose(nine(f32::INFINITY))),
+            Err(PoseError::NotFinite)
+        );
+        assert_eq!(body.root(), Some(flip));
+        body.reset(HumanoidPart::Body);
+        assert_eq!(body.root(), Some(flip));
+        body.reset_root();
+        assert!(body.is_empty() && body.root().is_none());
+    }
+
+    #[test]
     fn the_wire_keeps_a_set_pose_and_refuses_bad_ones() {
         use crate::wire::{Reader, Writer};
         let mut body = PlayerBodyPose::new([nine(0.0); 6], [nine(1.0); 6]);
         body.set(HumanoidPart::Head, part_pose(nine(5.0))).unwrap();
         body.set_bend(HumanoidPart::RightArm, 0.25, -1.5).unwrap();
         body.set_bend(HumanoidPart::Body, 0.0, 0.5).unwrap();
+        body.set_root(part_pose([0.0, -20.0, 0.0, 6.0, 0.0, 0.0, 1.0, 1.0, 1.0])).unwrap();
         let mut w = Writer::new();
         w.put(&body);
         assert_eq!(
             Reader::new(w.bytes()).take::<PlayerBodyPose>().unwrap(),
             body
         );
-        for (set, x, bent, angle) in [
-            (1 << 6, 0.0, 0, 0.0),
-            (1, f32::INFINITY, 0, 0.0),
-            (0, 0.0, 1 << 5, 0.0),
-            (0, 0.0, 1, f32::NAN),
+        for (set, x, bent, angle, root) in [
+            (1 << 6, 0.0, 0, 0.0, None),
+            (1, f32::INFINITY, 0, 0.0, None),
+            (0, 0.0, 1 << 5, 0.0, None),
+            (0, 0.0, 1, f32::NAN, None),
+            (0, 0.0, 0, 0.0, Some(part_pose(nine(f32::NAN)))),
         ] {
             let raw = PlayerBodyPoseWire {
                 at_rest: [part_pose(nine(0.0)); 6],
@@ -330,6 +389,7 @@ mod tests {
                 set,
                 bend: [[0.0, angle]; 5],
                 bent,
+                root,
             };
             let mut w = Writer::new();
             w.put(&raw);

@@ -229,6 +229,16 @@ the jacket, chestplate, cape and elytra follow the body's upper half. The head a
 of their own, not the body's: to carry them with a bowing chest, turn their poses about the waist
 (6 pixels down the body, the joint) as well, as PlayerAnimationLibrary does for its `torso` bend.
 
+The whole model also moves, turns and scales as one: `set_root(part_pose)` takes a `PartPose`
+whose `x`, `y`, `z` move it in model pixels (y down: a negative `y` lifts it), whose rotations
+(radians, turned z, then y, then x) turn it about the middle of the body, 12 model pixels above
+the feet, and whose scales scale it about that point, as PlayerAnimationLibrary's `body` bone
+does. A whole turn or more is drawn as asked, not clamped, so a back flip goes round. Everything
+the model draws turns with it: its outer layers, armour, held items, cape, elytra and the layers
+mods added. The name tag and the shadow stay where vanilla puts them. `root()` gives it back,
+`reset_root()` draws the model where vanilla puts it again, and like the parts it lasts this
+frame only. It says `PoseError::NotFinite` for a NaN or infinite number.
+
 ```rust,ignore
 fn set_player_pose(&self, _: &dyn ClientHost, event: &mut SetPlayerPoseEvent<'_>) {
     // Wave: the right arm up, swinging at the frame's partial tick.

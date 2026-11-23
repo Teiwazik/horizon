@@ -891,6 +891,11 @@ pub struct ModPose {
     /// `x_rot` turns the part: a negative angle swings a forearm forwards, a positive one bows the
     /// chest). None leaves the part straight.
     pub bends: [Option<[f32; 2]>; 5],
+    /// The whole model's move, turn and scale, as `ModelPart`'s nine numbers (pixels, y down;
+    /// radians, z then y then x; scales) about the middle of the body, 12 pixels above the feet:
+    /// [`super::render::base_transform_at`] lays it under everything the model draws. None leaves
+    /// the model where vanilla puts it.
+    pub root: Option<[f32; 9]>,
 }
 
 /// The joint a part of [`super::LIMBS`] bends about, in its part's pixels: half way down the

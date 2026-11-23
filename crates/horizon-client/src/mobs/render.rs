@@ -1166,7 +1166,21 @@ pub fn base_transform_at(m: &Mob, alpha: f32, origin: glam::Mat4) -> glam::Mat4 
     base *= species_rotations(m, alpha);
     base *= glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0));
     base *= species_scale(m, alpha);
+    if let Some(root) = m.mod_pose.as_ref().and_then(|p| p.root) {
+        base *= mod_root(root);
+    }
     base * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.501, 0.0))
+}
+/// A mod's move, turn and scale of the whole model (`ModPose::root`), laid under the model after
+/// its scale as PlayerAnimationLibrary's `LivingEntityRendererMixin.doBodyTransform` does: turned
+/// and scaled about the middle of the body, 12 pixels (0.75 blocks of this flipped frame) above
+/// the feet, then moved by the offset.
+fn mod_root(r: [f32; 9]) -> glam::Mat4 {
+    let middle = glam::Vec3::new(0.0, 0.75, 0.0);
+    glam::Mat4::from_translation(glam::Vec3::new(r[0], r[1], r[2]) / 16.0 - middle)
+        * glam::Mat4::from_quat(glam::Quat::from_euler(glam::EulerRot::ZYX, r[5], r[4], r[3]))
+        * glam::Mat4::from_scale(glam::Vec3::new(r[6], r[7], r[8]))
+        * glam::Mat4::from_translation(middle)
 }
 /// `PufferfishRenderer.setupRotations`: `translate(0, cos(ageInTicks * 0.05) * 0.08, 0)`
 /// before the usual rotations, so a pufferfish bobs up and down.
