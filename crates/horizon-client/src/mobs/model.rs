@@ -292,7 +292,8 @@ impl Part {
     /// Splits each limb of a player model (its arms and legs, their sleeves and pants) at the
     /// joint, half way down, so the lower half can turn on its own: the part keeps its top face
     /// and the upper half of its sides, and a new child (`Limb::lower`) the rest, with the
-    /// vertices where they were and the identity pose, so unbent it draws as before. A second
+    /// vertices where they were and the identity pose, so unbent it draws as before; the limb
+    /// (not its outer layer) closes both cut ends, hidden inside the box until it bends. A second
     /// child (`Limb::filler`) holds the sides of a band about the joint, at a zero scale until a
     /// bend opens a gap for it to fill.
     pub fn split_limbs(&mut self) {
@@ -330,18 +331,44 @@ impl Part {
         }
         let joint = (lo[1] + hi[1]) * 0.5;
         let band = (hi[0] - lo[0]).max(hi[2] - lo[2]) * 0.25;
-        let mut upper = Vec::with_capacity(5);
-        let mut lower_half = Vec::with_capacity(5);
+        // A bend opens the halves' cut ends: a limb (not its outer layer, which is a thin shell)
+        // closes them with copies of its own ends, or the box shows hollow, its far sides culled.
+        // Each cap sits a little past the joint, the further the wider the box, so an armour's
+        // lies over the body's instead of in its plane.
+        let cap_at = |poly: &Polygon, y: f32| {
+            let mut cap = poly.clone();
+            for v in &mut cap.vertices {
+                v[1] = y;
+            }
+            cap
+        };
+        let reach = (hi[0] - lo[0]) * 0.05;
+        let mut caps = Vec::with_capacity(2);
+        let mut upper = Vec::with_capacity(6);
+        let mut lower_half = Vec::with_capacity(6);
         let mut fill = Vec::with_capacity(4);
         for poly in self.polygons.drain(..) {
             if poly.normal[1] < 0.0 {
+                if first {
+                    caps.push((false, cap_at(&poly, joint - reach)));
+                }
                 upper.push(poly);
             } else if poly.normal[1] > 0.0 {
+                if first {
+                    caps.push((true, cap_at(&poly, joint + reach)));
+                }
                 lower_half.push(poly);
             } else {
                 upper.push(poly.cut(lo[1], joint));
                 fill.push(poly.cut(joint - band, joint + band));
                 lower_half.push(poly.cut(joint, hi[1]));
+            }
+        }
+        for (on_upper, cap) in caps {
+            if on_upper {
+                upper.push(cap);
+            } else {
+                lower_half.push(cap);
             }
         }
         self.polygons = upper;
@@ -498,8 +525,21 @@ mod limb_tests {
                 lower.polygons.len(),
                 band.polygons.len()
             ),
-            (5, 5, 4)
+            (6, 6, 4)
         );
+        // The cut ends are closed, a little past the joint, by copies of the far ends: the upper
+        // half's faces down the limb, the lower half's up it.
+        let cap = |p: &Part, normal: f32| {
+            p.polygons
+                .iter()
+                .find(|p| p.normal == [0.0, normal, 0.0] && p.vertices[0][1].abs() < 5.0)
+                .cloned()
+                .unwrap()
+        };
+        let (up_cap, down_cap) = (cap(split, 1.0), cap(lower, -1.0));
+        assert!(up_cap.vertices.iter().all(|v| (v[1] - 4.2).abs() < 1e-5));
+        assert!(down_cap.vertices.iter().all(|v| (v[1] - 3.8).abs() < 1e-5));
+        assert_eq!(up_cap.vertices[0][3], whole.polygons[1].vertices[0][3]);
         // Each side face is cut at the joint, y 4, texture and all, into halves that meet there.
         let side = |p: &Part| {
             p.polygons
@@ -520,6 +560,10 @@ mod limb_tests {
         let sleeve = &split.children[2];
         let names: Vec<_> = sleeve.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["right_forearm_sleeve", "right_elbow_sleeve"]);
+        assert_eq!(
+            (sleeve.polygons.len(), sleeve.children[0].polygons.len()),
+            (5, 5)
+        );
         // A limb without a box (a helmet layer's arm) is left as it is.
         let mut empty = Part {
             name: "root".into(),
