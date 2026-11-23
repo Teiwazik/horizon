@@ -1,6 +1,7 @@
 //! The mods' `set_player_pose` hook: once a frame, before the HUD and the entity pass draw, each player model (this
 //! window's own and the other players of the level) is posed as vanilla and its emote pose it, and
-//! the mods may set its head, body, arms and legs and bend its elbows, knees and waist. What they set is kept on the model for the
+//! the mods may set its head, body, arms and legs, bend its elbows, knees and waist, and move, turn
+//! and scale the whole model (a back flip). What they set is kept on the model for the
 //! frame (`Mob::mod_pose`) and laid over by `anim::setup`, which every draw of the model asks:
 //! the body, its outer layers, armour, held items, cape, the mods' layers and the GPU-posed skin.
 //! With no listener nothing is posed or built.
@@ -109,6 +110,11 @@ impl Game<'_> {
                     })
             }),
             bends: mod_api::BENDABLE_PARTS.map(|part| pose.bend(part).map(|(a, b)| [a, b])),
+            root: pose.root().map(|p| {
+                [
+                    p.x, p.y, p.z, p.x_rot, p.y_rot, p.z_rot, p.x_scale, p.y_scale, p.z_scale,
+                ]
+            }),
         }))
     }
 }

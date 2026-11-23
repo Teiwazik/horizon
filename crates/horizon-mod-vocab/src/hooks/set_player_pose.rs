@@ -9,7 +9,8 @@ pub trait Hooks {
     /// player (`ServerPlayer::uuid`, what a mod's payloads name it by). `pose` holds the head, body, arms and legs at rest and as
     /// vanilla posed them this frame (a Horizon emote included); `pose.set(part, part_pose)` draws
     /// that part as the mod wants it this frame, `pose.set_bend(part, axis, angle)` bends an arm, a
-    /// leg or the body at the elbow, knee or waist, `pose.reset(part)` draws it as vanilla again. The model's
+    /// leg or the body at the elbow, knee or waist, `pose.set_root(part_pose)` moves, turns and
+    /// scales the whole model (a back flip, lying down), `pose.reset(part)` draws it as vanilla again. The model's
     /// outer layers follow the part they cover, and so do its armour, held items, cape, the layers
     /// mods added and the parts `render_living_post` reads. Nothing is kept: a part no listener
     /// set next frame draws as vanilla poses it. Visual only, on this client.
