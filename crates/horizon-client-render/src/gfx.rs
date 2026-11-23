@@ -10465,13 +10465,8 @@ impl Renderer {
                 let mut fog_ends = globals.fog_ends;
                 fog_ends[3] = plane;
                 // Water samples the mirror at its jittered screen position: the mirror takes the
-                // world's jitter, while TAA runs.
-                let mirrored = view::mirror_view_projection(view_proj, plane);
-                let mirrored = if taa && self.world_post.taa {
-                    jitter * mirrored
-                } else {
-                    mirrored
-                };
+                // world's jitter (TAA's or the pack's; identity while the world is still).
+                let mirrored = jitter * view::mirror_view_projection(view_proj, plane);
                 let mirror_globals = Globals {
                     view_proj: mirrored.to_cols_array_2d(),
                     inverse_view,
