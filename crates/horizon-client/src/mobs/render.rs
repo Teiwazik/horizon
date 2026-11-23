@@ -3356,6 +3356,44 @@ mod tests {
         );
     }
 
+    /// `ModPose::root` moves the model by its offset in pixels, and turns and scales it about the
+    /// middle of the body, 0.75 blocks above the feet (at y = 0 of this frame, the body's middle
+    /// at y = -0.75).
+    #[test]
+    fn a_mod_root_moves_in_pixels_and_turns_and_scales_about_the_middle() {
+        let rest = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let at = |r: [f32; 9], p: [f32; 3]| mod_root(r).transform_point3(glam::Vec3::from(p));
+        let near = |got: glam::Vec3, want: [f32; 3]| {
+            assert!(
+                got.abs_diff_eq(glam::Vec3::from(want), 1e-5),
+                "{got} != {want:?}"
+            );
+        };
+        // At rest nothing moves.
+        assert!(mod_root(rest).abs_diff_eq(glam::Mat4::IDENTITY, 1e-6));
+        // 16 pixels along x: a block.
+        let mut moved = rest;
+        moved[0] = 16.0;
+        near(at(moved, [0.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+        near(at(moved, [0.5, -1.0, 2.0]), [1.5, -1.0, 2.0]);
+        // A quarter turn about z: the middle stays, the feet, 0.75 below it along +y of this
+        // frame, swing out to -x.
+        let mut turned = rest;
+        turned[5] = std::f32::consts::FRAC_PI_2;
+        near(at(turned, [0.0, -0.75, 0.0]), [0.0, -0.75, 0.0]);
+        near(at(turned, [0.0, 0.0, 0.0]), [-0.75, -0.75, 0.0]);
+        near(at(turned, [0.0, -1.75, 0.0]), [1.0, -0.75, 0.0]);
+        // Scaled per axis about the middle.
+        let mut scaled = rest;
+        scaled[6..9].copy_from_slice(&[2.0, 3.0, 4.0]);
+        near(at(scaled, [0.0, -0.75, 0.0]), [0.0, -0.75, 0.0]);
+        near(at(scaled, [1.0, 0.0, 1.0]), [2.0, 1.5, 4.0]);
+        // Turned, then moved: the offset is not turned with the model.
+        let mut both = turned;
+        both[0] = 16.0;
+        near(at(both, [0.0, 0.0, 0.0]), [0.25, -0.75, 0.0]);
+    }
+
     /// A bent forearm (`set_player_pose`) turns the held item about the arm's joint; on an arm
     /// scaled to nothing there is no joint to turn about (the arm's matrix has no inverse) and
     /// the hand keeps the arm's own matrix, finite, instead of NaN.
