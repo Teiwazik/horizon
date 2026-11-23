@@ -1765,6 +1765,16 @@ fn stuck_placements(
     .take(count.clamp(0, MAX_STUCK_DRAWN) as usize)
 }
 
+/// The part that carries what is stuck at height `y` of the cube `cube` (`cube_bounds`) of the
+/// part `name`: the lower half (`Limb::lower`) of a limb split at the joint when `y` lies past
+/// the joint, half way down, so it moves with a bent forearm or shin; else `name` itself.
+fn stuck_part(name: &str, cube: [f32; 6], y: f32) -> &str {
+    match super::LIMBS.iter().find(|l| l.upper == name) {
+        Some(limb) if y > (cube[1] + cube[4]) * 0.5 => limb.lower,
+        _ => name,
+    }
+}
+
 /// `StuckInBodyLayer.submit` (with `submitStuckItem`) for a player: `count`
 /// copies of `item` (`ArrowLayer`'s arrow model, `BeeStingerLayer`'s stinger)
 /// stuck in random cubes of the posed body, placed from a random source
@@ -1801,11 +1811,13 @@ pub fn stuck_in_body(
     for stuck in stuck_placements(id, count, on_surface, |part| cubes[part].len()) {
         let name = BODY_PARTS[stuck.part];
         let cube = cubes[stuck.part][stuck.cube];
-        let Some(mut t) = part_matrix(&model, base, &poses, name, 0.0) else {
-            return;
-        };
         let mid = stuck.mid;
         let lerp = |k: usize| cube[k] + mid[k] * (cube[3 + k] - cube[k]);
+        let Some(mut t) = part_matrix(&model, base, &poses, stuck_part(name, cube, lerp(1)), 0.0)
+            .or_else(|| part_matrix(&model, base, &poses, name, 0.0))
+        else {
+            return;
+        };
         t *= glam::Mat4::from_translation(glam::Vec3::new(lerp(0), lerp(1), lerp(2)) / 16.0);
         let (dx, dy, dz) = (
             -(mid[0] * 2.0 - 1.0),
@@ -3281,6 +3293,23 @@ mod tests {
         assert_eq!(snap_to_face(0.75), 1.0);
         assert_eq!(snap_to_face(0.5), 0.5);
         assert_eq!(snap_to_face(0.1), 0.5);
+    }
+
+    /// What sticks in a split limb past its joint, half way down the cube, rides the lower half
+    /// (`stuck_in_body`), so it follows a bent forearm or shin; above the joint, or in a part that
+    /// does not split, it stays on the part it was drawn for.
+    #[test]
+    fn a_stuck_item_past_the_joint_rides_the_lower_half() {
+        let arm = [-3.0, -2.0, -2.0, 1.0, 10.0, 2.0];
+        assert_eq!(stuck_part("right_arm", arm, 3.0), "right_arm");
+        assert_eq!(stuck_part("right_arm", arm, 5.0), "right_forearm");
+        let leg = [-2.0, 0.0, -2.0, 2.0, 12.0, 2.0];
+        assert_eq!(stuck_part("left_leg", leg, 11.0), "left_shin");
+        assert_eq!(stuck_part("left_leg", leg, 1.0), "left_leg");
+        assert_eq!(
+            stuck_part("head", [-4.0, -8.0, -4.0, 4.0, 0.0, 4.0], -1.0),
+            "head"
+        );
     }
 
     #[test]
