@@ -4522,7 +4522,7 @@ impl Game<'_> {
             || !(8_000..=192_000).contains(&rate)
             || samples.is_empty()
             || samples.len() > MAX_PCM_SAMPLES
-            || samples.len() % usize::from(channels) != 0
+            || !samples.len().is_multiple_of(usize::from(channels))
             || start as usize >= frames
         {
             return None;
