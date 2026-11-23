@@ -370,8 +370,9 @@ impl Part {
             return;
         }
         let joint = (lo[1] + hi[1]) * 0.5;
-        // A quarter of the depth: the band stretches over the gap a bend about x opens at the front
-        // or back (`anim::bend_poses`).
+        // A quarter of the depth either side, however the box bends: `anim::bend_poses` stretches
+        // it over the gap the bend opens, the longer the farther the outer side's far edge lies
+        // from the axis (the half width for a sideways bend, the half depth for one forwards).
         let band = (hi[2] - lo[2]) * 0.25;
         // A bend opens the halves' cut ends: a limb (not its outer layer, which is a thin shell)
         // closes them with copies of its own ends, or the box shows hollow, its far sides culled.
@@ -735,5 +736,69 @@ mod limb_tests {
                 .iter()
                 .all(|c| c.name == "right_sleeve")
         );
+    }
+
+    /// Bent about any axis across it, forwards, sideways or in between, and by any angle, each
+    /// box's band (`anim::bend_poses`) reaches over the gap the bend opens, from each corner of
+    /// the cut end that stays to the same corner of the end that turns: the corners lie within
+    /// the band's own height once its stretch is taken out. Across the body's width the gap is
+    /// twice as long as across its depth, at a square limb's corner `sqrt(2)` times.
+    #[test]
+    fn the_band_reaches_over_the_gap_of_a_bend_about_any_axis() {
+        use super::super::anim::{bend_poses, joint, width_over_depth};
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+        let matrix = |pose: [f32; 9]| super::super::render::posed(glam::Mat4::IDENTITY, pose);
+        // The player model's boxes (limb, slim arm, from, to), their outer layers a quarter pixel
+        // further out on every side.
+        let boxes = [
+            (0, false, [-3.0, -2.0, -2.0], [1.0, 10.0, 2.0]),
+            (1, true, [-1.0, -2.0, -2.0], [2.0, 10.0, 2.0]),
+            (3, false, [-2.0, 0.0, -2.0], [2.0, 12.0, 2.0]),
+            (4, false, [-4.0, 0.0, -2.0], [4.0, 12.0, 2.0]),
+        ];
+        for (i, slim, lo, hi) in boxes {
+            let limb = &LIMBS[i];
+            let out = |v: [f32; 3], by: f32| v.map(|c| c + by);
+            let layer = cube(limb.overlay, out(lo, -0.25), out(hi, 0.25), Vec::new());
+            let mut root = Part {
+                name: "root".into(),
+                pose: IDENTITY,
+                polygons: Vec::new(),
+                children: vec![cube(limb.part, lo, hi, vec![layer])],
+            };
+            root.split_limbs();
+            let joint = joint(i, slim);
+            for (overlay, band, inflate) in
+                [(false, limb.filler, 0.0), (true, limb.filler_overlay, 0.25)]
+            {
+                let band = root.find_mut(band).unwrap();
+                let height = band
+                    .polygons
+                    .iter()
+                    .flat_map(|p| p.vertices)
+                    .map(|v| (v[1] - joint.y).abs())
+                    .fold(0.0, f32::max);
+                let aspect = width_over_depth(i, slim, overlay);
+                for axis in [0.0, 0.4, FRAC_PI_4, FRAC_PI_2, 2.5] {
+                    for angle in [0.3, -FRAC_PI_2, 2.0, -2.6] {
+                        let (turned, filler) = bend_poses(joint, aspect, [axis, angle]);
+                        let into_band = matrix(filler).inverse();
+                        for x in [lo[0] - inflate, hi[0] + inflate] {
+                            for z in [lo[2] - inflate, hi[2] + inflate] {
+                                let stays = glam::Vec3::new(x, joint.y, z) / 16.0;
+                                for corner in [stays, matrix(turned).transform_point3(stays)] {
+                                    let y = into_band.transform_point3(corner).y * 16.0;
+                                    assert!(
+                                        (y - joint.y).abs() <= height + 1e-3,
+                                        "{} bent {angle} about {axis}: ({x}, {z}) at {y}",
+                                        band.name,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

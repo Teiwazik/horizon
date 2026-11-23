@@ -905,12 +905,27 @@ pub fn joint(limb: usize, slim: bool) -> glam::Vec3 {
     }
 }
 
+/// How much wider than deep a part of [`super::LIMBS`] is, or its outer layer (`overlay`), a
+/// quarter pixel further out on every side: an arm or a leg is 4 pixels square, a slim arm 3
+/// wide, the body 8 wide, all 4 deep. A bend across the width opens that much more of a gap
+/// for the band to fill ([`bend_poses`]).
+pub fn width_over_depth(limb: usize, slim: bool, overlay: bool) -> f32 {
+    let width = match limb {
+        0 | 1 if slim => 3.0,
+        BODY_BEND => 8.0,
+        _ => 4.0,
+    };
+    let out = if overlay { 0.5 } else { 0.0 };
+    (width + out) / (4.0 + out)
+}
+
 /// The body's bend in `posed`, if a mod bent it: the matrix (in blocks, as [`super::render::posed`]
 /// gives it) of its upper half in the body's space, which carries what hangs from the shoulders,
 /// a cape or elytra.
 pub fn upper_body(posed: Option<&ModPose>) -> Option<glam::Mat4> {
     let bend = posed?.bends[BODY_BEND]?;
-    let (upper, _) = bend_poses(joint(BODY_BEND, false), bend);
+    let aspect = width_over_depth(BODY_BEND, false, false);
+    let (upper, _) = bend_poses(joint(BODY_BEND, false), aspect, bend);
     Some(super::render::posed(glam::Mat4::IDENTITY, upper))
 }
 
@@ -928,9 +943,13 @@ pub fn carried(upper: glam::Mat4, pose: [f32; 9]) -> [f32; 9] {
 }
 
 /// The poses of a bent limb's lower half (the body's upper half) and of the band that fills the bend: `bend` (`[axis,
-/// angle]`, as [`ModPose::bends`]) about `joint`.
-pub fn bend_poses(joint: glam::Vec3, bend: [f32; 2]) -> ([f32; 9], [f32; 9]) {
+/// angle]`, as [`ModPose::bends`]) about `joint`, of a box `aspect` times wider than deep
+/// ([`width_over_depth`]).
+pub fn bend_poses(joint: glam::Vec3, aspect: f32, bend: [f32; 2]) -> ([f32; 9], [f32; 9]) {
     let [axis, angle] = bend;
+    // How far the far edge of the outer side lies from the axis, in half depths: one across the
+    // depth (a bend about x), `aspect` across the width (about z), a corner's in between.
+    let reach = axis.cos().abs() + aspect * axis.sin().abs();
     let axis = glam::Quat::from_rotation_y(axis) * glam::Vec3::X;
     let pose = |rotation: glam::Quat, scale: glam::Vec3| {
         // The part's matrix is T(t) * R * S: keep the joint where it was.
@@ -940,9 +959,11 @@ pub fn bend_poses(joint: glam::Vec3, bend: [f32; 2]) -> ([f32; 9], [f32; 9]) {
     };
     let lower = pose(glam::Quat::from_axis_angle(axis, angle), glam::Vec3::ONE);
     // The band turns half way and stretches along the limb over the gap the outer side opens,
-    // `2 * sin(angle / 2)` times the half width at the band's half height of a quarter width,
-    // pulled in a little so its sides stay under the halves' own.
-    let stretch = 2.0 * (angle * 0.5).sin().abs();
+    // `2 * sin(angle / 2)` times the far edge's distance from the axis long. The band is a half
+    // depth long (a quarter of the depth either side of the joint, `Part::split_limbs`), so that
+    // is `2 * sin(angle / 2) * reach` times its own length. Its sides are pulled in a little so
+    // they stay under the halves' own.
+    let stretch = 2.0 * (angle * 0.5).sin().abs() * reach;
     let filler = if stretch == 0.0 {
         [0.0; 9]
     } else {
@@ -1012,13 +1033,16 @@ fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], slim: bool, p: &mut Po
         if !p.has(limb.half) {
             continue;
         }
-        let (half, filler) = bend_poses(joint(i, slim), bend);
+        let joint = joint(i, slim);
+        let (half, filler) = bend_poses(joint, width_over_depth(i, slim, false), bend);
+        // The outer layer's band, a little less wide for its depth, stretches a little less.
+        let (_, filler_overlay) = bend_poses(joint, width_over_depth(i, slim, true), bend);
         for name in [limb.half, limb.half_overlay] {
             if p.has(name) {
                 *p.get(name) = half;
             }
         }
-        for name in [limb.filler, limb.filler_overlay] {
+        for (name, filler) in [(limb.filler, filler), (limb.filler_overlay, filler_overlay)] {
             if p.has(name) {
                 *p.get(name) = filler;
             }
@@ -1383,7 +1407,7 @@ mod body_pose_tests {
         let joint = joint(0, false);
         assert_eq!(joint, glam::Vec3::new(-1.0, 4.0, 0.0));
         // A quarter turn forwards: the hand, 6 pixels below the joint, comes up in front of it.
-        let (lower, filler) = bend_poses(joint, [0.0, -FRAC_PI_2]);
+        let (lower, filler) = bend_poses(joint, 1.0, [0.0, -FRAC_PI_2]);
         assert!(at(lower, joint).distance(joint) < 1e-5);
         let hand = at(lower, joint + glam::Vec3::new(0.0, 6.0, 0.0));
         assert!(
@@ -1391,7 +1415,7 @@ mod body_pose_tests {
             "{hand}"
         );
         // Turned by `axis` a quarter about y, it bends sideways instead.
-        let (side, _) = bend_poses(joint, [FRAC_PI_2, -FRAC_PI_2]);
+        let (side, _) = bend_poses(joint, 1.0, [FRAC_PI_2, -FRAC_PI_2]);
         let hand = at(side, joint + glam::Vec3::new(0.0, 6.0, 0.0));
         assert!(
             (hand.y - joint.y).abs() < 1e-4 && (hand.x - joint.x).abs() > 5.9,
@@ -1401,7 +1425,7 @@ mod body_pose_tests {
         assert!((filler[3] + FRAC_PI_4).abs() < 1e-6);
         assert!((filler[7] - 2.0 * FRAC_PI_4.sin()).abs() < 1e-6);
         assert!(at(filler, joint).distance(joint) < 1e-5);
-        assert_eq!(bend_poses(joint, [0.3, 0.0]).1, [0.0; 9]);
+        assert_eq!(bend_poses(joint, 1.0, [0.3, 0.0]).1, [0.0; 9]);
     }
 
     #[test]
@@ -1418,7 +1442,7 @@ mod body_pose_tests {
         // A quarter turn the positive way: the neck, 6 pixels above the waist, comes forwards
         // (towards -z, where the face looks).
         posed.bends[BODY_BEND] = Some([0.0, FRAC_PI_2]);
-        let (chest, _) = bend_poses(waist, [0.0, FRAC_PI_2]);
+        let (chest, _) = bend_poses(waist, 2.0, [0.0, FRAC_PI_2]);
         let neck = at(chest, glam::Vec3::ZERO);
         assert!(
             neck.distance(glam::Vec3::new(0.0, 6.0, -6.0)) < 1e-4,
