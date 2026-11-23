@@ -218,54 +218,89 @@ impl Part {
     }
 }
 
-/// A player limb split at its joint so it can bend: the part that keeps the upper half, its outer
-/// layer, and the names of the parts that hold the lower halves and fill the bend.
+/// A part of the player model split at its joint so it can bend: a limb at the elbow or knee, the
+/// body at the waist. It names the part, its outer layer, and the parts that hold the half that
+/// turns and fill the bend.
 pub struct Limb {
-    pub upper: &'static str,
+    pub part: &'static str,
     pub overlay: &'static str,
-    /// The lower half, a child of `upper`, posed about the joint.
-    pub lower: &'static str,
-    /// The overlay's lower half, a child of `overlay`.
-    pub lower_overlay: &'static str,
+    /// The half that turns about the joint, a child of `part`: a limb's lower half, the body's
+    /// upper half (`upper_turns`).
+    pub half: &'static str,
+    /// The overlay's half that turns, a child of `overlay`.
+    pub half_overlay: &'static str,
     /// The band about the joint that fills the outer side of a bend, drawn only while it bends.
     pub filler: &'static str,
     pub filler_overlay: &'static str,
+    /// Whether the upper half turns (the body, as bendable-cuboids bends the torso: the chest
+    /// bows over the hips), not the lower one.
+    pub upper_turns: bool,
 }
 
-/// The limbs of the player model that bend, in `BENDABLE_PARTS` order (right arm, left arm, right
-/// leg, left leg).
-pub const LIMBS: [Limb; 4] = [
+const fn limb(
+    part: &'static str,
+    overlay: &'static str,
+    half: &'static str,
+    half_overlay: &'static str,
+    filler: &'static str,
+    filler_overlay: &'static str,
+) -> Limb {
     Limb {
-        upper: "right_arm",
-        overlay: "right_sleeve",
-        lower: "right_forearm",
-        lower_overlay: "right_forearm_sleeve",
-        filler: "right_elbow",
-        filler_overlay: "right_elbow_sleeve",
-    },
+        part,
+        overlay,
+        half,
+        half_overlay,
+        filler,
+        filler_overlay,
+        upper_turns: false,
+    }
+}
+
+/// The parts of the player model that bend, in `BENDABLE_PARTS` order (right arm, left arm, right
+/// leg, left leg, body).
+pub const LIMBS: [Limb; 5] = [
+    limb(
+        "right_arm",
+        "right_sleeve",
+        "right_forearm",
+        "right_forearm_sleeve",
+        "right_elbow",
+        "right_elbow_sleeve",
+    ),
+    limb(
+        "left_arm",
+        "left_sleeve",
+        "left_forearm",
+        "left_forearm_sleeve",
+        "left_elbow",
+        "left_elbow_sleeve",
+    ),
+    limb(
+        "right_leg",
+        "right_pants",
+        "right_shin",
+        "right_shin_pants",
+        "right_knee",
+        "right_knee_pants",
+    ),
+    limb(
+        "left_leg",
+        "left_pants",
+        "left_shin",
+        "left_shin_pants",
+        "left_knee",
+        "left_knee_pants",
+    ),
     Limb {
-        upper: "left_arm",
-        overlay: "left_sleeve",
-        lower: "left_forearm",
-        lower_overlay: "left_forearm_sleeve",
-        filler: "left_elbow",
-        filler_overlay: "left_elbow_sleeve",
-    },
-    Limb {
-        upper: "right_leg",
-        overlay: "right_pants",
-        lower: "right_shin",
-        lower_overlay: "right_shin_pants",
-        filler: "right_knee",
-        filler_overlay: "right_knee_pants",
-    },
-    Limb {
-        upper: "left_leg",
-        overlay: "left_pants",
-        lower: "left_shin",
-        lower_overlay: "left_shin_pants",
-        filler: "left_knee",
-        filler_overlay: "left_knee_pants",
+        upper_turns: true,
+        ..limb(
+            "body",
+            "jacket",
+            "chest",
+            "chest_jacket",
+            "waist",
+            "waist_jacket",
+        )
     },
 ];
 
@@ -275,7 +310,7 @@ const IDENTITY: [f32; 9] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 const HIDDEN: [f32; 9] = [0.0; 9];
 
 /// Whether the model layer `key` (with or without its namespace) is the player model's body or
-/// armour, whose limbs [`Part::split_limbs`] splits at the joint.
+/// armour, whose limbs and body [`Part::split_limbs`] splits at the joint.
 pub fn bends_limbs(key: &str) -> bool {
     let key = key.strip_prefix("minecraft:").unwrap_or(key);
     let Some((model, layer)) = key.split_once('#') else {
@@ -289,22 +324,23 @@ pub fn bends_limbs(key: &str) -> bool {
 }
 
 impl Part {
-    /// Splits each limb of a player model (its arms and legs, their sleeves and pants) at the
-    /// joint, half way down, so the lower half can turn on its own: the part keeps its top face
-    /// and the upper half of its sides, and a new child (`Limb::lower`) the rest, with the
-    /// vertices where they were and the identity pose, so unbent it draws as before; the limb
-    /// (not its outer layer) closes both cut ends, hidden inside the box until it bends. A second
-    /// child (`Limb::filler`) holds the sides of a band about the joint, at a zero scale until a
-    /// bend opens a gap for it to fill. An armour's limb (one without a sleeve or trouser leg)
-    /// gets no band: its texture stops about the joint, so a band would show only a sliver of the
-    /// edge above it, a thin outline off to the side of the bent limb.
+    /// Splits each limb of a player model (its arms and legs, their sleeves and pants) and its
+    /// body (and jacket) at the joint, half way down, so one half can turn on its own: a limb's
+    /// lower half, the body's upper half. The part keeps the other half, its end and the half of
+    /// its sides there, and a new child (`Limb::half`) the rest, with the vertices where they were
+    /// and the identity pose, so unbent it draws as before; the part (not its outer layer) closes
+    /// both cut ends, hidden inside the box until it bends. A second child (`Limb::filler`) holds
+    /// the sides of a band about the joint, at a zero scale until a bend opens a gap for it to
+    /// fill. An armour's part (one without a sleeve, trouser leg or jacket) gets no band: its
+    /// texture stops about the joint, so a band would show only a sliver of the edge beside it, a
+    /// thin outline off to the side of the bent limb.
     pub fn split_limbs(&mut self) {
         for limb in &LIMBS {
-            if let Some(upper) = self.find_mut(limb.upper) {
-                let body = upper.children.iter().any(|c| c.name == limb.overlay);
-                upper.split_at_joint(limb.lower, body.then_some(limb.filler), true);
-                if let Some(overlay) = upper.find_mut(limb.overlay) {
-                    overlay.split_at_joint(limb.lower_overlay, Some(limb.filler_overlay), false);
+            if let Some(part) = self.find_mut(limb.part) {
+                let body = part.children.iter().any(|c| c.name == limb.overlay);
+                part.split_at_joint(limb, body.then_some(limb.filler), true);
+                if let Some(overlay) = part.find_mut(limb.overlay) {
+                    overlay.split_at_joint(limb, Some(limb.filler_overlay), false);
                 }
             }
         }
@@ -317,9 +353,10 @@ impl Part {
         self.children.iter_mut().find_map(|c| c.find_mut(name))
     }
 
-    /// Moves the lower half of this one-cube part into a child `lower` and adds the band `filler`,
-    /// if any (first among the children when `first`, so the halves draw before an outer layer).
-    fn split_at_joint(&mut self, lower: &str, filler: Option<&str>, first: bool) {
+    /// Moves the half of this one-cube part that turns (`limb.upper_turns`) into a child, the
+    /// part's `Limb::half` (`first`) or its outer layer's, and adds the band `filler`, if any (first
+    /// among the children when `first`, so the halves draw before an outer layer).
+    fn split_at_joint(&mut self, limb: &Limb, filler: Option<&str>, first: bool) {
         let sides = |p: &&Polygon| p.normal[1] == 0.0;
         let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
         for v in self.polygons.iter().flat_map(|p| p.vertices) {
@@ -333,7 +370,9 @@ impl Part {
             return;
         }
         let joint = (lo[1] + hi[1]) * 0.5;
-        let band = (hi[0] - lo[0]).max(hi[2] - lo[2]) * 0.25;
+        // A quarter of the depth: the band stretches over the gap a bend about x opens at the front
+        // or back (`anim::bend_poses`).
+        let band = (hi[2] - lo[2]) * 0.25;
         // A bend opens the halves' cut ends: a limb (not its outer layer, which is a thin shell)
         // closes them with copies of its own ends, or the box shows hollow, its far sides culled.
         // Each cap sits a little past the joint, the further the wider the box, so an armour's
@@ -374,11 +413,16 @@ impl Part {
                 lower_half.push(cap);
             }
         }
-        self.polygons = upper;
-        let lower = Part {
-            name: lower.to_owned(),
+        let (kept, turned) = if limb.upper_turns {
+            (lower_half, upper)
+        } else {
+            (upper, lower_half)
+        };
+        self.polygons = kept;
+        let half = Part {
+            name: if first { limb.half } else { limb.half_overlay }.to_owned(),
             pose: IDENTITY,
-            polygons: lower_half,
+            polygons: turned,
             children: Vec::new(),
         };
         let filler = filler.map(|name| Part {
@@ -387,7 +431,7 @@ impl Part {
             polygons: fill,
             children: Vec::new(),
         });
-        let halves = std::iter::once(lower).chain(filler);
+        let halves = std::iter::once(half).chain(filler);
         if first {
             self.children.splice(0..0, halves);
         } else {
@@ -504,6 +548,97 @@ mod limb_tests {
             ],
             children,
         }
+    }
+
+    /// A part with one box from `lo` to `hi`, its six faces, no texture.
+    fn cube(name: &str, lo: [f32; 3], hi: [f32; 3], children: Vec<Part>) -> Part {
+        let quad = |normal: [f32; 3], corners: [[f32; 3]; 4]| Polygon {
+            normal,
+            vertices: corners.map(|[x, y, z]| [x, y, z, 0.0, 0.0]),
+            cull_back: false,
+        };
+        let ([x0, y0, z0], [x1, y1, z1]) = (lo, hi);
+        Part {
+            name: name.to_owned(),
+            pose: IDENTITY,
+            polygons: vec![
+                quad(
+                    [0.0, -1.0, 0.0],
+                    [[x1, y0, z1], [x0, y0, z1], [x0, y0, z0], [x1, y0, z0]],
+                ),
+                quad(
+                    [0.0, 1.0, 0.0],
+                    [[x1, y1, z0], [x0, y1, z0], [x0, y1, z1], [x1, y1, z1]],
+                ),
+                quad(
+                    [-1.0, 0.0, 0.0],
+                    [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
+                ),
+                quad(
+                    [0.0, 0.0, -1.0],
+                    [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]],
+                ),
+                quad(
+                    [1.0, 0.0, 0.0],
+                    [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]],
+                ),
+                quad(
+                    [0.0, 0.0, 1.0],
+                    [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+                ),
+            ],
+            children,
+        }
+    }
+
+    #[test]
+    fn the_body_splits_at_the_waist_its_upper_half_turning() {
+        let jacket = cube(
+            "jacket",
+            [-4.25, -0.25, -2.25],
+            [4.25, 12.25, 2.25],
+            Vec::new(),
+        );
+        let mut root = Part {
+            name: "root".into(),
+            pose: IDENTITY,
+            polygons: Vec::new(),
+            children: vec![cube(
+                "body",
+                [-4.0, 0.0, -2.0],
+                [4.0, 12.0, 2.0],
+                vec![jacket],
+            )],
+        };
+        root.split_limbs();
+        let body = &root.children[0];
+        let names: Vec<_> = body.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["chest", "waist", "jacket"]);
+        let (chest, waist) = (&body.children[0], &body.children[1]);
+        assert_eq!((chest.pose, waist.pose), (IDENTITY, HIDDEN));
+        // The body keeps the hips (below y 6, its bottom and a cap over the joint), the chest
+        // the shoulders (its top and a cap under the joint).
+        let ys = |p: &Part| {
+            let (lo, hi) = p
+                .polygons
+                .iter()
+                .flat_map(|p| p.vertices)
+                .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+                    (lo.min(v[1]), hi.max(v[1]))
+                });
+            let round = |y: f32| (y * 100.0).round() / 100.0;
+            (round(lo), round(hi))
+        };
+        assert_eq!(ys(body), (5.6, 12.0));
+        assert_eq!(ys(chest), (0.0, 6.4));
+        assert_eq!((body.polygons.len(), chest.polygons.len()), (6, 6));
+        // The band is a quarter of the depth either side of the joint.
+        assert_eq!(ys(waist), (5.0, 7.0));
+        let jacket = &body.children[2];
+        let names: Vec<_> = jacket.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["chest_jacket", "waist_jacket"]);
+        assert_eq!(ys(&jacket.children[0]), (-0.25, 6.0));
+        assert_eq!(ys(jacket), (6.0, 12.25));
     }
 
     #[test]

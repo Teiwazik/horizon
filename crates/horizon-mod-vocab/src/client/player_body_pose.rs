@@ -2,7 +2,7 @@
 //! emote or a body tracker turns and moves, each as vanilla posed it and, once a mod sets it, as
 //! the mod wants it drawn. The model's outer layers follow the part they cover (the hat its head,
 //! a sleeve its arm), and so do its armour, held items, cape and the layers mods added. The arms and
-//! legs also bend at the elbow and knee.
+//! legs also bend at the elbow and knee, and the body at the waist.
 
 use crate::client::posed_parts::HumanoidPart;
 
@@ -16,12 +16,13 @@ pub const POSABLE_PARTS: [HumanoidPart; 6] = [
     HumanoidPart::LeftLeg,
 ];
 
-/// The parts [`PlayerBodyPose`] bends half way down, at the elbow or knee, in its order.
-pub const BENDABLE_PARTS: [HumanoidPart; 4] = [
+/// The parts [`PlayerBodyPose`] bends half way down, at the elbow, knee or waist, in its order.
+pub const BENDABLE_PARTS: [HumanoidPart; 5] = [
     HumanoidPart::RightArm,
     HumanoidPart::LeftArm,
     HumanoidPart::RightLeg,
     HumanoidPart::LeftLeg,
+    HumanoidPart::Body,
 ];
 
 /// Why [`PlayerBodyPose::set`] took no pose, or [`PlayerBodyPose::set_bend`] no bend.
@@ -32,7 +33,7 @@ pub enum PoseError {
     NotPosable,
     /// A number of the pose is not finite.
     NotFinite,
-    /// The part is not one of [`BENDABLE_PARTS`]: only the arms and legs bend.
+    /// The part is not one of [`BENDABLE_PARTS`]: only the arms, legs and body bend.
     NotBendable,
 }
 
@@ -42,9 +43,10 @@ pub enum PoseError {
 /// posed it. Poses are [`PartPose`](crate::PartPose)s relative to the part's parent, as a baked
 /// layer's parts take them: x, y, z in model pixels (y down), rotations in radians.
 ///
-/// Each of [`BENDABLE_PARTS`] also bends half way down, at the elbow or knee, once a mod
-/// [`set_bend`](Self::set_bend)s it: its lower half turns about the joint, carrying the held item
-/// with a forearm, and a band fills the outer side of the bend.
+/// Each of [`BENDABLE_PARTS`] also bends half way down, at the elbow, knee or waist, once a mod
+/// [`set_bend`](Self::set_bend)s it: a limb's lower half turns about the joint, carrying the held
+/// item with a forearm, the body's upper half with the cape and elytra, and a band fills the
+/// outer side of the bend.
 #[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
 #[wire(via = PlayerBodyPoseWire)]
 #[non_exhaustive]
@@ -53,7 +55,7 @@ pub struct PlayerBodyPose {
     vanilla: [crate::PartPose; 6],
     posed: [crate::PartPose; 6],
     set: u8,
-    bend: [[f32; 2]; 4],
+    bend: [[f32; 2]; 5],
     bent: u8,
 }
 
@@ -89,7 +91,7 @@ impl PlayerBodyPose {
             vanilla,
             posed: vanilla,
             set: 0,
-            bend: [[0.0; 2]; 4],
+            bend: [[0.0; 2]; 5],
             bent: 0,
         }
     }
@@ -131,11 +133,14 @@ impl PlayerBodyPose {
         BENDABLE_PARTS.iter().position(|p| *p == part)
     }
 
-    /// Bends `part` this frame at the elbow or knee, as bendy-lib does: its lower half turns by
-    /// `angle` radians about the horizontal axis through the joint that is the model's x axis
-    /// turned by `axis` radians about y. At `axis` 0 the limb bends as `x_rot` turns it, a negative
-    /// angle forwards (a raised forearm, a knee bent to kneel back is a positive one); at
-    /// `axis` π/2 it bends sideways. The bend is relative to the part's own pose, whoever set it.
+    /// Bends `part` this frame at the elbow, knee or waist, as bendy-lib does: a limb's lower half
+    /// (the body's upper half) turns by `angle` radians about the horizontal axis through the
+    /// joint that is the model's x axis turned by `axis` radians about y. At `axis` 0 the part
+    /// bends as `x_rot` turns it: a negative angle swings a forearm forwards (a knee bent to kneel
+    /// back is a positive one), a positive angle bows the chest forwards; at `axis` π/2 it bends
+    /// sideways. The bend is relative to the part's own pose, whoever set it. The head and arms
+    /// are parts of their own, not the body's: to carry them with a bowing chest, a mod turns
+    /// their poses about the waist too, as PlayerAnimationLibrary does for its `torso` bend.
     pub fn set_bend(&mut self, part: HumanoidPart, axis: f32, angle: f32) -> Result<(), PoseError> {
         let i = Self::bend_index(part).ok_or(PoseError::NotBendable)?;
         if !axis.is_finite() || !angle.is_finite() {
@@ -186,7 +191,7 @@ struct PlayerBodyPoseWire {
     vanilla: [crate::PartPose; 6],
     posed: [crate::PartPose; 6],
     set: u8,
-    bend: [[f32; 2]; 4],
+    bend: [[f32; 2]; 5],
     bent: u8,
 }
 impl From<&PlayerBodyPose> for PlayerBodyPoseWire {
@@ -205,7 +210,7 @@ impl TryFrom<PlayerBodyPoseWire> for PlayerBodyPose {
     type Error = crate::wire::WireError;
     fn try_from(v: PlayerBodyPoseWire) -> Result<Self, Self::Error> {
         use crate::wire::WireError;
-        if v.set >> 6 != 0 || v.bent >> 4 != 0 {
+        if v.set >> 6 != 0 || v.bent >> 5 != 0 {
             return Err(WireError::Invalid("PlayerBodyPose set bits"));
         }
         // A limb no mod bent is straight; a bent one only with finite numbers.
@@ -277,6 +282,11 @@ mod tests {
         assert_eq!(body.set_bend(knee, 0.5, 1.2), Ok(()));
         assert!(!body.is_empty() && body.is_bent(knee) && !body.is_set(knee));
         assert_eq!(body.bend(knee), Some((0.5, 1.2)));
+        // The body bends at the waist, on a bit of its own.
+        assert_eq!(body.set_bend(HumanoidPart::Body, 0.0, 0.7), Ok(()));
+        assert_eq!(body.bend(HumanoidPart::Body), Some((0.0, 0.7)));
+        body.reset(HumanoidPart::Body);
+        assert!(!body.is_bent(HumanoidPart::Body) && body.is_bent(knee));
         assert_eq!(
             body.set_bend(HumanoidPart::Head, 0.0, 1.0),
             Err(PoseError::NotBendable)
@@ -300,6 +310,7 @@ mod tests {
         let mut body = PlayerBodyPose::new([nine(0.0); 6], [nine(1.0); 6]);
         body.set(HumanoidPart::Head, part_pose(nine(5.0))).unwrap();
         body.set_bend(HumanoidPart::RightArm, 0.25, -1.5).unwrap();
+        body.set_bend(HumanoidPart::Body, 0.0, 0.5).unwrap();
         let mut w = Writer::new();
         w.put(&body);
         assert_eq!(
@@ -309,7 +320,7 @@ mod tests {
         for (set, x, bent, angle) in [
             (1 << 6, 0.0, 0, 0.0),
             (1, f32::INFINITY, 0, 0.0),
-            (0, 0.0, 1 << 4, 0.0),
+            (0, 0.0, 1 << 5, 0.0),
             (0, 0.0, 1, f32::NAN),
         ] {
             let raw = PlayerBodyPoseWire {
@@ -317,7 +328,7 @@ mod tests {
                 vanilla: [part_pose(nine(0.0)); 6],
                 posed: [part_pose(nine(x)); 6],
                 set,
-                bend: [[0.0, angle]; 4],
+                bend: [[0.0, angle]; 5],
                 bent,
             };
             let mut w = Writer::new();

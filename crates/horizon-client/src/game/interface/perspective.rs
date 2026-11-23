@@ -1080,12 +1080,17 @@ impl Game<'_> {
             .extra
             .slot_stack(horizon_items::equipment::CHEST)
             .filter(|s| chest == Some(&*s.item));
+        let mut base = horizon_client::mobs::render::base_transform(m, partial, camera);
+        // The wings hang from the shoulders: a body a mod bent carries them on its chest.
+        if let Some(upper) = horizon_client::mobs::render::upper_body(m) {
+            base *= upper;
+        }
         self.wings_geometry(
             chest,
             stack,
             m.cape.as_deref(),
             false,
-            horizon_client::mobs::render::base_transform(m, partial, camera),
+            base,
             m.extra.elytra.angles(partial),
             m.extra.crouching,
             light,

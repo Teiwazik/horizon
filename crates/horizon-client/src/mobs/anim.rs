@@ -884,26 +884,50 @@ pub struct ModPose {
     /// The parts of [`BODY_PARTS`], each as `ModelPart`'s nine numbers: None leaves the part as
     /// the animation and the emote left it.
     pub parts: [Option<[f32; 9]>; 6],
-    /// The bends of the limbs of [`super::LIMBS`] (right arm, left arm, right leg, left leg) at
-    /// the elbow or knee, each `[axis, angle]` in radians: the lower half turns by `angle` about
-    /// the horizontal axis that is the model's x axis turned by `axis` about y (0 bends it
-    /// forwards and backwards as `x_rot` turns the limb, a negative angle forwards). None leaves
-    /// the limb straight.
-    pub bends: [Option<[f32; 2]>; 4],
+    /// The bends of the parts of [`super::LIMBS`] (right arm, left arm, right leg, left leg) at
+    /// the elbow or knee and of the body at the waist, each `[axis, angle]` in radians: the
+    /// limb's lower half (the body's upper half) turns by `angle` about the horizontal axis that
+    /// is the model's x axis turned by `axis` about y (0 bends it forwards and backwards as
+    /// `x_rot` turns the part: a negative angle swings a forearm forwards, a positive one bows the
+    /// chest). None leaves the part straight.
+    pub bends: [Option<[f32; 2]>; 5],
 }
 
-/// The joint a limb of [`super::LIMBS`] bends about, in its part's pixels: half way down the
-/// limb, in the middle of its width (a slim arm is a pixel narrower, on the outer side).
+/// The joint a part of [`super::LIMBS`] bends about, in its part's pixels: half way down the
+/// limb or body, in the middle of its width (a slim arm is a pixel narrower, on the outer side).
 pub fn joint(limb: usize, slim: bool) -> glam::Vec3 {
     let arm_x = if slim { 0.5 } else { 1.0 };
     match limb {
         0 => glam::Vec3::new(-arm_x, 4.0, 0.0),
         1 => glam::Vec3::new(arm_x, 4.0, 0.0),
+        // The legs and the body (12 pixels long, centred on their pivot's x and z).
         _ => glam::Vec3::new(0.0, 6.0, 0.0),
     }
 }
 
-/// The poses of a bent limb's lower half and of the band that fills the bend: `bend` (`[axis,
+/// The body's bend in `posed`, if a mod bent it: the matrix (in blocks, as [`super::render::posed`]
+/// gives it) of its upper half in the body's space, which carries what hangs from the shoulders,
+/// a cape or elytra.
+pub fn upper_body(posed: Option<&ModPose>) -> Option<glam::Mat4> {
+    let bend = posed?.bends[BODY_BEND]?;
+    let (upper, _) = bend_poses(joint(BODY_BEND, false), bend);
+    Some(super::render::posed(glam::Mat4::IDENTITY, upper))
+}
+
+/// The body's index in [`ModPose::bends`] and [`super::LIMBS`].
+pub const BODY_BEND: usize = 4;
+
+/// `pose`, of a part whose parent is the body, carried by the body's upper half as `upper` (from
+/// [`upper_body`]) turns it.
+pub fn carried(upper: glam::Mat4, pose: [f32; 9]) -> [f32; 9] {
+    let (scale, rotation, t) =
+        (upper * super::render::posed(glam::Mat4::IDENTITY, pose)).to_scale_rotation_translation();
+    let (z, y, x) = rotation.to_euler(glam::EulerRot::ZYX);
+    let t = t * 16.0;
+    [t.x, t.y, t.z, x, y, z, scale.x, scale.y, scale.z]
+}
+
+/// The poses of a bent limb's lower half (the body's upper half) and of the band that fills the bend: `bend` (`[axis,
 /// angle]`, as [`ModPose::bends`]) about `joint`.
 pub fn bend_poses(joint: glam::Vec3, bend: [f32; 2]) -> ([f32; 9], [f32; 9]) {
     let [axis, angle] = bend;
@@ -972,7 +996,7 @@ fn setup_posed(
 }
 
 /// Lays the parts a mod posed over `p`, those of `rest`'s parts the model has, and bends the
-/// limbs it bent that the model split at the joint (`Part::split_limbs`).
+/// limbs and body it bent that the model split at the joint (`Part::split_limbs`).
 fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], slim: bool, p: &mut Poses) {
     for (i, pose) in posed.parts.iter().enumerate() {
         if let Some(pose) = pose
@@ -985,13 +1009,13 @@ fn mod_pose(posed: &ModPose, rest: [Option<[f32; 9]>; 6], slim: bool, p: &mut Po
         let Some(bend) = *bend else {
             continue;
         };
-        if !p.has(limb.lower) {
+        if !p.has(limb.half) {
             continue;
         }
-        let (lower, filler) = bend_poses(joint(i, slim), bend);
-        for name in [limb.lower, limb.lower_overlay] {
+        let (half, filler) = bend_poses(joint(i, slim), bend);
+        for name in [limb.half, limb.half_overlay] {
             if p.has(name) {
-                *p.get(name) = lower;
+                *p.get(name) = half;
             }
         }
         for name in [limb.filler, limb.filler_overlay] {
@@ -1378,6 +1402,37 @@ mod body_pose_tests {
         assert!((filler[7] - 2.0 * FRAC_PI_4.sin()).abs() < 1e-6);
         assert!(at(filler, joint).distance(joint) < 1e-5);
         assert_eq!(bend_poses(joint, [0.3, 0.0]).1, [0.0; 9]);
+    }
+
+    #[test]
+    fn a_bent_body_bows_its_chest_and_carries_the_cape() {
+        use std::f32::consts::FRAC_PI_2;
+        let at = |pose: [f32; 9], v: glam::Vec3| {
+            super::super::render::posed(glam::Mat4::IDENTITY, pose).transform_point3(v / 16.0)
+                * 16.0
+        };
+        let waist = joint(BODY_BEND, true);
+        assert_eq!(waist, glam::Vec3::new(0.0, 6.0, 0.0));
+        let mut posed = ModPose::default();
+        assert!(upper_body(Some(&posed)).is_none() && upper_body(None).is_none());
+        // A quarter turn the positive way: the neck, 6 pixels above the waist, comes forwards
+        // (towards -z, where the face looks).
+        posed.bends[BODY_BEND] = Some([0.0, FRAC_PI_2]);
+        let (chest, _) = bend_poses(waist, [0.0, FRAC_PI_2]);
+        let neck = at(chest, glam::Vec3::ZERO);
+        assert!(
+            neck.distance(glam::Vec3::new(0.0, 6.0, -6.0)) < 1e-4,
+            "{neck}"
+        );
+        // The cape, hung from the shoulders at the back, goes with the chest.
+        let upper = upper_body(Some(&posed)).unwrap();
+        let cape = [0.0, 0.0, 2.0, 0.1, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let carried = carried(upper, cape);
+        let hem = glam::Vec3::new(0.0, 16.0, 1.0);
+        let want = upper.transform_point3(
+            super::super::render::posed(glam::Mat4::IDENTITY, cape).transform_point3(hem / 16.0),
+        ) * 16.0;
+        assert!(at(carried, hem).distance(want) < 1e-3);
     }
 }
 

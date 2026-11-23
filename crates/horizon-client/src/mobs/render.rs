@@ -1624,8 +1624,17 @@ pub fn cape(
     let now = glam::Quat::from_euler(glam::EulerRot::ZYX, pose[5], pose[4], pose[3]);
     let (z, y, x) = (now * by).to_euler(glam::EulerRot::ZYX);
     (pose[3], pose[4], pose[5]) = (x, y, z);
+    // It hangs from the shoulders: a body a mod bent (`set_player_pose`) carries it on its chest.
+    if let Some(upper) = anim::upper_body(m.mod_pose.as_deref()) {
+        *pose = anim::carried(upper, *pose);
+    }
     // RenderTypes.entitySolid with OverlayTexture.NO_OVERLAY.
     draw(model, base, &poses, uv, 0xFFFF_FFFF, light, 0, out);
+}
+/// The matrix (in blocks) of the upper half of `m`'s body in the body's space when a mod bent it
+/// at the waist (`set_player_pose`), for what hangs from the shoulders: the elytra's wings.
+pub fn upper_body(m: &Mob) -> Option<glam::Mat4> {
+    anim::upper_body(m.mod_pose.as_deref())
 }
 /// `Deadmau5EarsLayer.submit` with `PlayerEarsModel`: the player model's
 /// head carrying two 6x6x1 ears (the model's other cubes are cleared),
@@ -1675,15 +1684,15 @@ const BODY_PARTS: [&str; 6] = [
 /// The cubes of a part as `ModelPart.cubes` has them: min and max corners in
 /// model units. The part keeps six faces per cube, in cube order.
 fn cube_bounds(part: &Part) -> Vec<[f32; 6]> {
-    // A player limb split at the joint (`Part::split_limbs`) is still the one cube.
-    if let Some(limb) = super::LIMBS.iter().find(|l| l.upper == part.name)
-        && let Some(lower) = part.children.iter().find(|c| c.name == limb.lower)
+    // A player limb or body split at the joint (`Part::split_limbs`) is still the one cube.
+    if let Some(limb) = super::LIMBS.iter().find(|l| l.part == part.name)
+        && let Some(half) = part.children.iter().find(|c| c.name == limb.half)
     {
         let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
         for v in part
             .polygons
             .iter()
-            .chain(&lower.polygons)
+            .chain(&half.polygons)
             .flat_map(|f| f.vertices)
         {
             for k in 0..3 {
@@ -1766,13 +1775,20 @@ fn stuck_placements(
 }
 
 /// The part that carries what is stuck at height `y` of the cube `cube` (`cube_bounds`) of the
-/// part `name`: the lower half (`Limb::lower`) of a limb split at the joint when `y` lies past
-/// the joint, half way down, so it moves with a bent forearm or shin; else `name` itself.
+/// part `name`: the half that turns (`Limb::half`) of a limb or body split at the joint, half way
+/// down, when `y` lies on that half's side (below the joint for a limb, above it for the body),
+/// so it moves with a bent forearm, shin or chest; else `name` itself.
 fn stuck_part(name: &str, cube: [f32; 6], y: f32) -> &str {
-    match super::LIMBS.iter().find(|l| l.upper == name) {
-        Some(limb) if y > (cube[1] + cube[4]) * 0.5 => limb.lower,
-        _ => name,
-    }
+    let Some(limb) = super::LIMBS.iter().find(|l| l.part == name) else {
+        return name;
+    };
+    let joint = (cube[1] + cube[4]) * 0.5;
+    let turns = if limb.upper_turns {
+        y < joint
+    } else {
+        y > joint
+    };
+    if turns { limb.half } else { name }
 }
 
 /// `StuckInBodyLayer.submit` (with `submitStuckItem`) for a player: `count`
@@ -2666,8 +2682,8 @@ fn hand_base(
     // joint: the hand's offset stays the one the arm gives it.
     if avatar(m) {
         let limb = &super::LIMBS[usize::from(left)];
-        if let Some(lower) = poses.pose_of(limb.lower)
-            && lower != find_part(model, limb.lower).map_or(lower, |p| p.pose)
+        if let Some(lower) = poses.pose_of(limb.half)
+            && lower != find_part(model, limb.half).map_or(lower, |p| p.pose)
         {
             let arm_m = part_matrix(model, base, poses, arm, 0.0)?;
             // A zero scale (the arm's or the whole model's) leaves no arm to turn about: the
@@ -3300,17 +3316,21 @@ mod tests {
         assert_eq!(snap_to_face(0.1), 0.5);
     }
 
-    /// What sticks in a split limb past its joint, half way down the cube, rides the lower half
-    /// (`stuck_in_body`), so it follows a bent forearm or shin; above the joint, or in a part that
-    /// does not split, it stays on the part it was drawn for.
+    /// What sticks in a split limb or body on the side of its joint that turns, half way down
+    /// the cube, rides that half (`stuck_in_body`), so it follows a bent forearm, shin or chest;
+    /// on the other side, or in a part that does not split, it stays on the part it was drawn for.
     #[test]
-    fn a_stuck_item_past_the_joint_rides_the_lower_half() {
+    fn a_stuck_item_past_the_joint_rides_the_half_that_turns() {
         let arm = [-3.0, -2.0, -2.0, 1.0, 10.0, 2.0];
         assert_eq!(stuck_part("right_arm", arm, 3.0), "right_arm");
         assert_eq!(stuck_part("right_arm", arm, 5.0), "right_forearm");
         let leg = [-2.0, 0.0, -2.0, 2.0, 12.0, 2.0];
         assert_eq!(stuck_part("left_leg", leg, 11.0), "left_shin");
         assert_eq!(stuck_part("left_leg", leg, 1.0), "left_leg");
+        // The body turns its upper half: what sticks in the chest bows with it.
+        let body = [-4.0, 0.0, -2.0, 4.0, 12.0, 2.0];
+        assert_eq!(stuck_part("body", body, 3.0), "chest");
+        assert_eq!(stuck_part("body", body, 9.0), "body");
         assert_eq!(
             stuck_part("head", [-4.0, -8.0, -4.0, 4.0, 0.0, 4.0], -1.0),
             "head"
