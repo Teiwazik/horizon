@@ -2670,7 +2670,12 @@ fn hand_base(
             && lower != find_part(model, limb.lower).map_or(lower, |p| p.pose)
         {
             let arm_m = part_matrix(model, base, poses, arm, 0.0)?;
-            t = arm_m * posed(glam::Mat4::IDENTITY, lower) * arm_m.inverse() * t;
+            // A zero scale (the arm's or the whole model's) leaves no arm to turn about: the
+            // matrix has no inverse, and the item stays where the arm has it.
+            let inverse = arm_m.inverse();
+            if inverse.is_finite() {
+                t = arm_m * posed(glam::Mat4::IDENTITY, lower) * inverse * t;
+            }
         }
     }
     if m.species() == Species::Vex {
@@ -3310,6 +3315,49 @@ mod tests {
             stuck_part("head", [-4.0, -8.0, -4.0, 4.0, 0.0, 4.0], -1.0),
             "head"
         );
+    }
+
+    /// A bent forearm (`set_player_pose`) turns the held item about the arm's joint; on an arm
+    /// scaled to nothing there is no joint to turn about (the arm's matrix has no inverse) and
+    /// the hand keeps the arm's own matrix, finite, instead of NaN.
+    #[test]
+    fn a_bent_forearm_on_an_arm_scaled_to_nothing_keeps_the_hand_finite() {
+        let rest = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let part = |name: &str, pose: [f32; 9], children: Vec<Part>| Part {
+            name: name.to_owned(),
+            pose,
+            polygons: Vec::new(),
+            children,
+        };
+        let arm = [-5.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let forearm = part("right_forearm", rest, Vec::new());
+        let model = part("root", rest, vec![part("right_arm", arm, vec![forearm])]);
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.id = "minecraft:player".into();
+        let mob = Mob::new(
+            1,
+            std::sync::Arc::new(kind),
+            horizon_core::geometry::Vec3::ZERO,
+            0.0,
+        );
+        let hand = |poses: &Poses| {
+            hand_base(&mob, &model, glam::Mat4::IDENTITY, poses, &[], false).unwrap()
+        };
+        let mut poses = Poses::new(&model);
+        let straight = hand(&poses);
+        // The elbow bent: the forearm leaves its rest pose.
+        *poses.get("right_forearm") = [0.0, 4.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let bent = hand(&poses);
+        assert!(bent.is_finite());
+        assert!(
+            !bent.abs_diff_eq(straight, 1e-4),
+            "the item turns with the forearm"
+        );
+        poses.get("right_arm")[6] = 0.0;
+        let flat = hand(&poses);
+        assert!(flat.is_finite(), "{flat}");
+        *poses.get("right_forearm") = rest;
+        assert_eq!(flat, hand(&poses), "the item stays where the arm has it");
     }
 
     #[test]
