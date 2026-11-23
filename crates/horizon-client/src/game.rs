@@ -2032,6 +2032,10 @@ struct Game<'a> {
     fangs: fangs::FangState,
     /// The local player as a model (third person, the inventory).
     player_model: Option<Mob>,
+    /// Whether a player model may still carry a pose a mod set (`set_player_pose`) in an earlier
+    /// frame: set while a mod listens, so the frame after the last listener left clears them once.
+    /// Each window's own, since splitscreen windows share the thread.
+    players_posed: bool,
     block_entity_tick_key: Option<block_entity_tick_items::Key>,
     block_entity_tick_items: Option<Box<block_entity_tick_items::Scope>>,
     wasm_dispatch_failures: std::rc::Rc<std::cell::Cell<u64>>,
@@ -5420,8 +5424,6 @@ impl Game<'_> {
         // LevelExtractor.extract: the transient blocks queued since the last frame.
         self.drain_transient_block_queue();
         self.prepare_entity_culling(camera);
-        // The mods' `set_player_pose`: each player model's body for this frame, before any is drawn.
-        self.pose_players(alpha as f32);
         self.prepare_occlusion_culling(camera);
         self.prepare_trims();
         self.begin_skinning();
@@ -8654,6 +8656,11 @@ impl Game<'_> {
         });
         let _projection_frame = (!title).then(|| self.activate_projection_frame());
         pr.lap("pr_projection");
+        // The mods' `set_player_pose`: each player model's body for this frame, before any is
+        // drawn, the inventory's preview of the player in the HUD as much as the entity pass.
+        if !title {
+            self.pose_players(alpha as f32);
+        }
         // GUI hooks project against this frame's camera, including its bob/spin and FOV.
         let mut hud = std::mem::replace(&mut self.hud_batch, HudBatch::scratch([1, 1]));
         horizon_client::spans::time("hud", || self.hud_into(size, &mut hud));
@@ -11365,6 +11372,7 @@ impl<'a> Game<'a> {
             requested_camera_type: Default::default(),
             fangs: Default::default(),
             player_model: None,
+            players_posed: false,
         };
         game.reset_entity_residency();
         Ok(game)

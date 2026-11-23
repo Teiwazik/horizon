@@ -1,4 +1,4 @@
-//! The mods' `set_player_pose` hook: once a frame, before the entity pass draws, each player model (this
+//! The mods' `set_player_pose` hook: once a frame, before the HUD and the entity pass draw, each player model (this
 //! window's own and the other players of the level) is posed as vanilla and its emote pose it, and
 //! the mods may set its head, body, arms and legs and bend its elbows and knees. What they set is kept on the model for the
 //! frame (`Mob::mod_pose`) and laid over by `anim::setup`, which every draw of the model asks:
@@ -8,13 +8,6 @@ use super::Game;
 use super::native_mob_draw::{PlayerRender, mob_render, render_id};
 use horizon_client::mobs::{Mob, anim, render};
 use mod_api::{HookId, PlayerBodyPose};
-use std::cell::Cell;
-
-thread_local! {
-    /// Whether a model may still carry a pose from an earlier frame: set while a mod listens, so
-    /// the frame after the last listener left clears them once.
-    static POSED: Cell<bool> = const { Cell::new(false) };
-}
 
 /// Whether `m` is another player's model (not a mannequin's).
 fn is_player(m: &Mob) -> bool {
@@ -22,12 +15,14 @@ fn is_player(m: &Mob) -> bool {
 }
 
 impl Game<'_> {
-    /// Asks the mods to pose each player model at `partial` this frame (`set_player_pose`), before
-    /// any model is drawn. With no listener it returns at once, after clearing the poses once
-    /// when the last listener left.
+    /// Asks the mods to pose each player model this frame (`set_player_pose`), before any model is
+    /// drawn: the others at the level's `partial`, the window's own at the partial tick it is
+    /// drawn with (`own_player_alpha`: smooth while the level is frozen, a replay's clock while
+    /// one plays). With no listener it returns at once, after clearing the poses once when the
+    /// last listener left.
     pub(in crate::game) fn pose_players(&mut self, partial: f32) {
         if !mod_api::__private::listened(HookId::SetPlayerPose) {
-            if POSED.replace(false) {
+            if std::mem::take(&mut self.players_posed) {
                 if let Some(m) = self.player_model.as_mut() {
                     m.mod_pose = None;
                 }
@@ -37,7 +32,7 @@ impl Game<'_> {
             }
             return;
         }
-        POSED.set(true);
+        self.players_posed = true;
         // Asked with the models borrowed: what each mod set, applied after.
         let own = self.player_model.as_ref().map(|m| {
             let name = self.own_profile_name();
@@ -45,7 +40,8 @@ impl Game<'_> {
                 name: &name,
                 local: true,
             };
-            self.player_mod_pose(m, &who, self.own_uuid(), partial)
+            let own_partial = self.own_player_alpha() as f32;
+            self.player_mod_pose(m, &who, self.own_uuid(), own_partial)
         });
         let others: Vec<(u32, Option<Box<anim::ModPose>>)> = self
             .mobs
