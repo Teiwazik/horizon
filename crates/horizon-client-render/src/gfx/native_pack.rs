@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use glam::Mat4;
 use horizon_shader_api::check::CheckedStage;
-use horizon_shader_api::{Report, StageKind};
+use horizon_shader_api::{Jitter, Report, StageKind};
 
 use crate::mesher::Vertex;
 
@@ -47,6 +47,8 @@ pub struct NativePack {
     pub traces: bool,
     /// Its terrain pipelines bind the arenas' quad looks (`looks::wanted`): sections carry them.
     pub looks: bool,
+    /// `[frame] jitter`: it asks for the world's sub-pixel offset under its own post chain.
+    pub jitter: bool,
     /// With kept resources, what lets a rebuild keep them (`carry`).
     kept: Option<super::native_post::kept::Signature>,
 }
@@ -573,6 +575,11 @@ impl NativePack {
         let pack = Self {
             traces: report.manifest.ray_tracing.is_some(),
             looks: terrain.looks.is_some(),
+            jitter: match &report.manifest.jitter {
+                Jitter::Off => false,
+                Jitter::On => true,
+                Jitter::While(id) => option_on(constants, Some(id)),
+            },
             kept,
             frame,
             sky,
@@ -736,6 +743,8 @@ impl NativePack {
             looks: self.looks,
             engine_resolve,
             engine_upscale: engine_resolve && self.post.upscalable(),
+            // Where the renderer resolves the world, its TAA jitters it already.
+            jitter: self.jitter && !engine_resolve,
         }
     }
 
@@ -1013,9 +1022,31 @@ file = \"material.wgsl\"
             linear: true,
             ..terrain_shape(&globals, &empty)
         };
-        let built = NativePack::new(&device, &queue, &linear, pack(""), &[], Default::default());
-        let linear = built.expect("the pack builds").0.capabilities();
-        assert_eq!(linear, Capabilities::default());
+        let linear_does = |stages: &str| {
+            let built = NativePack::new(
+                &device,
+                &queue,
+                &linear,
+                pack(stages),
+                &[],
+                Default::default(),
+            );
+            built.expect("the pack builds").0.capabilities()
+        };
+        assert_eq!(linear_does(""), Capabilities::default());
+        // `[frame] jitter`: a pack that resolves its own world gets TAA's offset alone; where
+        // the renderer resolves it, its TAA jitters already.
+        let jitter = "[frame]\njitter = true\n";
+        let jittered = Capabilities {
+            jitter: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(linear_does(jitter), jittered);
+        assert_eq!(
+            linear_does("[frame]\njitter = false\n"),
+            Capabilities::default()
+        );
+        assert_eq!(does(jitter), plain);
         let hides = Capabilities {
             hides_clouds: true,
             hides_sun: true,

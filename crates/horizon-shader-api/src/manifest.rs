@@ -65,6 +65,27 @@ pub enum Fog {
     Pack,
 }
 
+/// `[frame] jitter`: whether Horizon moves the world's projection by TAA's sub-pixel offset
+/// every frame under the pack's own `[[post]]` chain, and says it in `frame.jitter`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Jitter {
+    /// `false` or absent: no offset while the pack's post chain draws the frame.
+    #[default]
+    Off,
+    /// `true`: the offset every frame.
+    On,
+    /// The id of an option: the offset while it is not 0 (a bool on, a number other than 0),
+    /// as the pack's temporal pass runs.
+    While(String),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawJitter {
+    On(bool),
+    While(String),
+}
+
 impl Primaries {
     /// `Frame.luminance`: the weights that give a colour's luminance in these primaries.
     pub const fn luminance(self) -> [f32; 3] {
@@ -130,6 +151,8 @@ pub struct Manifest {
     pub entity_coverage: Coverage,
     /// `[frame] fog`.
     pub fog: Fog,
+    /// `[frame] jitter`.
+    pub jitter: Jitter,
     pub options: Vec<PackOption>,
     /// How the settings page lays the options out; the first page is the one it opens on.
     /// Empty: one page with every option.
@@ -629,6 +652,7 @@ struct RawFrame {
     blend: Option<String>,
     primaries: Option<String>,
     fog: Option<String>,
+    jitter: Option<RawJitter>,
 }
 
 #[derive(Default, Deserialize)]
@@ -820,6 +844,11 @@ impl Manifest {
             None | Some("engine") => Fog::Engine,
             Some("pack") => Fog::Pack,
             Some(f) => return Err(err(format!("frame.fog {f:?}: engine or pack"))),
+        };
+        let jitter = match raw.frame.as_ref().and_then(|f| f.jitter.as_ref()) {
+            None | Some(RawJitter::On(false)) => Jitter::Off,
+            Some(RawJitter::On(true)) => Jitter::On,
+            Some(RawJitter::While(id)) => Jitter::While(id.clone()),
         };
         let id_ok = (1..=64).contains(&raw.id.len())
             && raw
@@ -1195,6 +1224,11 @@ impl Manifest {
             }
             ms => ms.map(|ms| ms as f32),
         };
+        if let Jitter::While(id) = &jitter
+            && !options.iter().any(|o| o.id == *id)
+        {
+            return Err(err(format!("frame.jitter: `{id}` is no option")));
+        }
         if let Some(r) = &raw.reflection {
             if raw.material.is_none() {
                 return Err(err("[reflection] needs [material]".into()));
@@ -1323,6 +1357,7 @@ impl Manifest {
             material_coverage,
             entity_coverage,
             fog,
+            jitter,
             options,
             pages,
             tags: raw.tags,
