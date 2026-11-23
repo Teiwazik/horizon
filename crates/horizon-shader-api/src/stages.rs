@@ -1529,7 +1529,7 @@ struct HorizonPostOut {
 
 /// The post stage's entry points, as the renderer builds them: a full-screen triangle, and a
 /// fragment that calls the pack's `post` for each pixel. The chain's targets hold linear light,
-/// so nothing converts, and the pass's alpha is ignored.
+/// so nothing converts, and the alpha of a pass that draws the next `previous` is ignored.
 const POST_ENTRIES: &str = concat!(
     post_vertex!(),
     "\
@@ -1540,8 +1540,8 @@ const POST_ENTRIES: &str = concat!(
 "
 );
 
-/// A post pass whose `output` is a kept texture: the texture holds data, so the pass's alpha
-/// stays.
+/// A post pass with an `output`, a target of the pack's own or a kept texture: the texture holds
+/// data the pack reads back, so the pass's alpha stays.
 const POST_ENTRIES_KEPT: &str = concat!(
     post_vertex!(),
     "\
@@ -2482,10 +2482,7 @@ pub(crate) fn compose_traced(
         );
     } else if let (StageKind::Compute | StageKind::BeforeWorld, Some(stage)) = (kind, stage) {
         push("<entries>", &compute_entries(stage));
-    } else if kind == StageKind::Post
-        && let Some(output) = stage.and_then(|s| s.output.as_ref())
-        && m.kept.resources.iter().any(|r| r.name == *output)
-    {
+    } else if kind == StageKind::Post && stage.is_some_and(|s| s.output.is_some()) {
         push("<entries>", POST_ENTRIES_KEPT);
     } else {
         push("<entries>", &entries(kind.entries()));
