@@ -16,7 +16,8 @@ impl Launcher {
             .client_home
             .clone()
             .unwrap_or_else(|| game_home.clone());
-        match backend::switch_after_start_crash(&run_home, &game_home, api) {
+        let build = self.client_build.as_deref().unwrap_or_default();
+        match backend::switch_after_start_crash(&run_home, &game_home, api, build) {
             Ok(switched) => switched.then_some((crashed.label(), label)),
             Err(e) => {
                 eprintln!("Horizon launcher: could not switch to {label}: {e}");
@@ -25,49 +26,85 @@ impl Launcher {
         }
     }
 
-    /// The version Play starts: the selected instance's own, else the launcher's. None while the
-    /// instance's pinned version isn't installed ([`instances::Instance::missing_pin`]): Home says
-    /// so, and its worlds never open in another version.
+    /// The version Play starts. A Horizon instance with a missing pin has no playable build.
     pub(crate) fn selected(&self) -> Option<&String> {
-        match self.selected_instance() {
-            Some(i) if i.missing_pin(&self.installed).is_some() => None,
-            i => i
-                .and_then(|i| self.version_of(i))
-                .or_else(|| self.launcher_version()),
+        match self.selected_instance().filter(|i| i.java.is_none()) {
+            Some(instance) => self.version_of(instance),
+            None => self.launcher_version(),
         }
     }
 
-    /// The launcher's version: what instances without one of their own play.
+    /// The launcher's default resolution for screens that need a Horizon build without an instance.
     pub(crate) fn launcher_version(&self) -> Option<&String> {
-        self.settings
-            .selected
-            .as_ref()
-            .filter(|s| self.installed.contains(s))
+        let version = horizon_launcher::nightly::latest_for(
+            instances::Channel::Nightly,
+            &self.installed,
+            self.settings.selected.as_deref(),
+        )?;
+        self.installed.iter().find(|tag| **tag == version)
     }
 
     /// Installs `release` for an instance made or edited to play it, after the install running
     /// now if there is one.
     pub(crate) fn install_for_instance(&mut self, release: Release) {
-        match &self.installing {
-            Some((now, _)) if *now == release.tag => {}
-            Some(_) => self.install_next = Some(release),
-            None => {
-                self.instance_install = Some(release.tag.clone());
-                self.install(&release);
+        let running = self.installing.as_ref().map(|(tag, _)| tag.as_str());
+        enqueue_instance_install(&mut self.install_queue, running, release);
+        self.start_next_instance_install();
+    }
+
+    pub(super) fn start_next_instance_install(&mut self) {
+        if self.installing.is_some() {
+            return;
+        }
+        while let Some(release) = take_instance_install(&mut self.install_queue, &self.removing) {
+            // Another window or a retried Stable update may have supplied the queued build.
+            if backend::is_installed(&release.tag) {
+                if !self.installed.contains(&release.tag) {
+                    self.installed = backend::installed();
+                }
+                continue;
             }
+            self.instance_install = Some(release.tag.clone());
+            self.start_install(&release, None);
+            return;
         }
     }
 
     pub(crate) fn install(&mut self, release: &Release) {
-        if release.asset.is_none() || self.removing.contains(&release.tag) {
+        let id = self
+            .selected_instance()
+            .map_or_else(|| instances::DEFAULT.into(), |i| i.id.clone());
+        self.start_install(release, Some(id));
+    }
+
+    pub(super) fn start_install(&mut self, release: &Release, manual_target: Option<String>) {
+        if release.asset.is_none()
+            || self.installing.is_some()
+            || self.removing.contains(&release.tag)
+            || self
+                .install_queue
+                .iter()
+                .any(|queued| queued.tag == release.tag)
+        {
             return;
         }
+        let manual_target = match manual_target
+            .map(instances::manual_install_target)
+            .transpose()
+        {
+            Ok(target) => target,
+            Err(e) => {
+                self.install_error = Some((release.tag.clone(), e));
+                return;
+            }
+        };
         let (release, tx) = (release.clone(), self.tx.clone());
         let tag = release.tag.clone();
         self.installing = Some((tag.clone(), 0.0));
         self.install_started = Some(Instant::now());
         self.bar = (0., 0.);
-        self.install_error = None;
+        self.manual_install_for = manual_target;
+        clear_install_error_for(&mut self.install_error, &tag);
         let stable = self
             .stable_install
             .as_ref()
@@ -161,14 +198,20 @@ impl Launcher {
     /// start the same import (`import_dropped`) without a picker. Does nothing
     /// when one is already running. `Msg::Imported` ends it.
     pub(crate) fn start_build_import(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        if !self.can_import_build() {
+        let Some(instance) = self
+            .selected_instance()
+            .filter(|_| self.can_import_build())
+            .cloned()
+        else {
             return;
-        }
+        };
         self.importing_build = true;
         self.import_error = None;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Imported(build_import::import(&path, None)));
+            let _ = tx.send(Msg::Imported(build_import::import_for(
+                &path, None, &instance,
+            )));
         });
         cx.notify();
     }
@@ -212,7 +255,7 @@ impl Launcher {
                 self.settings.keep_installed_selection(&self.installed);
                 backend::forget_prepared();
             }
-            None => self.install(release),
+            None => self.install_for_instance(release.clone()),
         }
     }
 
@@ -274,11 +317,17 @@ impl Launcher {
     }
 
     pub(crate) fn play(&mut self) {
-        let java = self
+        let id = self
             .selected_instance()
-            .filter(|i| i.java.is_some())
-            .cloned();
-        if let Some(instance) = java {
+            .map_or(instances::DEFAULT, |i| i.id.as_str());
+        let instance = match instances::for_launch_id(id) {
+            Ok(instance) => instance,
+            Err(e) => {
+                self.client_error = Some(e);
+                return;
+            }
+        };
+        if instance.java.is_some() {
             // Mojang's game: no Horizon version or preparation, only no game already running.
             // It joins a server; a friend's code and opening a world are Horizon's.
             self.joining = None;
@@ -294,14 +343,18 @@ impl Launcher {
             self.start_java(instance, server);
             return;
         }
-        let Some(tag) = self.selected().cloned() else {
-            return;
+        let tag = match instance.resolve_version(None) {
+            Ok(tag) => tag,
+            Err(e) => {
+                self.client_error = Some(e);
+                return;
+            }
         };
         if !self.version_still_installed(&tag) || !self.can_start(&tag) {
             return;
         }
         self.starting_pack = None;
-        self.start_client(tag, self.selected_instance().map(|i| i.id.clone()));
+        self.start_client(tag, Some(instance.id));
     }
 
     /// Starts a Java instance's Minecraft, joining `server` if given: its files and Java first
@@ -364,7 +417,8 @@ impl Launcher {
     /// running or starting.
     pub(crate) fn can_start(&self, tag: &str) -> bool {
         let running = self.client.is_some() || self.starting_client.is_some();
-        starts_now(backend::is_prepared(tag), self.preparing, running)
+        self.settings.instance_versions_migrated
+            && starts_now(backend::is_prepared(tag), self.preparing, running)
     }
 
     /// Whether the selected instance's version can start now, from a shortcut (a server's Join,
@@ -372,6 +426,24 @@ impl Launcher {
     pub(crate) fn can_start_selected(&self) -> bool {
         self.selected_instance().is_none_or(|i| i.java.is_none())
             && self.selected().is_some_and(|tag| self.can_start(tag))
+    }
+
+    /// Starts Play's request after its version was prepared, once nothing else is starting:
+    /// a start whose pre-launch command still runs owns the window's Stop (Windows), and the
+    /// queued Play waits rather than taking the Stop over.
+    pub(crate) fn start_queued_play(&mut self) {
+        let start_busy = self.preparing
+            || self.pre_launch_stoppable()
+            || self.starting_client.is_some()
+            || self.client.is_some();
+        let Some((tag, instance)) = take_queued_play(&mut self.play_when_prepared, start_busy)
+        else {
+            return;
+        };
+        if backend::check_prepared(&tag) {
+            self.starting_pack = None;
+            self.start_client(tag, Some(instance));
+        }
     }
 
     /// Whether a server's Join starts the selected instance now: a Java instance too, as Play
@@ -386,7 +458,8 @@ impl Launcher {
     /// Starts the game: the session first (a network round trip when the token needs
     /// renewing), then `drain` starts the process when it arrives.
     pub(crate) fn start_client(&mut self, tag: String, instance_id: Option<String>) {
-        if !self.version_still_installed(&tag) {
+        // If the migration could not save a pin, starting Latest could upgrade a held world.
+        if !self.settings.instance_versions_migrated || !self.version_still_installed(&tag) {
             self.starting_pack = None;
             self.joining = None;
             self.quick_play = None;
@@ -418,6 +491,7 @@ impl Launcher {
         // round trip when the token needs renewing) come first; `drain` starts the game when the
         // session arrives.
         self.starting_client = Some(tag.clone());
+        self.client_build = Some(tag.clone());
         self.starting_instance = instance_id.clone();
         self.play_pressed = Some(Instant::now());
         let tx = self.tx.clone();
@@ -602,5 +676,103 @@ impl Launcher {
             }
         })
         .detach();
+    }
+}
+
+fn clear_install_error_for(error: &mut Option<(String, String)>, tag: &str) {
+    error.take_if(|(failed, _)| failed == tag);
+}
+
+fn enqueue_instance_install(
+    queue: &mut VecDeque<Release>,
+    running: Option<&str>,
+    release: Release,
+) {
+    if release.asset.is_some()
+        && running != Some(release.tag.as_str())
+        && queue.iter().all(|queued| queued.tag != release.tag)
+    {
+        queue.push_back(release);
+    }
+}
+
+fn take_instance_install(queue: &mut VecDeque<Release>, removing: &[String]) -> Option<Release> {
+    if queue
+        .front()
+        .is_some_and(|release| removing.contains(&release.tag))
+    {
+        return None;
+    }
+    queue.pop_front()
+}
+
+/// Takes the Play that waited for its version to be prepared, unless another start is under
+/// way: then it stays queued for [`Launcher::start_queued_play`] to try again.
+fn take_queued_play(
+    queued: &mut Option<(String, String)>,
+    start_busy: bool,
+) -> Option<(String, String)> {
+    if start_busy {
+        return None;
+    }
+    queued.take()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clear_install_error_for, enqueue_instance_install, take_instance_install, take_queued_play,
+        Release, VecDeque,
+    };
+
+    fn queued() -> Option<(String, String)> {
+        Some(("nightly-2026-11-19".into(), "instance-1".into()))
+    }
+
+    #[test]
+    fn instance_downloads_wait_in_order_and_keep_each_distinct_save() {
+        let release = |tag: &str| Release {
+            tag: tag.into(),
+            name: tag.into(),
+            body: String::new(),
+            date: String::new(),
+            time: String::new(),
+            asset: Some(("fixture".into(), 1)),
+            prerelease: false,
+            nightly: None,
+        };
+        let mut queue = VecDeque::new();
+        for tag in ["first", "second", "first", "running", "third"] {
+            enqueue_instance_install(&mut queue, Some("running"), release(tag));
+        }
+
+        assert!(take_instance_install(&mut queue, &["first".into()]).is_none());
+        for tag in ["first", "second", "third"] {
+            assert_eq!(take_instance_install(&mut queue, &[]).unwrap().tag, tag);
+        }
+        assert!(take_instance_install(&mut queue, &[]).is_none());
+    }
+
+    #[test]
+    fn starting_a_different_download_keeps_the_previous_failure_visible() {
+        let failed = ("first".to_owned(), "download failed".to_owned());
+        let mut error = Some(failed.clone());
+        clear_install_error_for(&mut error, "second");
+        assert_eq!(error, Some(failed));
+        clear_install_error_for(&mut error, "first");
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn a_queued_play_waits_for_a_pre_launch_command_to_finish() {
+        let mut waiting = queued();
+        assert_eq!(take_queued_play(&mut waiting, true), None);
+        assert_eq!(
+            waiting,
+            queued(),
+            "a queued Play is kept while another start holds the Stop"
+        );
+        assert_eq!(take_queued_play(&mut waiting, false), queued());
+        assert_eq!(waiting, None, "once no start holds the Stop, it is taken");
     }
 }

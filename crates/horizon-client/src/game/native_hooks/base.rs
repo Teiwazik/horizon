@@ -1022,6 +1022,15 @@ impl Game<'_> {
     ) {
         Self::fire_standalone_models(context, models, forms);
     }
+    /// Entity-context outlines and collisions for vanilla blocks, declared in code as a
+    /// `data/<id>/horizon/vanilla_block_shapes/*.json` file declares them. Asked once at
+    /// start, on every side, before any resource loads; dispatch names the declaring mod.
+    pub(in crate::game) fn native_vanilla_block_shapes(
+        context: &mod_api::RegistrationContext,
+        shapes: &mut Vec<mod_api::Answered<mod_api::VanillaBlockShapes>>,
+    ) {
+        Self::fire_vanilla_block_shapes(context, shapes);
+    }
     /// The player changed setting `key` of mod `mod_id` on its page in Options > Mods; the new
     /// value is kept already.
     pub(in crate::game) fn native_setting_changed(&mut self, mod_id: &str, key: &str) {
@@ -1840,6 +1849,20 @@ impl Game<'_> {
         status: i32,
     ) {
         self.fire_resource_pack_status(player, name, status);
+    }
+    /// `native_resource_pack_status` with `pack`, the id of the pack it answers
+    /// (`ServerboundResourcePackPacket.id`, the id a pack pushed by
+    /// `player.push_resource_pack` was given). Heard just before the version
+    /// without it, which keeps its arguments and its firing point; also heard
+    /// while the player is dead.
+    pub(in crate::game) fn native_resource_pack_status_v2(
+        &mut self,
+        player: u128,
+        name: &str,
+        pack: u128,
+        status: i32,
+    ) {
+        self.fire_resource_pack_status_v2(player, name, pack, status);
     }
     /// A server player places a hanging entity: an item frame
     /// (`minecraft:item_frame`, `minecraft:glow_item_frame`), a painting
@@ -4812,6 +4835,23 @@ impl Game<'_> {
             .get(kind)
             .cloned()
             .unwrap_or_default()
+    }
+    /// The recipe types `recipes_of_type` answers, sorted: each type with a recipe in force
+    /// and each type a registered serializer produces. Empty outside a world.
+    pub(in crate::game) fn recipe_types(&self) -> Arc<[String]> {
+        if self.outside_world() {
+            return Default::default();
+        }
+        let with_recipes = (self.recipes().by_type.iter())
+            .filter(|(_, recipes)| !recipes.is_empty())
+            .map(|(kind, _)| kind.clone());
+        let registered = mod_api::__private::parts_installation::recipe_serializers()
+            .into_iter()
+            .map(|(_, kind)| kind);
+        let mut types: Vec<String> = with_recipes.chain(registered).collect();
+        types.sort();
+        types.dedup();
+        types.into()
     }
     /// An ingredient as a recipe's JSON names it: an item, a `#tag`, or a list
     /// of them, a bare id as `minecraft:` (as vanilla reads it); `test` says

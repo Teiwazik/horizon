@@ -32,11 +32,11 @@ fn set_key(tag: &mut Tag, key: &str, value: Tag) {
 /// `SummonCommand.spawnEntity`'s name for a kind no command target stands for:
 /// its entity type's. An item is the exception: `EntityType`'s factory leaves
 /// `ItemStack.EMPTY`, which `ItemEntity.readAdditionalSaveData` discards, and
-/// `ItemEntity.getName` reads that empty stack's `getItemName` — an empty
-/// component, not the type's name.
+/// `ItemEntity.getName` reads that empty stack's item name, which is the
+/// air item's: "Air" (`block.minecraft.air`), not the type's name.
 pub(super) fn summon_type_name(kind: &str) -> Text {
     if kind.trim_start_matches("minecraft:") == "item" {
-        return Text::empty();
+        return Text::translate("block.minecraft.air", &[]);
     }
     Text::translate(&super::entity_name_key(kind), &[])
 }
@@ -179,7 +179,9 @@ impl Game<'_> {
             Target::Stand(id) => {
                 let uuid = self.uuid_for(id);
                 let a = self.armor_stands.iter().find(|a| a.id == id)?;
-                entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&id))
+                let mut tag = entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&id));
+                self.save_portal_cooldown(id, &mut tag);
+                tag
             }
             Target::Frame(id) => {
                 let uuid = self.uuid_for(id);
@@ -881,6 +883,14 @@ impl Game<'_> {
         | Target::Fangs(id)
         | Target::Projectile(id) = t
         {
+            // Entity.load: only the kinds whose data reads overlay the live
+            // counter, so an unrelated merge writes back what it just read.
+            if matches!(
+                t,
+                Target::Item(_) | Target::Stand(_) | Target::Boat(_) | Target::Cart(_)
+            ) {
+                self.restore_portal_cooldown(id, &tag);
+            }
             self.persist.raw.insert(id, tag);
         }
         Ok(())

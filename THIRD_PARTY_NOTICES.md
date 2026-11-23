@@ -106,6 +106,8 @@ The GLSL frontend also resets the common type for each comma-separated declarato
 variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
+It limits recursive parsing and lowering of GLSL after preprocessing and reports a source diagnostic
+when the nesting limit is exceeded.
 The HLSL backend writes an ordinary level-zero texture sample as `SampleLevel(..., 0.0)`, while
 comparison textures keep `SampleCmpLevelZero`; HLSL has no ordinary `SampleLevelZero` method.
 The shared interpolation defaults also compile with `glsl-in` alone, without needing the
@@ -120,9 +122,10 @@ The Windows x64 game folder holds `dxcompiler.dll`, Microsoft's DirectX Shader C
 `bin/x64/dxcompiler.dll` of `dxc_2026_09_29.zip` (zip SHA-256
 `ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1`, DLL SHA-256
 `0689e2fee0a1c9df8662a59680469f24e2a3ad7ce6bbbcc9284f7a83172bfc59`, 22,274,872 bytes). The release build downloads
-it and checks both checksums (`tools/ci/fetch_dxc.py`); it is not in this repository. DirectX 12 loads it only on
-integrated GPUs (`crates/horizon-client-render/src/gfx/dx12_compiler.rs`,
-[#8513](https://github.com/horizon-rust/horizon/issues/8513)); every other GPU compiles with FXC, part of Windows.
+it and checks both checksums (`tools/ci/fetch_dxc.py`); it is not in this repository. DirectX 12 loads it on
+integrated GPUs, and on a discrete GPU only when ray tracing or mesh shaders ask for Shader Model 6.5
+(`crates/horizon-client-render/src/gfx/dx12_compiler.rs`,
+[#8513](https://github.com/horizon-rust/horizon/issues/8513)); otherwise the GPU compiles with FXC, part of Windows.
 
 Copyright (c) Microsoft Corporation. It is not covered by Horizon's MIT license. It is distributed under the
 "Microsoft Software License Terms, Microsoft DirectX Shader Compiler" (`LICENSE-MS.txt` of that release). Its
@@ -388,6 +391,9 @@ Horizon (Copyright (c) 2026 Ludovic Marie and the Horizon contributors).
 
 `crates/horizon-client-render/src/touch.rs` and `touch/tests/` are adapted from the touch input
 state of Starling's `crates/horizon-client-render/src/touch.rs` at the same commit.
+
+`crates/horizon-client-render/src/touch/custom.rs` is adapted from the custom buttons of Starling's
+`crates/horizon-client-render/src/touch.rs` at the same commit.
 
 `crates/horizon-client-render/src/touch/draw.rs` is adapted from the touch control drawing in
 Starling's `crates/horizon-client-render/src/touch.rs` at the same commit.

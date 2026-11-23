@@ -93,6 +93,22 @@ pub trait LevelsBackend {
     /// None for a stale or unavailable level. Does not load chunks.
     #[access(WorldOnly)]
     fn level_get_sky_darken(&self, level: LevelRef) -> Option<i32>;
+    /// Side: server.
+    /// `level.environmentAttributes().getValue(attribute, pos)` for a float environment
+    /// attribute (`visual/sky_light_factor`, `gameplay/sky_light_level`; the `minecraft:`
+    /// namespace may be left out): the level's stack of dimension type, timelines on its clock
+    /// and weather, with the one biome at `pos` and no spatial interpolation (the noise biome,
+    /// or the block's biome for an attribute with full-resolution biomes). Reads an active or
+    /// parked server level and loads nothing; a biome layer of an unloaded column is skipped.
+    /// None on a client, for a stale or unavailable level, an unknown attribute and one that
+    /// isn't a float.
+    #[access(WorldOnly)]
+    fn level_environment_float(
+        &self,
+        level: LevelRef,
+        attribute: &str,
+        pos: [f64; 3],
+    ) -> Option<f32>;
     /// Side: both.
     /// `BlockGetter.getBlockFloorHeight` with the normal collision shapes and an empty
     /// entity context. The result is relative to the block: negative infinity means no floor.
@@ -294,9 +310,11 @@ pub trait LevelsBackend {
     /// finite (NaN or infinite). A minimum above its maximum is the same box
     /// with the two swapped, as vanilla's `AABB`. On a client (`ClientLevel`),
     /// the entities the server tracks to it, other players among them, and the
-    /// window's own player, with the same walk.
+    /// window's own player, with the same walk. A display's zero-size physical
+    /// box intersects when its position is strictly inside the query.
     /// None there before login and for a level it does not show. The walk
-    /// is in entity-list order followed by players. Every entity list is walked
+    /// is in entity-list order, with displays (by entity id on a client)
+    /// before the dragon and the final player entries. Every entity list is walked
     /// once per call: O(entities) regardless of the box. Each overlapping mob
     /// resolves through a mob-list scan: O(K*N) for K overlapping mobs and N mobs. Tridents do not
     /// resolve; frames, paintings and other special entities
@@ -682,6 +700,15 @@ pub trait LevelsBackend {
     /// blocks it. None as for `brightness`.
     #[access(WorldOnly)]
     fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
+    /// Side: server.
+    /// `LevelReader.canSeeSkyFromBelowWater`: at or above the level's sea level (`sea_level`)
+    /// the same as `can_see_sky`; below it, whether the column sees the sky at sea level and
+    /// every block from there down to `pos` (not counted) dampens no light or is water, lava or a
+    /// bubble column. Kelp, seagrass and waterlogged blocks stop it. Natural spawning asks it
+    /// (the guardian's rule), and so do mods that tell open water from caves. None for a stale
+    /// handle, a position that isn't loaded and on a client.
+    #[access(WorldOnly)]
+    fn level_can_see_sky_from_below_water(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
     /// Side: server.
     /// Whether nothing solid lies on the segment `from`..`to`, as
     /// `LivingEntity.hasLineOfSight` clips between two eyes (`ClipContext.Block.COLLIDER`,
@@ -1279,6 +1306,23 @@ pub trait LevelsBackendMut {
         count: i32,
     ) -> bool;
     /// Side: server.
+    /// `level_send_particles` around each of `positions`, in order, in one call:
+    /// every position is checked as the single one is, and all of them are
+    /// queued or none if any would be refused. It saves the mod's calls only:
+    /// each position is still a request of its own. An empty list queues
+    /// nothing and answers true; more than 4096 positions answer false.
+    #[access(WorldOnly)]
+    fn level_send_particles_at(
+        &mut self,
+        level: LevelRef,
+        options: &ParticleOptions,
+        state: Option<BlockState>,
+        positions: &[[f64; 3]],
+        spread: [f64; 3],
+        speed: f64,
+        count: i32,
+    ) -> bool;
+    /// Side: server.
     /// Plays level event `id` at `pos` with `data` for the players near it
     /// (`Level.levelEvent(null, id, pos, data)`): `1000`s are sounds, `2000`s
     /// particles, as vanilla's `LevelEvent` numbers them (`2001` breaks a
@@ -1525,7 +1569,8 @@ pub trait LevelsBackendMut {
     /// they award). True once the orbs are awarded, even if a mod keeps a new
     /// one out (`entity_join_level`). False, with no orbs, for 0, a
     /// value that isn't finite, on a client, for a stale handle or a level
-    /// not in place.
+    /// not in place. One call awards at most 1,000,000 points (about 400
+    /// orbs): a larger `amount` is cut to that, so award in several calls.
     #[access(WorldOnly)]
     fn level_award_experience(
         &mut self,

@@ -248,8 +248,32 @@ pub struct Packed {
     pub data: Option<Vec<u64>>,
 }
 
-/// Per-save-folder byte budget for cached canonical section palettes held by
-/// resident [`PalettedContainer`]s.
+/// A container's identity for a reader that remembers what it read: `uid` is unique among every
+/// container ever made (a clone, which is copy-on-write's way of editing a shared one, gets a new
+/// one), `edits` counts the `set` calls of this container since it was made. A reader that kept
+/// `(uid, edits)` and finds the same pair later knows the entries are the ones it read.
+#[derive(Debug)]
+struct Identity {
+    uid: u64,
+    edits: u32,
+}
+impl Default for Identity {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            uid: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            edits: 0,
+        }
+    }
+}
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// Byte budget for cached canonical section palettes held by resident
+/// [`PalettedContainer`]s, shared by every save folder that holds the `Arc`.
 #[derive(Debug)]
 pub struct SavedPaletteBudget {
     limit: usize,
@@ -311,9 +335,18 @@ pub struct PalettedContainer {
     bits: u8,
     palette: Palette,
     words: Vec<u64>,
+    /// Which container this is, and how many writes it has had (see [`Identity`]).
+    identity: Identity,
     saved_nbt: OnceLock<Arc<SavedNbt>>,
 }
 impl PalettedContainer {
+    /// `(uid, edits)`: equal to an earlier answer only if this is the same container and none of
+    /// its entries was written since (`edits` wraps after 2^32 writes; a reader that keeps a
+    /// stamp for that long is not one this serves).
+    #[inline]
+    pub fn stamp(&self) -> (u64, u32) {
+        (self.identity.uid, self.identity.edits)
+    }
     /// `new PalettedContainer(initialValue, strategy)`.
     pub fn new(strategy: Strategy, value: u32) -> Self {
         Self {
@@ -321,6 +354,7 @@ impl PalettedContainer {
             bits: 0,
             palette: Palette::Single(value),
             words: Vec::new(),
+            identity: Identity::default(),
             saved_nbt: OnceLock::new(),
         }
     }
@@ -476,6 +510,7 @@ impl PalettedContainer {
     }
     /// `getAndSet`: stores `value` and returns the previous one.
     pub fn set(&mut self, i: usize, value: u32) -> u32 {
+        self.identity.edits = self.identity.edits.wrapping_add(1);
         if self.saved_nbt.get().is_some() && self.get(i) != value {
             self.saved_nbt.take();
         }
@@ -669,6 +704,7 @@ impl PalettedContainer {
                 strategy,
                 bits,
                 words: pack_words(bits, ids.len(), ids.iter().copied()),
+                identity: Identity::default(),
                 palette: Palette::List(palette),
                 saved_nbt: OnceLock::new(),
             },
@@ -678,6 +714,7 @@ impl PalettedContainer {
                     strategy,
                     bits,
                     words: pack_words(bits, ids.len(), ids.iter().map(|&id| palette[id as usize])),
+                    identity: Identity::default(),
                     palette: Palette::Global,
                     saved_nbt: OnceLock::new(),
                 }
@@ -718,6 +755,7 @@ impl PalettedContainer {
                     bits,
                     palette: Palette::List(palette),
                     words,
+                    identity: Identity::default(),
                     saved_nbt: OnceLock::new(),
                 };
                 container.check_indices()?;
@@ -728,6 +766,7 @@ impl PalettedContainer {
                 bits: storage_bits,
                 palette: Palette::Global,
                 words,
+                identity: Identity::default(),
                 saved_nbt: OnceLock::new(),
             }),
         }
@@ -917,6 +956,7 @@ impl PalettedContainer {
                 strategy,
                 bits,
                 words: data.to_vec(),
+                identity: Identity::default(),
                 palette: Palette::List(palette),
                 saved_nbt: OnceLock::new(),
             };
@@ -986,15 +1026,24 @@ impl PalettedContainer {
         }
         (0..entries).any(|i| matching[self.raw(i)])
     }
-    /// Heap bytes held by the palette, the storage, and any cached canonical
-    /// saved palette.
+    /// Heap bytes held by the palette, the storage, and this container's share
+    /// of any cached canonical saved palette: clones share one entry, and each
+    /// counts its charge divided by the number of containers holding it, so
+    /// summing them counts the entry once.
     pub fn heap_bytes(&self) -> usize {
+        self.storage_heap_bytes()
+            + self
+                .saved_nbt
+                .get()
+                .map_or(0, |saved| saved.charge / Arc::strong_count(saved))
+    }
+    /// Heap bytes held by the palette and the storage.
+    fn storage_heap_bytes(&self) -> usize {
         self.words.capacity() * 8
             + match &self.palette {
                 Palette::List(list) => list.capacity() * 4,
                 _ => 0,
             }
-            + self.saved_nbt.get().map_or(0, |saved| saved.charge)
     }
 }
 impl PartialEq for PalettedContainer {
@@ -1072,6 +1121,28 @@ mod tests {
 
         drop(palette);
         assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn heap_bytes_counts_a_shared_cached_palette_once_across_clones() {
+        let mut palette = PalettedContainer::new(BLOCKS, 0);
+        palette.set(1, 1);
+        let base_heap = palette.heap_bytes();
+        let budget = Arc::new(SavedPaletteBudget::new(1 << 20));
+        palette.pack_nbt(Some(&budget), |id| Tag::Int(id as i32));
+        let charge = budget.used();
+        let clones = [palette.clone(), palette.clone(), palette.clone()];
+        let cached: usize = std::iter::once(&palette)
+            .chain(&clones)
+            .map(|holder| holder.heap_bytes() - holder.storage_heap_bytes())
+            .sum();
+        // Four holders: the entry counts once, not four times (less the rounding).
+        assert!(
+            cached <= charge && cached + 4 > charge,
+            "{cached} of {charge}"
+        );
+        drop(clones);
+        assert_eq!(palette.heap_bytes(), base_heap + charge);
     }
 
     #[test]
@@ -1456,6 +1527,7 @@ mod tests {
                 bits,
                 palette: Palette::List((0..len as u32).collect()),
                 words: words.to_vec(),
+                identity: Identity::default(),
                 saved_nbt: OnceLock::new(),
             };
             match (container.check_indices(), scan(strategy, bits, len, words)) {
@@ -1570,6 +1642,7 @@ mod tests {
                     bits,
                     palette: Palette::List(palette),
                     words: data.to_vec(),
+                    identity: Identity::default(),
                     saved_nbt: OnceLock::new(),
                 },
                 _ => PalettedContainer::build(strategy, palette, &ids),
@@ -1878,6 +1951,7 @@ mod tests {
             bits,
             palette: Palette::Global,
             words: vec![pattern; BLOCKS.entries().div_ceil(per)],
+            identity: Identity::default(),
             saved_nbt: OnceLock::new(),
         }
     }

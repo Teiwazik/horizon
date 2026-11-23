@@ -240,6 +240,10 @@ impl Game<'_> {
             return true;
         }
         let id = m.id;
+        let species = m.species();
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -279,19 +283,53 @@ impl Game<'_> {
         self.swing_arm();
         true
     }
+    /// Passenger capacity of a mount species: 2 for camels, 4 for happy ghasts, 1 for others.
+    pub(super) fn mount_capacity(species: Species) -> usize {
+        if matches!(species, Species::Camel | Species::CamelHusk) {
+            2
+        } else if species == Species::HappyGhast {
+            4
+        } else {
+            1
+        }
+    }
+    /// Total passengers (mobs, guests, and host) aboard `vehicle`, excluding the currently acting player.
+    pub(super) fn mount_passenger_count(&self, vehicle: u32) -> usize {
+        let mob_passengers = self
+            .mobs
+            .iter()
+            .filter(|p| p.extra.mount == Some(vehicle) && !p.removed && p.alive())
+            .count();
+        let guest_passengers = self.lan.as_ref().map_or(0, |h| {
+            h.hub
+                .guests
+                .iter()
+                .filter(|g| {
+                    Some(g.conn) != self.lan_acting
+                        && self.guest_current_vehicle(g.conn) == Some(vehicle)
+                })
+                .count()
+        });
+        let host_passenger = if self.lan_acting.is_some() {
+            usize::from(self.host_current_vehicle() == Some(vehicle))
+        } else {
+            0
+        };
+        mob_passengers + guest_passengers + host_passenger
+    }
     /// `AbstractHorse.mobInteract`. Returns whether the click was used.
     pub(super) fn interact_mount(&mut self, index: usize, item: &str) -> bool {
         let held = self.held().cloned();
         let m = &self.mobs[index];
         let species = m.species();
-        // A server player rides it already (`isVehicle`: no seat, no feeding).
-        if self.ridden_by_guest(m.id) {
-            return false;
-        }
+        let id = m.id;
         if matches!(species, Species::Pig | Species::Strider) {
             return self.interact_steerable(index, item);
         }
         if horizon_client::mobs::llama::is_llama(species) {
+            if self.mount_passenger_count(id) > 0 {
+                return false;
+            }
             return self.interact_llama(index, item);
         }
         if species == Species::HappyGhast {
@@ -303,15 +341,11 @@ impl Game<'_> {
         if !equine::is_equine(species) || !m.alive() || Some(m.id) == self.riding {
             return false;
         }
-        // AbstractHorse.mobInteract: a horse a mob rides (`isVehicle`) has no
+        // AbstractHorse.mobInteract: a horse with a rider (`isVehicle`) has no
         // seat, inventory or feeding to give. Camels seat two and check their
         // passengers themselves.
-        let id = m.id;
         if !matches!(species, Species::Camel | Species::CamelHusk)
-            && self
-                .mobs
-                .iter()
-                .any(|p| p.extra.mount == Some(id) && !p.removed && p.alive())
+            && self.mount_passenger_count(id) > 0
         {
             return false;
         }
@@ -436,6 +470,9 @@ impl Game<'_> {
         // doPlayerRide: `AbstractHorse.doPlayerRide` turns the rider to the
         // horse's yaw before it seats them.
         let id = self.mobs[index].id;
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -453,14 +490,17 @@ impl Game<'_> {
         let Some((heal, age_up, temper, love)) = eating(self.mobs[index].species(), item) else {
             return false;
         };
+        let m = &self.mobs[index];
+        let eligible = love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0;
+        let Some((index, loved)) = self.animal_love_decision(index, eligible) else {
+            return true;
+        };
         let m = &mut self.mobs[index];
-        let mut used = false;
-        let mut loved = false;
-        if love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0 {
+        let loved = loved && m.extra.tame;
+        let mut used = eligible;
+        if loved {
             m.extra.in_love = 600;
             m.extra.love_player = true;
-            used = true;
-            loved = true;
         }
         if m.health < m.attrs.max_health && heal > 0.0 {
             m.heal(&self.loop_context, heal);
@@ -523,7 +563,9 @@ impl Game<'_> {
             self.love_cause.insert(id, self.lan_acting);
             let kind = self.mobs[index].kind.id.clone();
             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
-            self.mob_event_particles(id, 18);
+            if self.feeding_animal_index(index, id).is_some() {
+                self.mob_event_particles(id, 18);
+            }
         }
         self.consume_held();
         true

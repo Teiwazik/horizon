@@ -549,6 +549,12 @@ pub trait PlayersBackend {
     fn player_sees(&self, viewer: PlayerRef, target: PlayerRef)
     -> Result<bool, PlayerWorldRefusal>;
     /// Side: server.
+    /// The player's advancement progress as `PlayerAdvancements.save` writes their
+    /// `advancements/<uuid>.json` now: JSON text, each started advancement's `criteria`
+    /// (criterion to the date it was granted, `yyyy-MM-dd HH:mm:ss Z`) and `done`, and
+    /// `DataVersion`. None for a stale or unavailable player and on a client.
+    #[access(WorldOnly)]
+    fn player_advancements(&self, player: PlayerRef) -> Option<String>;
     /// All of the player's statistics as `ServerStatsCounter.toJson` writes their
     /// `stats/<uuid>.json`: `{"stats":{"minecraft:mined":{"minecraft:stone":3},...},
     /// "DataVersion":n}`, types and keys namespaced, empty types left out. None for a stale
@@ -890,6 +896,32 @@ pub trait PlayersBackendMut {
     /// False for a player not here, or `colors` not 16384 long.
     #[access(WorldOnly)]
     fn player_send_map(&mut self, player: PlayerRef, map_id: i32, colors: &[u8]) -> bool;
+    /// Side: server.
+    /// Opens `dialog` on the player's screen: a dialog as a data pack's file
+    /// writes it (`type`, `title`, `body`, `inputs`, `buttons`), sent inline,
+    /// as `/dialog show` does for one written out
+    /// (`ServerPlayer.openDialog`). The dialog is checked as the client reads it
+    /// (`Dialog.DIRECT_CODEC`) and as the wire carries it, since a client that
+    /// cannot read it leaves the game: one it would refuse, or whose tag is
+    /// too deep to send, sends nothing. The player's own hooks may call it,
+    /// the packet going after the hook. False for a player not here, a fake
+    /// player, on a client and for such a dialog.
+    #[access(WorldOnly)]
+    fn player_show_dialog(&mut self, player: PlayerRef, dialog: &Compound) -> bool;
+    /// Side: server.
+    /// Opens the dialog `id` of the `minecraft:dialog` registry (a world
+    /// pack's included, `mymod:shop`, or a vanilla one with or without
+    /// `minecraft:`) on the player's screen, as `/dialog show` does. False
+    /// for an id the registry doesn't have, and as `player_show_dialog`.
+    #[access(WorldOnly)]
+    fn player_show_dialog_id(&mut self, player: PlayerRef, id: &str) -> bool;
+    /// Side: server.
+    /// Closes the dialog the player's client shows (`/dialog clear`,
+    /// `ServerPlayer.closeDialog`); nothing happens when it shows none. The
+    /// server is never told that a player closed a dialog themselves, so it
+    /// cannot read whether one is open. False as `player_show_dialog`.
+    #[access(WorldOnly)]
+    fn player_clear_dialog(&mut self, player: PlayerRef) -> bool;
     /// Side: server.
     /// Stores a server player's `Abilities` and tells their client
     /// (`ServerPlayer.onUpdateAbilities`). They stay as written until the
@@ -1263,6 +1295,37 @@ pub trait PlayersBackendMut {
         state: BlockState,
     ) -> Result<(), PlayerWorldRefusal>;
     /// Side: server.
+    /// Offers that player's client a resource pack while they play
+    /// (`ClientboundResourcePackPushPacket`; Paper's `Player.sendResourcePacks`). The client
+    /// downloads `pack.url`, checks it against `pack.sha1` when that is not empty, and asks the
+    /// player (with `pack.prompt` when it is set) unless the pack is already loaded or accepted.
+    /// A pack with the id of one the client holds replaces it; other ids stack, the newest on
+    /// top. Its answers come to `resource_pack_status_v2` with `pack` as `pack.id`. `required` only changes
+    /// what the client's screen offers: the server does not disconnect a player who declines
+    /// (only the `server.properties` pack does), so a mod acts on a status 1 itself. Refuses,
+    /// sending nothing, with `PlayerPackRefusal`: `Client`, `Stale`, `NoConnection`, `UrlTooLong`
+    /// (over 32767 UTF-16 code units), `HashTooLong` (over 40 UTF-16 code units) and `BadPrompt`
+    /// (text the boundary refuses).
+    #[access(WorldOnly)]
+    fn player_push_resource_pack(
+        &mut self,
+        player: PlayerRef,
+        pack: ResourcePackOffer,
+    ) -> Result<(), PlayerPackRefusal>;
+    /// Side: server.
+    /// Takes the resource pack `id` off that player's client
+    /// (`ClientboundResourcePackPopPacket`; Paper's `Player.removeResourcePack`), or with None
+    /// every pack the server pushed to them, the `server.properties` pack included. An id the
+    /// client does not hold is ignored by the client. Like vanilla, this does not cancel an
+    /// offer still waiting in a consent prompt: accepting that prompt can load the pack later.
+    /// Refuses, sending nothing, with `PlayerPackRefusal`: `Client`, `Stale` and `NoConnection`.
+    #[access(WorldOnly)]
+    fn player_pop_resource_pack(
+        &mut self,
+        player: PlayerRef,
+        id: Option<u128>,
+    ) -> Result<(), PlayerPackRefusal>;
+    /// Side: server.
     /// Writes `state` at `pos` in `level` for the player, for a state the mod already chose
     /// (an editor's or a schematic's). It is `level_set_block` with a placement's flags
     /// (`NEIGHBORS | CLIENTS`, plus `KNOWN_SHAPE` when `update_neighbour_shapes` is false; without
@@ -1351,6 +1414,16 @@ pub trait PlayersBackendMut {
         player: PlayerRef,
         data: Compound,
     ) -> Result<(), PlayerDataRefusal>;
+    /// Side: server.
+    /// Replaces a server player's advancement progress with `json` (the text
+    /// `player_advancements` gives, or another server's file), as `PlayerAdvancements.reload`
+    /// then `applyFrom` load a file: advancements this server lacks are dropped, nothing is
+    /// awarded (no toast, chat line or reward), and the player's client is sent the whole
+    /// tree again with the next update. False, with nothing changed, for text that is not a
+    /// JSON object, a stale, unavailable or dead player, a player with no connection, and on
+    /// a client.
+    #[access(WorldOnly)]
+    fn player_set_advancements(&mut self, player: PlayerRef, json: &str) -> bool;
     /// Side: server.
     /// Sets property `name` of the player's game profile (`textures` for
     /// a skin: Mojang's base64 value and its signature, which the client

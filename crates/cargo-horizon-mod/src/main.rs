@@ -36,6 +36,7 @@ mod uses_table;
 mod wasm;
 
 use std::{
+    io,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -84,8 +85,7 @@ fn main() -> ExitCode {
         }),
         Some("build") if args.get(1).is_some_and(|a| a == "--wasm") => fetched(Path::new("."))
             .and_then(|()| wasm::build(Path::new("."), &args[2..].windows(2).filter(|a| a[0] == "--with").map(|a| PathBuf::from(&a[1])).collect::<Vec<_>>()))
-            .and_then(|()| build(entry))
-            .map(|p| println!("Built {}", p.display())),
+            .and_then(|()| build(entry)),
         Some("wasm-std") => wasm::wasm_std(&args[1..]),
         Some("build") => {
             let sdk = if code_project(Path::new(".")) {
@@ -94,13 +94,12 @@ fn main() -> ExitCode {
                 Ok(())
             };
             sdk.and_then(|()| build(entry))
-                .map(|p| println!("Built {}", p.display()))
         }
         Some("run") => run(&args[1..]).map_err(|e| e.to_string()),
         Some("check") if args.get(1).is_none_or(|a| a.starts_with("--")) => {
             sdk_cmds::check_mod(entry, &args[1..])
         }
-        Some("check") => check(&args[1..]),
+        Some("check") => check(&args[1..], &mut io::stdout().lock(), &mut io::stderr().lock()),
         Some("hooks") => sdk_cmds::hooks(&args[1..]),
         Some("sdk") => sdk_cmds::sdk(&args[1..]),
         Some("fits") => return sdk_cmds::fits(entry, &args[1..]),
@@ -108,9 +107,10 @@ fn main() -> ExitCode {
         Some("use-jar") => jar::run(&args[1..]),
         Some("internals") => internals::run(&args[1..]),
         Some("update") => {
-            sdk_cmds::update_report(entry, Path::new("."), flag(&args[1..], "--horizon"))
-                .and_then(|()| {
-                    update(Path::new("."), flag(&args[1..], "--horizon"))
+            flag(&args[1..], "--horizon")
+                .and_then(|horizon| {
+                    sdk_cmds::update_report(entry, Path::new("."), horizon)
+                        .and_then(|()| update(Path::new("."), horizon))
                 })
                 .map(|()| println!("Run `cargo horizon-mod check`."))
         }
@@ -147,10 +147,25 @@ fn fetched(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The value after `flag` in `args`.
-fn flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let i = args.iter().position(|a| a == flag)?;
-    args.get(i + 1).map(String::as_str)
+/// `args` split at the first `--`: the tool's own options, then what goes to the game untouched.
+fn split_game_args(args: &[String]) -> (&[String], &[String]) {
+    match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &[]),
+    }
+}
+
+/// The value after `flag` among the tool's own options (before any `--`); `None` when `flag` is not
+/// given, an error when its value is missing or is itself an option.
+fn flag<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, String> {
+    let (own, _) = split_game_args(args);
+    let Some(i) = own.iter().position(|a| a == flag) else {
+        return Ok(None);
+    };
+    match own.get(i + 1) {
+        Some(value) if !value.starts_with("--") => Ok(Some(value)),
+        _ => Err(format!("{flag} needs a value")),
+    }
 }
 
 /// Makes the mod `args` asks for; a code mod's folder is returned, for its SDK to be fetched.
@@ -177,16 +192,16 @@ fn new(args: &[String]) -> Result<Option<PathBuf>, String> {
             }
         })
         .collect();
-    let name = flag(args, "--name").map_or_else(|| base.replace(['-', '_'], " "), str::to_string);
+    let name = flag(args, "--name")?.map_or_else(|| base.replace(['-', '_'], " "), str::to_string);
     let fill = |t: &str| t.replace("{id}", &id).replace("{name}", &name);
-    match flag(args, "--template") {
+    match flag(args, "--template")? {
         None | Some("content") => {}
         Some(template @ ("native" | "wasm")) => {
             new_code(
                 dir,
                 &id,
                 template == "native",
-                flag(args, "--horizon"),
+                flag(args, "--horizon")?,
                 fill,
             )?;
             return Ok(Some(dir.to_owned()));
@@ -366,7 +381,7 @@ fn new_code(
 /// the files in `assets/` and `data/`, and for a code mod its source and its uses table, scanned
 /// against the pinned build (none for a mod made for exactly one build, or built against the game
 /// checkout it lies in, which has no published surface to scan against).
-fn build(entry: mod_surface::child::ChildEntry) -> Result<PathBuf, String> {
+fn build(entry: mod_surface::child::ChildEntry) -> Result<(), String> {
     let root = Path::new(".");
     let package = Package::read(root)?;
     let code = package.manifest.native.is_some() || package.manifest.wasm.is_some();
@@ -386,7 +401,14 @@ fn build(entry: mod_surface::child::ChildEntry) -> Result<PathBuf, String> {
     } else {
         None
     };
-    pack_into(root, &root.join("target/horizon-mod"), uses.as_deref())
+    let path = pack_into(root, &root.join("target/horizon-mod"), uses.as_deref())?;
+    println!("Built {}", path.display());
+    if package.manifest.native.is_some()
+        && let Some(hint) = uses_table::package_hint(&path)
+    {
+        eprintln!("{hint}");
+    }
+    Ok(())
 }
 
 fn build_in(root: &Path) -> Result<PathBuf, String> {
@@ -410,31 +432,39 @@ fn pack_into(root: &Path, dir: &Path, uses: Option<&[u8]>) -> Result<PathBuf, St
 
 /// `check <file>`: the registry's checks of a submission, printed; fails
 /// when one does.
-fn check(args: &[String]) -> Result<(), String> {
+fn check(
+    args: &[String],
+    stdout: &mut dyn io::Write,
+    stderr: &mut dyn io::Write,
+) -> Result<(), String> {
     let file = args
         .first()
         .filter(|a| !a.starts_with("--"))
         .ok_or("cargo horizon-mod check <file>")?;
     let path = Path::new(file);
-    let kind = match flag(args, "--kind") {
+    let kind = match flag(args, "--kind")? {
         Some(k) => horizon_mod_package::index::Kind::from(k.to_string()),
         None => check::kind_of(path)
             .ok_or("pass --kind mod|modpack|resourcepack: the extension doesn't say")?,
     };
-    let signature = flag(args, "--signature")
+    let signature = flag(args, "--signature")?
         .map(|p| std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}")))
         .transpose()?;
-    let report = check::check(path, kind, flag(args, "--key"), signature.as_deref());
+    let report = check::check(path, kind, flag(args, "--key")?, signature.as_deref());
     if args.iter().any(|a| a == "--json") {
         let json = match &report {
             Ok(r) => serde_json::json!({"ok": true, "report": r.json()}),
             Err(e) => serde_json::json!({"ok": false, "error": e}),
         };
-        println!("{json}");
+        writeln!(stdout, "{json}").map_err(|e| e.to_string())?;
+        return report.map(|_| ());
     }
     let report = report?;
-    if !args.iter().any(|a| a == "--json") {
-        print!("{}", report.text());
+    write!(stdout, "{}", report.text()).map_err(|e| e.to_string())?;
+    if report.kind == horizon_mod_package::index::Kind::NativeMod
+        && let Some(hint) = uses_table::package_hint(path)
+    {
+        writeln!(stderr, "{hint}").map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -465,17 +495,22 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+/// `run`'s own `--game` and the arguments after `--`, which are the game's and never read here.
+fn run_options(args: &[String]) -> Result<(Option<&str>, &[String]), String> {
+    Ok((flag(args, "--game")?, split_game_args(args).1))
+}
+
 fn run(args: &[String]) -> Result<(), RunError> {
     if Path::new("Cargo.toml").is_file() {
         return Err(RunError::CodeMod);
     }
+    let (game, extra) = run_options(args).map_err(RunError::Build)?;
     // `run` packs content mods only (a code mod goes through the launcher), which carry no table.
     let path = build_in(Path::new(".")).map_err(RunError::Build)?;
-    let game = flag(args, "--game")
+    let game = game
         .map(str::to_string)
         .or_else(|| std::env::var("HORIZON_CLIENT").ok())
         .unwrap_or_else(|| "horizon-client".into());
-    let extra = args.iter().skip_while(|a| *a != "--").skip(1);
     println!("Starting {game} with {}", path.display());
     let status = Command::new(&game)
         .arg("--dev-mod")
@@ -489,6 +524,53 @@ fn run(args: &[String]) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_package_check_keeps_the_json_output_contract() {
+        use serde_json::{Value, json};
+        use sha2::{Digest, Sha256};
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("greeter.hmod");
+        let pin = "0123456789abcdef0123456789abcdef01234567";
+        let manifest = format!(
+            "id = 'greeter'\nname = 'Greeter'\nversion = '0.1.0'\napi = '0.2'\ncapabilities = ['registries']\n\
+             [native]\ngame = '26.3'\nhorizon = '{pin}'\nmixins = '{pin}'\n"
+        );
+        let cargo = b"[package]\nname = 'greeter'\nversion = '0.1.0'\n\
+                      [dependencies]\nhorizon-mod-api = { path = '.horizon/sdk/api/crates/horizon-mod-api' }\n";
+        let bytes =
+            Package::write_files(&manifest, &[("Cargo.toml", cargo), ("src/lib.rs", b"")]).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = [path.to_str().unwrap().to_owned(), "--json".into()];
+        check(&args, &mut stdout, &mut stderr).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stdout).unwrap(),
+            json!({
+                "ok": true,
+                "report": {
+                    "kind": "native-mod",
+                    "id": "greeter",
+                    "version": "0.1.0",
+                    "api": format!("native-1/{pin}/{pin}"),
+                    "side": null,
+                    "capabilities": [],
+                    "game": "26.3",
+                    "requires": [],
+                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    "size": bytes.len(),
+                    "signed": false,
+                    "wasm": false
+                }
+            })
+        );
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+    }
 
     #[test]
     fn the_content_template_builds_and_checks_with_no_code() {
@@ -537,6 +619,47 @@ mod tests {
             .is_err()
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_keeps_its_options_out_of_the_games_arguments() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let given = args(&["--game", "mine", "--", "--game", "foo", "--template", "x"]);
+        let (game, extra) = run_options(&given).unwrap();
+        assert_eq!(game, Some("mine"));
+        assert_eq!(extra, ["--game", "foo", "--template", "x"]);
+        // After `--` the tool's own flag names mean nothing.
+        let given = args(&["--", "--game", "foo"]);
+        let (game, extra) = run_options(&given).unwrap();
+        assert_eq!(game, None);
+        assert_eq!(extra, ["--game", "foo"]);
+        assert_eq!(run_options(&[]).unwrap(), (None, &[][..]));
+    }
+
+    #[test]
+    fn an_option_without_a_value_is_an_error_naming_it() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        for (given, option) in [
+            (args(&["--game"]), "--game"),
+            (args(&["--game", "--", "x"]), "--game"),
+            (args(&["--game", "--template"]), "--game"),
+        ] {
+            let error = run_options(&given).unwrap_err();
+            assert!(error.contains(option), "{error}");
+        }
+        // The same reading serves every command: a missing value never means the default.
+        let given = args(&["gems", "--template"]);
+        assert_eq!(
+            flag(&given, "--template").unwrap_err(),
+            "--template needs a value"
+        );
+        let given = args(&["gems", "--template", "--horizon", "abc"]);
+        assert!(flag(&given, "--template").is_err());
+        assert_eq!(flag(&given, "--horizon").unwrap(), Some("abc"));
+        assert_eq!(flag(&given, "--name").unwrap(), None);
+        // A value after `--` is not this tool's.
+        let given = args(&["--", "--template", "x"]);
+        assert_eq!(flag(&given, "--template").unwrap(), None);
     }
 
     #[test]

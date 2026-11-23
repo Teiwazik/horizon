@@ -21,15 +21,20 @@ impl Game<'_> {
             "minecraft:hay_block" => (90, 6, 10.0),
             _ => return false,
         };
+        let m = &self.mobs[index];
+        let eligible = item == "minecraft:hay_block"
+            && m.extra.tame
+            && m.extra.age == 0
+            && m.extra.in_love <= 0;
+        let Some((index, loved)) = self.animal_love_decision(index, eligible) else {
+            return true;
+        };
         let m = &mut self.mobs[index];
-        let mut used = false;
-        let mut loved = false;
-        if item == "minecraft:hay_block" && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0
-        {
+        let loved = loved && m.extra.tame;
+        let mut used = eligible;
+        if loved {
             m.extra.in_love = 600;
             m.extra.love_player = true;
-            used = true;
-            loved = true;
         }
         if m.health < m.attrs.max_health {
             m.heal(&self.loop_context, heal);
@@ -58,14 +63,22 @@ impl Game<'_> {
             return false;
         }
         // Animal.setInLove: entity event 18.
-        if loved {
+        let sound_index = if loved {
             let id = self.mobs[index].id;
             self.love_cause.insert(id, self.lan_acting);
             let kind = self.mobs[index].kind.id.clone();
             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
-            self.mob_event_particles(id, 18);
+            let current = self.feeding_animal_index(index, id);
+            if current.is_some() {
+                self.mob_event_particles(id, 18);
+            }
+            current
+        } else {
+            Some(index)
+        };
+        if let Some(index) = sound_index {
+            self.llama_sound(index, "entity.llama.eat", 1.0);
         }
-        self.llama_sound(index, "entity.llama.eat", 1.0);
         self.consume_held();
         true
     }
@@ -77,7 +90,8 @@ impl Game<'_> {
             return false;
         }
         let sneaking = self.keys.held(Action::Sneak);
-        let (baby, tamed, vehicle) = (m.is_baby(), m.extra.tame, m.rider.is_some());
+        let vehicle = m.rider.is_some() || self.mount_passenger_count(m.id) > 0;
+        let (baby, tamed) = (m.is_baby(), m.extra.tame);
         let open_inventory = !baby && tamed && sneaking;
         if !vehicle && !open_inventory && !item.is_empty() {
             if self.mobs[index].kind.food.iter().any(|f| f == item) {
@@ -141,6 +155,10 @@ impl Game<'_> {
         }
         // doPlayerRide; mounting drops a lead.
         let id = self.mobs[index].id;
+        let species = self.mobs[index].species();
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }

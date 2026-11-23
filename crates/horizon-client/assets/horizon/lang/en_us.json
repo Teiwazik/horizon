@@ -95,6 +95,7 @@
   "horizon.touch.settings": "Touch",
   "horizon.touch.swap": "Swap",
   "horizon.touch.shield": "Shield",
+  "horizon.touch.button": "Button",
   "horizon.options.lightbar": "Lightbar",
   "horizon.options.look_sensitivity": "Look Sensitivity",
   "horizon.options.invert_x": "Invert Look X",
@@ -423,8 +424,6 @@
   "%s KiB/frame": "%s KiB/frame",
   "Auto (%s)": "Auto (%s)",
   "Full-detail terrain range. LOD Distance can extend local worlds farther.": "Full-detail terrain range. LOD Distance can extend local worlds farther.",
-  "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.": "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
-  "Reduced draws far terrain coarser: faster on this integrated GPU.": "Reduced draws far terrain coarser: faster on this integrated GPU.",
   "Reduced draws far terrain coarser, for GPUs it slows down.": "Reduced draws far terrain coarser, for GPUs it slows down.",
   "Caps frames per second; a cap saves power and heat.": "Caps frames per second; a cap saves power and heat.",
   "Waits for the display's refresh: no tearing, a little latency.": "Waits for the display's refresh: no tearing, a little latency.",
@@ -533,6 +532,9 @@
   "horizon.extras.fullbright": "Fullbright",
   "horizon.extras.dynamic_lights": "Dynamic lights",
   "horizon.extras.own_name_tag": "Own name tag",
+  "horizon.extras.header.look": "Look",
+  "horizon.extras.spyglass_polar_look": "Spyglass look at the poles",
+  "horizon.extras.spyglass_polar_look.tooltip": "Looking up or down with a spyglass, the horizontal look gets slower as cos(pitch): this speeds it up by 1/cos(pitch), up to 8× (from 82.8°), so the picture moves sideways about as far as at the horizon. The turn also rolls the picture faster at those angles. Off, the look is vanilla's.",
   "horizon.extras.hide_block_particles": "Hide block-break particles",
   "horizon.extras.auto_reconnect": "Auto-reconnect",
   "horizon.extras.ui_sound_reserve": "Keep channels for UI sounds",
@@ -1330,5 +1332,6 @@
   "horizon.options.menu_navigation": "Menu Navigation",
   "horizon.options.menu_pointer": "Pointer",
   "horizon.screenshot.canceled": "Screenshot canceled",
-  "horizon.screenshot.success_hdr": "Saved screenshot as %s and %s"
+  "horizon.screenshot.success_hdr": "Saved screenshot as %s and %s",
+  "Coarse distant terrain in local worlds.": "Coarse distant terrain in local worlds."
 }

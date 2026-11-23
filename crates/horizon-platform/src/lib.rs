@@ -31,6 +31,9 @@ pub use horizon_core::prepared_files;
 pub mod world {
     pub use horizon_core::nbt;
     pub use horizon_core::position::ChunkPos;
+    /// Structure placement on a mod's own terrain: register a provider whose
+    /// terrain answers the biome and height questions structure starts ask.
+    pub use horizon_world::worldgen::structure_terrain;
     pub use horizon_world::{compression, region};
 }
 
@@ -85,6 +88,11 @@ pub mod settings {
 /// Settings pages a crate adds to the options screens (docs/layers.md, "Platform registries").
 pub mod pages {
     pub use horizon_hooks::pages::{Act, Label, Page, Place, Row, connect, register};
+}
+
+/// Key mappings a crate registers (docs/layers.md, "Platform registries").
+pub mod actions {
+    pub use horizon_hooks::actions::{Mappings, register};
 }
 
 /// The lang files with a crate's text, loaded with the game's own (docs/layers.md, "Platform

@@ -1822,6 +1822,10 @@ fn a_chunk_is_written_with_the_selected_region_version() {
     });
     let records = [((3, 4), Record::Tag(Arc::clone(&tag)))];
     let refs: Vec<_> = records.iter().map(|(k, r)| (*k, r)).collect();
+    // Every other reader of the setting waits until the default is back.
+    let _codec = super::compression_pool::SELECTED_CODEC
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for name in ["none", "lz4", "gzip", "deflate"] {
         assert!(Compression::configure(name), "{name}");
         let written = compress_records(&refs, 99)
@@ -1859,6 +1863,7 @@ fn records_compressed_on_helpers_match_one_thread_in_order() {
         })
         .collect();
     let refs: Vec<_> = records.iter().map(|(k, r)| (*k, r)).collect();
+    let _codec = super::compression_pool::holding_selected_codec();
     let compressed = compress_records(&refs, 1234);
     assert_eq!(compressed.len(), records.len());
     for ((_, record), got) in records.iter().zip(compressed) {
@@ -2324,6 +2329,30 @@ fn a_locked_chest_keeps_its_lock_through_decode_and_encode() {
         .unwrap()
         .0;
     assert_eq!(data.get("lock"), Some(&lock));
+}
+/// A loot roll's block entity keeps the `components` and `lock` a model
+/// does not hold, merged the way a chunk save merges them.
+#[test]
+fn a_loot_chest_keeps_the_components_and_lock_it_was_loaded_with() {
+    let saved = horizon_core::nbt::parse_snbt(
+        r#"{id:"minecraft:chest",x:1,y:2,z:3,CustomName:"Loot",lock:{items:"minecraft:gold_ingot"},components:{"minecraft:custom_data":{k:1}}}"#,
+    )
+    .unwrap()
+    .0;
+    let (pos, chest) = decode_block_entity(&saved).expect("chest");
+    let name = Tag::String("Loot".into());
+    let full = full_block_entity_data(
+        pos,
+        &chest,
+        "minecraft:chest",
+        Some(&saved),
+        Some(&name),
+        saved.get("lock"),
+    );
+    assert_eq!(full.get("components"), saved.get("components"));
+    assert_eq!(full.get("lock"), saved.get("lock"));
+    assert_eq!(full.get("CustomName"), Some(&name));
+    assert!(full.get("keepPacked").is_none());
 }
 #[test]
 fn spawner_block_entity_round_trips() {

@@ -40,7 +40,7 @@ impl Game<'_> {
         {
             self.clear_lod();
         }
-        if self.lod_source_attempted {
+        if self.lod_source_attempted || self.export_server_calls_blocked() {
             return;
         }
         self.lod_source_attempted = true;
@@ -191,6 +191,10 @@ impl Game<'_> {
             self.streaming.complete_commit(&mut self.world, commit)
         });
         self.streaming.extra.truncate(areas);
+        // A lectern read from a save resolves its book pages as its chunk
+        // arrives (`LecternBlockEntity.loadAdditional`): the chunk was decoded
+        // on a worker, which has no game to read a selector or a score with.
+        horizon_client::spans::time("resolve_loaded_lecterns", || self.resolve_loaded_lecterns());
         // The viewed levels' meshing, queued after the player's level's (nothing while no view
         // names one).
         if self.streaming.mesh
@@ -287,7 +291,7 @@ impl Game<'_> {
             self.view_arrival.arriving(view, now, has)
         };
         self.view_arriving = view_arriving;
-        let arriving = view_arriving || self.remote_backlog() > 0;
+        let arriving = view_arriving || self.remote_backlog_delays_frame();
         // Which far tiles a zoom magnifies (`lod::ZoomAim`), read before
         // `self.renderer.as_mut()` below borrows self mutably for the rest of
         // this function. Cheap: trigonometry on one angle, or None when the
@@ -389,8 +393,7 @@ impl Game<'_> {
                 arriving || (meshing && self.view_arrival.recent(now)) || sampling,
             );
             if let (Some(lod), Some(player)) = (&mut self.lod, &self.player) {
-                let lod_distance =
-                    horizon_client::graphics::lod_distance_capped(far_distance, &renderer.info);
+                let lod_distance = far_distance.min(horizon_client::lod::MAX_CHUNKS);
                 lod.set_near_loading(self.streaming.terrain_loading());
                 lod.set_reduced_detail(far_reduced);
                 // The covered columns change only with the complete ones and
@@ -442,36 +445,42 @@ impl Game<'_> {
         out
     }
 
-    /// Rebuild sections dirtied by player block edits (or nearby dirty sections when
-    /// `prioritizeChunkUpdates == 2`) and upload them before the current frame renders, matching
-    /// vanilla's `SectionRenderDispatcher.rebuildSectionSync`. Under Threaded (`0`, default),
-    /// no main-thread meshing occurs.
+    /// Rebuild sections dirtied by player block edits and upload them before the current frame
+    /// renders, matching vanilla's `SectionRenderDispatcher.rebuildSectionSync`. With
+    /// `prioritizeChunkUpdates == 2` nearby dirty sections follow, nearest first, within
+    /// `NEARBY_MESH_BUDGET` (paused for `NEARBY_COOLDOWN_FRAMES` after an overrun); the rest
+    /// stay with the workers. Under Threaded (`0`, default), no main-thread meshing occurs.
     pub(in crate::game) fn flush_immediate_meshes(&mut self) {
+        use horizon_client::streaming::immediate_mesh::{
+            IMMEDIATE_MESH_LIMIT, NEARBY_IMMEDIATE_DIST_SQ,
+        };
         let mode = self.settings.prioritize_chunk_updates;
         if mode == 0 || self.title.is_some() || self.renderer.is_none() {
             self.world.immediate_sections.clear();
             return;
         }
-        if mode >= 2
-            && let Some(p) = self.player.as_ref()
-        {
-            let camera_block = [
-                p.position.x.floor() as i32,
-                p.position.y.floor() as i32,
-                p.position.z.floor() as i32,
-            ];
-            self.world.mark_nearby_dirty_immediate(
-                camera_block,
-                horizon_client::streaming::immediate_mesh::NEARBY_IMMEDIATE_DIST_SQ,
-                horizon_client::streaming::immediate_mesh::IMMEDIATE_MESH_LIMIT,
-            );
-        }
-        if self.world.immediate_sections.is_empty() {
+        let nearby = match self.player.as_ref() {
+            Some(p) if mode >= 2 && self.streaming.nearby_meshing_due() => {
+                self.world.nearby_dirty_sections(
+                    [
+                        p.position.x.floor() as i32,
+                        p.position.y.floor() as i32,
+                        p.position.z.floor() as i32,
+                    ],
+                    NEARBY_IMMEDIATE_DIST_SQ,
+                    IMMEDIATE_MESH_LIMIT,
+                )
+            }
+            _ => Vec::new(),
+        };
+        if self.world.immediate_sections.is_empty() && nearby.is_empty() {
             return;
         }
         self.observe_light_edits();
         self.ask_edited_light_emission();
-        let uploads = self.streaming.mesh_immediate(&mut self.world, mode);
+        let uploads = self
+            .streaming
+            .mesh_immediate(&mut self.world, mode, &nearby);
         if uploads.is_empty() {
             return;
         }

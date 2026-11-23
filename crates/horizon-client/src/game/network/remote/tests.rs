@@ -1132,6 +1132,47 @@ fn spawn_menu_test(game: &mut super::Game<'_>) -> horizon_protocol::packets::pla
     spawn
 }
 
+/// A right-click with an empty hand on the inventory's crafting result goes to the server
+/// as a click on menu slot 0, whether the result is empty or a stack that could split.
+#[test]
+#[ignore = "daily"]
+fn an_empty_hand_right_click_on_the_crafting_result_is_sent() {
+    use super::super::{Screen, native_entity_refs::tests::with_game};
+    use horizon_client::{items::ItemStack, menu::Input};
+    use horizon_protocol::packets::play;
+
+    with_game(|game| {
+        let (mut reader, _writer) = connect_menu_test(game);
+        spawn_menu_test(game);
+        game.set_screen(Screen::Inventory);
+        for result in [None, Some(ItemStack::new("minecraft:oak_planks", 4))] {
+            let row = format!("{result:?}");
+            game.carried = None;
+            game.remote.as_mut().unwrap().craft_result = result;
+            assert!(
+                game.remote_menu_ops(&[(Some(200), 1, Input::Pickup)]),
+                "{row}"
+            );
+            let sent = (0..32)
+                .find_map(|_| {
+                    let (id, body) = reader.recv().unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                    match play::Serverbound::decode(id, &body)
+                        .unwrap_or_else(|e| panic!("{row}: {e:?}"))
+                    {
+                        play::Serverbound::ContainerClick(sent) => Some(sent),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| panic!("{row}: no click sent"));
+            assert_eq!(
+                (sent.container, sent.slot, sent.button, sent.input),
+                (0, 0, 1, 0),
+                "{row}"
+            );
+        }
+    });
+}
+
 #[test]
 #[ignore = "daily"]
 fn client_menu_reads_follow_packets_and_lifetimes() {
@@ -2357,6 +2398,18 @@ fn client_player_reads_answer_from_the_local_players_copy() {
         assert!(abilities.may_fly && abilities.flying && !abilities.invulnerable);
         assert!(!abilities.may_build);
         assert_eq!((abilities.fly_speed, abilities.walk_speed), (0.1, 0.2));
+        // A double jump toggles flight on the client first, and the server sends no
+        // abilities back: the read follows the body (`LocalPlayer.getAbilities()`).
+        game.player.as_mut().unwrap().flying = false;
+        assert_eq!(player.abilities(game).map(|a| a.flying), Some(false));
+        game.handle_packet(C::PlayerAbilities(play::PlayerAbilities {
+            flags: 4,
+            flying_speed: 0.1,
+            walking_speed: 0.2,
+        }))
+        .unwrap();
+        game.player.as_mut().unwrap().flying = true;
+        assert_eq!(player.abilities(game).map(|a| a.flying), Some(true));
 
         // Food from SetHealth; the client keeps no exhaustion.
         game.handle_packet(C::SetHealth(play::SetHealth {
@@ -2405,9 +2458,23 @@ fn client_player_reads_answer_from_the_local_players_copy() {
             )
         );
 
+        // The body's own movement state, which the client keeps itself (`LocalPlayer`).
+        let me = player.entity();
+        assert_eq!(me.is_sprinting(game), Some(false));
+        assert_eq!(me.is_in_water(game), Some(false));
+        let body = game.player.as_mut().unwrap();
+        body.sprinting = true;
+        body.fluids.was_touching_water = true;
+        body.pose = horizon_client::pose::Pose::Crouching;
+        assert_eq!(me.is_sprinting(game), Some(true));
+        assert_eq!(me.is_in_water(game), Some(true));
+        assert_eq!(me.is_in_lava(game), Some(false));
+        assert_eq!(me.is_crouching(game), Some(true));
+
         // Another player: the client isn't sent their state.
         let epoch = player.entity().epoch();
         let other = mod_api::__private::game::player_ref(EntityRef::new(epoch, 8), 43);
+        assert_eq!(other.entity().is_sprinting(game), None);
         assert_eq!(other.game_mode(game), None);
         assert_eq!(other.food(game), None);
         assert_eq!(other.selected_slot(game), None);
@@ -3575,6 +3642,78 @@ fn a_reconfiguring_client_plays_menu_music_and_never_indexes_past_the_biomes() {
     assert!(music.is_some_and(|m| m != Music::menu()));
 }
 
+/// #16040: a standalone replay has no configuration phase, so its registries come from the
+/// local resources. Once the recording's Login enters the dimension the Overworld's clock is
+/// resolved, and a recorded `SetTime` sets the time of day.
+#[test]
+#[ignore = "daily"]
+fn a_standalone_replay_resolves_the_recorded_world_clock() {
+    use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+    use horizon_protocol::packets::play::{self, Clientbound as C};
+    let root = std::path::PathBuf::from(
+        std::env::var_os("HORIZON_TEST_RESOURCES").expect("prepared resources required"),
+    );
+    let settings = Settings::default();
+    let loaded = load_resources(
+        horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+        Vec::new(),
+        None,
+        &root,
+        &settings,
+        std::time::Instant::now(),
+        false,
+        crate::game::execution_role::ExecutionRole::Client,
+        &Progress::new(),
+        &mut |_, _| unreachable!(),
+    )
+    .unwrap();
+    let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+    options.resources = root.clone();
+    let mut game = Game::new(
+        &loaded.resources,
+        loaded.pack,
+        loaded.gui.unwrap(),
+        options,
+        settings,
+        Audio::silent(&horizon_assets::resource_source::ResourceSource::directory(
+            root.clone(),
+        )),
+        None,
+    )
+    .unwrap();
+    game.init_remote_for_replay().unwrap();
+    let spawn = play::SpawnInfo {
+        dimension_type: 0,
+        dimension: "minecraft:overworld".into(),
+        seed: 1,
+        game_type: 0,
+        previous_game_type: None,
+        debug: false,
+        flat: false,
+        last_death: None,
+        portal_cooldown: 0,
+        sea_level: 63,
+    };
+    game.enter_remote_dimension(&spawn, false, horizon_client::level_loading::Reason::Other);
+    let overworld = game.remote.as_ref().unwrap().default_clock;
+    assert!(
+        overworld.is_some(),
+        "the Overworld's default clock resolves"
+    );
+    // The afternoon of the issue's recording: day time 9155.
+    game.handle_packet(C::SetTime(play::SetTime {
+        game_time: 9155,
+        clocks: vec![play::ClockState {
+            clock: overworld.unwrap(),
+            total_ticks: 9155,
+            partial_tick: 0.0,
+            rate: 1.0,
+        }],
+    }))
+    .unwrap();
+    assert_eq!(game.world.day_time, 9155);
+}
+
 /// The server's on-fire flag keeps the predicted countdown (which
 /// `fluid_base_tick` runs down) from ending the fire; a clear flag leaves
 /// the window's own contact fire alone.
@@ -4619,4 +4758,32 @@ fn flint_and_steel_use_on_ends_the_click() {
 
     let done = game.remote_use_block(Hand::Main);
     assert!(done, "flint and steel useOn must end the click");
+}
+
+/// #19952: an unfocused window doesn't pause a world whose level loading
+/// screen is still up over `Screen::Playing` (vanilla's screen is the
+/// `LevelLoadingScreen` then); once the screen closes, it pauses as before.
+#[test]
+#[ignore = "daily"]
+fn an_unfocused_window_waits_for_the_loading_screen_to_pause() {
+    use horizon_client::{level_loading::Reason, motion::PlayerMotion};
+    use horizon_core::geometry::Vec3;
+    super::super::native_entity_refs::tests::with_client_game(|game| {
+        let (client, _server) = horizon_protocol::connection::Pipe::pair();
+        game.connect_local(client, "focus-pause-test").unwrap();
+        game.title = None;
+        game.screen = crate::game::Screen::Playing;
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        game.remote
+            .as_mut()
+            .unwrap()
+            .level_load
+            .start_client_load(0, Reason::Other);
+        game.focus_lost = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        game.pause_if_inactive();
+        assert_eq!(game.screen, crate::game::Screen::Playing, "loading screen up");
+        game.remote.as_mut().unwrap().level_load.finish();
+        game.pause_if_inactive();
+        assert_eq!(game.screen, crate::game::Screen::Paused, "loading screen closed");
+    });
 }
