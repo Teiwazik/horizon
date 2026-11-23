@@ -127,8 +127,9 @@ What the post stage's `surface_at` reads is solid terrain's alone unless the pac
 the stage draws stores the normal, smoothness and data it last set there, or the normal its triangle faces and 0, 0
 where it set none; `surface_at` then reads that point as `present` where it is the frontmost thing, like terrain. A
 translucent entity stores its frontmost point; the quads Horizon draws itself (beacon beams, End portals) and the
-models mods prepare store none. In a frame where a mod draws prepared models, Horizon draws every entity with its
-own pipeline (the entity stage doesn't run there), so none stores a surface. Without the key (the default) nothing
+models mods prepare store none. In a frame where a mod draws prepared models, Horizon draws the other entities and
+the moving block entities with its own pipeline too (the entity stage doesn't run for them), so of all that only the
+block entities at rest that the block entity cache keeps store a surface. Without the key (the default) nothing
 changes: `set_surface` isn't in the entity prelude and entities read as not `present`.
 
 ## Stages
