@@ -104,6 +104,25 @@ pub trait PlayersServerHost {
     #[access(WorldOnly)]
     fn profile_by_uuid(&self, uuid: u128) -> Option<GameProfile>;
     /// Side: server.
+    /// The whole saved player file of the player with this UUID (`players/data/<uuid>.dat`), as the
+    /// vanilla player compound `PlayerDataStorage` loads, so a mod can copy or restore a player who
+    /// is not online. None for no file, a file that does not read, a client, or a remote world. An
+    /// online player reads as of their last save; their live state is `player_ender_chest` and the
+    /// other player reads. Reads only.
+    #[access(WorldOnly)]
+    fn offline_player_data(&self, uuid: u128) -> Option<Compound>;
+    /// Side: server.
+    /// Writes `data` as the saved player file of the player with this UUID, replacing it whole, as
+    /// `write_dat` writes a save. Refuses with nothing written: `NoServer` on a client or a remote
+    /// world, `Online` while the player is connected (write them with the player writes instead),
+    /// `Write` when the file cannot be written. Call it outside a transaction.
+    #[access(WorldOnly)]
+    fn set_offline_player_data(
+        &mut self,
+        uuid: u128,
+        data: Compound,
+    ) -> Result<(), OfflinePlayerDataRefusal>;
+    /// Side: server.
     /// The profile of the player with this name, any case, as
     /// `profile_by_uuid` knows it: an online player's, else an unexpired
     /// user cache entry. Never asked of Mojang, and an unknown name is not
@@ -164,6 +183,19 @@ pub trait PlayersClientHost {
     /// came yet.
     #[access(WorldOnly)]
     fn last_passage_refusal(&self) -> Option<(PassageId, PassageCrossRefusal)>;
+    /// Side: client.
+    /// For a client mod: sets the local player's velocity, in blocks a tick, without sending
+    /// any network packet (for predicted pushes such as conveyor belts and hover boots,
+    /// typically called from `player_tick_pre`). Non-finite values, a spectator, or no local
+    /// player leave the velocity unchanged.
+    #[access(WorldOnly)]
+    fn set_local_player_velocity(&mut self, velocity: [f64; 3]);
+    /// Side: client.
+    /// For a client mod: sets the local player's on-ground flag without sending any network
+    /// packet (for predicted movement such as hover boots or conveyor lifts, typically called
+    /// from `player_tick_pre`). A spectator or no local player is left alone.
+    #[access(WorldOnly)]
+    fn set_local_player_on_ground(&mut self, on_ground: bool);
 }
 /// The handles' reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -805,6 +837,29 @@ pub trait PlayersBackendMut {
     #[access(WorldOnly)]
     fn player_hide(&mut self, player: PlayerRef, level: Option<u8>) -> bool;
     /// Side: server.
+    /// Sends one viewer different data for an entity than everyone else has
+    /// (`ClientboundSetEntityDataPacket` to that player alone): a custom name, whether it shows
+    /// from afar, the shared flags byte (invisible, glowing, crouching...) or the pose. A
+    /// per-player hologram text, a seat pose only the sitter sees and a marker only one client
+    /// gets are built on it. The server's own state is untouched and nobody else is sent
+    /// anything, so the game's next data change for the entity, or its pairing again after the
+    /// viewer left its range, gives the viewer the real values back; a mod that keeps a view
+    /// sends it again from `player_start_tracking`. The viewer need not track the entity now (its
+    /// client ignores data for one it does not have). Refuses with `EntityViewError`: `Client`,
+    /// `Stale` (the viewer handle), `NoConnection` (a fake viewer), `StaleEntity`, `Empty`
+    /// (nothing to send), `Conflict` (a name and its removal together), `Text` (a name the text boundary
+    /// refuses) and `TooLarge` (a name the network encoding cannot carry: over 65,535 bytes of modified
+    /// UTF-8 or past the network NBT quota; nothing is sent). Each field is replaced on its own: the
+    /// server keeps no per-viewer override, so a later change it sends for one field (the flags, say)
+    /// shows that field's real value again while the other replaced fields stay as sent.
+    #[access(WorldOnly)]
+    fn player_send_entity_data(
+        &mut self,
+        viewer: PlayerRef,
+        entity: EntityRef,
+        data: EntityViewData,
+    ) -> Result<(), EntityViewError>;
+    /// Side: server.
     /// Opens a block entity's menu for a connected player (`ServerPlayer.openMenu`).
     /// Returns Stale for an invalidated entity; Ok(false) for a wrong-level player,
     /// non-provider, cancelled open, or an unconnected player such as a fake player.
@@ -870,10 +925,12 @@ pub trait PlayersBackendMut {
     /// that storage's own handler, journalled; the client sees ordinary synced slots, mirrored
     /// after each click and each write through an `ItemPlace` of that storage, never each tick.
     /// A slot past `places` stays the mods' own (`native_menu_clicked`). The menu closes once a
-    /// place stops resolving (the backpack left the hand, the entity is gone) or a held stack is
-    /// no longer the one bound when the slots were backed, checked before each click and at
-    /// each change notice. A `MenuSlotPlace::HeldItem` locks the inventory slot holding that
-    /// stack while the menu is open, so it can't go into itself. Backing again replaces the
+    /// place stops resolving (the backpack left the hand or the mod place, the entity is gone)
+    /// or a held or mod place's stack is no longer the one bound when the slots were backed,
+    /// checked before each click and at each change notice. A `MenuSlotPlace::HeldItem` locks
+    /// the inventory slot holding that stack while the menu is open, and a click that would take
+    /// a `MenuSlotPlace::ModItem` place's stack out of its place is undone, so neither can go
+    /// into itself. Backing again replaces the
     /// places; a slot no longer backed (an empty list, a shorter one) is emptied, never left
     /// holding the copy it showed. A [`MenuSlotBackRefusal`], and nothing changes, for a player
     /// not online or a window that is not their open menu, a menu that is not a blockless mod
@@ -1207,6 +1264,19 @@ pub trait PlayersBackendMut {
         player: PlayerRef,
         areas: &[ChunkArea],
     ) -> Result<(), ChunkAreaRefusal>;
+    /// Side: server.
+    /// Centres the player's chunk tracking on `center`, a chunk of their own level, as
+    /// `ServerPlayer.setCamera` does for a camera entity but without moving the player: the
+    /// chunks around it are loaded (and tick) as around a player, to the server's view distance,
+    /// and sent to their client to the client's view distance, with the chunk cache centre moved
+    /// there so the client keeps and draws them. The chunks around the player themself stay
+    /// loaded but are no longer sent while the centre is elsewhere. `None` puts the tracking
+    /// back on the player. For a camera mod (a drone, a cinematic camera, a remote view). The
+    /// centre ends at a respawn, a level change and when the player leaves. False, changing
+    /// nothing, for a stale handle, a player not online, a centre past the world border's
+    /// farthest chunk (1,875,000 on an axis) and off a server.
+    #[access(WorldOnly)]
+    fn player_set_view_center(&mut self, player: PlayerRef, center: Option<ChunkPos>) -> bool;
     /// Side: server.
     /// `ServerPlayerGameMode.destroyBlock`: breaks the block at `pos` in the player's level as
     /// this player breaks it, as FTB Ultimine does for each block of a vein. The player's own

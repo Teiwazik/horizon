@@ -531,18 +531,22 @@ pub(super) fn mob_meta_sync(
             defaults.push((19, serializer::BYTE, Value::Byte(0)));
         }
         "minecraft:parrot" => {
+            tame_owner_meta(e.owner, meta, defaults);
             // TamableAnimal.DATA_FLAGS_ID: in the sitting pose 1, tame 4.
             let flags = i8::from(e.sitting_pose) | if e.tame { 4 } else { 0 };
             if flags != 0 {
                 meta.push((18, serializer::BYTE, Value::Byte(flags)));
             }
+            defaults.push((18, serializer::BYTE, Value::Byte(0)));
         }
         "minecraft:cat" | "minecraft:wolf" => {
+            tame_owner_meta(e.owner, meta, defaults);
             // TamableAnimal.DATA_FLAGS_ID: in the sitting pose 1, tame 4.
             let flags = i8::from(e.sitting_pose) | if e.tame { 4 } else { 0 };
             if flags != 0 {
                 meta.push((18, serializer::BYTE, Value::Byte(flags)));
             }
+            defaults.push((18, serializer::BYTE, Value::Byte(0)));
             let (index, registry, name) = if kind == "minecraft:cat" {
                 let v = horizon_client::mobs::tame::CAT_VARIANTS[(e.variant as usize).min(10)];
                 (20, "minecraft:cat_variant", v)
@@ -988,6 +992,27 @@ pub(super) fn mob_meta_sync(
         }
         defaults.push((20, serializer::LONG, Value::Long(0)));
     }
+}
+
+/// `TamableAnimal.DATA_OWNERUUID_ID`: the owner reference follows the flags
+/// for parrots, cats and wolves and defaults to an empty optional value.
+fn tame_owner_meta(
+    owner: Option<[i32; 4]>,
+    meta: &mut Vec<(u8, i32, Value)>,
+    defaults: &mut Vec<(u8, i32, Value)>,
+) {
+    if let Some(owner) = owner {
+        meta.push((
+            19,
+            serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+            Value::OptUuid(Some(playerdata::ints_uuid(owner))),
+        ));
+    }
+    defaults.push((
+        19,
+        serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+        Value::OptUuid(None),
+    ));
 }
 
 /// AbstractVillager.DATA_UNHAPPY_COUNTER (after AgeableMob's two): the head
@@ -2452,6 +2477,13 @@ impl Game<'_> {
                         .is_some_and(|host| !host.commands.is_empty())
                     {
                         self.run_guest_commands();
+                    }
+                }
+                // handleClientTickEnd's movement reset, in packet order behind the
+                // MoveVehicle the hub queued for this drain (a rider's move of the tick).
+                HostEvent::TickEnd(conn) => {
+                    if let Some(host) = self.lan.as_mut() {
+                        host.hub.client_tick_end(conn);
                     }
                 }
                 HostEvent::Jump { conn, from, yaw } => {
@@ -4390,6 +4422,49 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn tamable_owner_is_sent_and_can_be_cleared() {
+        let hub = meta_hub("TamableOwnerMetaTest");
+        let owner = [1, 2, 3, 4];
+        let expected = Value::OptUuid(Some(0x00000001000000020000000300000004));
+        for kind in ["minecraft:parrot", "minecraft:cat", "minecraft:wolf"] {
+            let mut mob = mob_of(kind)
+                .unwrap_or_else(|| panic!("prepared mob data missing for {kind}"));
+            mob.extra.tame = true;
+            mob.extra.owner = Some(owner);
+            let metadata = |mob: &Mob| {
+                let (mut meta, mut defaults) = (Vec::new(), Vec::new());
+                super::mob_meta(mob, &hub, None, 0, &mut meta, &mut defaults);
+                (meta, defaults)
+            };
+
+            let (meta, defaults) = metadata(&mob);
+            assert!(
+                meta.contains(&(
+                    19,
+                    serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                    expected.clone(),
+                )),
+                "{kind}: {meta:?}"
+            );
+            assert!(defaults.contains(&(
+                19,
+                serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                Value::OptUuid(None)
+            )));
+
+            mob.extra.owner = None;
+            let (meta, defaults) = metadata(&mob);
+            assert!(meta.iter().all(|entry| entry.0 != 19), "{kind}: {meta:?}");
+            assert!(defaults.contains(&(
+                19,
+                serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                Value::OptUuid(None)
+            )));
+        }
+    }
+
     /// A mod's custom name and its visibility reach the tracking players
     /// (`Entity.DATA_CUSTOM_NAME`, `DATA_CUSTOM_NAME_VISIBLE`), and taking
     /// them away is sent as none / false.
@@ -5417,10 +5492,16 @@ pub(crate) mod world_spawn_sync_tests {
             // RespawnData.of(level.dimension(), ..): the same block set from the
             // End is a changed RespawnData, sent with the End as its dimension.
             game.as_console(|game| {
-                assert!(game.run_command("execute in minecraft:the_end run setworldspawn 100 140 -20"))
+                assert!(
+                    game.run_command("execute in minecraft:the_end run setworldspawn 100 140 -20")
+                )
             });
             let sent = spawns(&rx);
-            assert_eq!(sent.len(), 1, "a spawn that only changes dimension is broadcast");
+            assert_eq!(
+                sent.len(),
+                1,
+                "a spawn that only changes dimension is broadcast"
+            );
             assert_eq!(sent[0].pos.dimension, "minecraft:the_end");
             assert_eq!(sent[0].pos.pos, [100, 140, -20]);
             game.as_console(|game| {
@@ -6023,7 +6104,9 @@ mod merchant_restock_tests {
         game.set_allow_commands(true);
         let rx = super::world_spawn_sync_tests::host_for(&mut game);
         let mut host = game.lan.take().unwrap();
-        host.hub.guests.update(0, |guest| guest.dimension = "minecraft:overworld".into());
+        host.hub
+            .guests
+            .update(0, |guest| guest.dimension = "minecraft:overworld".into());
         game.lan = Some(host);
         assert!(game.run_command(concat!(
             "summon villager 0.5 80 2.5 {NoAI:1b,Silent:1b,Xp:20,",
@@ -6077,9 +6160,13 @@ mod merchant_restock_tests {
         live.offers[0].uses = 0;
         live.offers[0].demand = 12;
         game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
-            guest.effects.add(horizon_client::effects::EffectInstance::new(
-                "hero_of_the_village", 1000, 0,
-            ));
+            guest
+                .effects
+                .add(horizon_client::effects::EffectInstance::new(
+                    "hero_of_the_village",
+                    1000,
+                    0,
+                ));
         });
         game.merchant_restocked(id);
         let restocked = offers();

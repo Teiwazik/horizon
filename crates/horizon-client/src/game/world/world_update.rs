@@ -19,14 +19,23 @@ impl Game<'_> {
             renderer.clear_lods();
         }
     }
+    /// Clears far terrain for a world or dimension change, arming the next
+    /// far terrain's world-entry first-load hold.
+    pub(super) fn clear_lod_for_world_entry(&mut self) {
+        self.clear_lod();
+        self.lod_first_load = true;
+    }
     pub(super) fn prepare_lod(&mut self) {
-        let enabled = self.far_terrain_choice().0 > 0
-            && self.renderer.is_some()
-            && self.player.is_some()
-            && self.title.is_none();
+        let in_world = self.renderer.is_some() && self.player.is_some() && self.title.is_none();
+        let enabled = in_world && self.far_terrain_choice().0 > 0;
         if !enabled {
             if self.lod.is_some() || self.lod_source_attempted {
                 self.clear_lod();
+            }
+            if in_world {
+                // Far terrain is off in an already-entered world: toggling it
+                // on later must not start a world-entry first-load hold.
+                self.lod_first_load = false;
             }
             return;
         }
@@ -38,12 +47,13 @@ impl Game<'_> {
             .as_ref()
             .is_some_and(|level| self.remote.as_ref().is_some_and(|r| r.level != *level))
         {
-            self.clear_lod();
+            self.clear_lod_for_world_entry();
         }
         if self.lod_source_attempted || self.export_server_calls_blocked() {
             return;
         }
         self.lod_source_attempted = true;
+        let arm_first_load = std::mem::take(&mut self.lod_first_load);
         self.lod_level = None;
         let dim = self.dim;
         let source = match (&self.integrated, self.server_far_terrain(), &self.remote) {
@@ -107,12 +117,16 @@ impl Game<'_> {
             _ => Some(self.streaming.lod_source()),
         };
         if let Some(source) = source {
-            let lod = horizon_client::lod::Lod::new(source, self.worker_context());
+            let mut lod = horizon_client::lod::Lod::new(source, self.worker_context());
+            if arm_first_load {
+                lod.arm_first_load();
+            }
             // Far tiles are never in the ray scene: the arenas' looks alone.
             lod.set_looks(self.streaming.looks, self.streaming.nether_shading);
             lod.set_shader_pack(self.streaming.shader_pack);
             self.lod = Some(lod);
-            self.lod_observe.extend(self.world.chunks.keys().copied());
+            let resident: Vec<_> = self.world.chunks.keys().copied().collect();
+            self.lod_observe_later(resident);
         }
     }
     pub(in crate::game) fn update_world(&mut self) {
@@ -157,7 +171,11 @@ impl Game<'_> {
         self.observe_light_edits();
         self.ask_edited_light_emission();
         if let Some(p) = &self.player {
-            self.streaming.center = super::player_chunk(p.position);
+            let own = super::player_chunk(p.position);
+            self.streaming.center = self
+                .remote
+                .as_ref()
+                .map_or(own, |r| view_center(own, r.chunk_center));
         }
         horizon_client::spans::time("tick_pregen", || self.tick_pregen());
         // A headless game has nothing to draw sections with: like a server's, they aren't
@@ -230,18 +248,34 @@ impl Game<'_> {
         for chunk in &unloaded {
             self.world.modified.unloaded(&(chunk.x, chunk.z));
         }
+        self.lod_observe_later(uploads.iter().map(|(key, _)| (key.0, key.2)));
         if let Some(lod) = &mut self.lod {
-            self.lod_observe
-                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
             for chunk in &unloaded {
                 self.lod_observe.remove(&(chunk.x, chunk.z));
             }
             // Unloaded columns first (their summaries are all that remains),
-            // then a few resident ones (an edit copies a chunk the worker
-            // still holds). The worker summarizes them.
+            // then resident ones that left the full-detail area (their
+            // sections are held until their summary is drawn), then a few
+            // other resident ones (an edit copies a chunk the worker still
+            // holds). The worker summarizes them.
             horizon_client::spans::time("lod_observe", || {
                 for chunk in &unloaded {
                     lod.observe(chunk.clone(), self.res.facts());
+                }
+                let mut remaining =
+                    horizon_client::lod::OBSERVE_AHEAD.saturating_sub(lod.observing());
+                while remaining > 0 {
+                    let asks = lod.take_summary_asks(remaining);
+                    if asks.is_empty() {
+                        break;
+                    }
+                    for key in asks {
+                        if let Some(chunk) = self.world.chunks.get(&key) {
+                            self.lod_observe.remove(&key);
+                            lod.observe(chunk.clone(), self.res.facts());
+                            remaining -= 1;
+                        }
+                    }
                 }
                 while lod.observing() < horizon_client::lod::OBSERVE_AHEAD
                     && let Some(&key) = self.lod_observe.iter().next()
@@ -493,15 +527,46 @@ impl Game<'_> {
         if !spent.is_empty() {
             self.streaming.free(spent);
         }
-        if self.lod.is_some() {
-            self.lod_observe
-                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
-        }
+        self.lod_observe_later(uploads.iter().map(|(key, _)| (key.0, key.2)));
         if let Some(renderer) = self.renderer.as_mut() {
             for (key, mesh) in &uploads {
                 renderer.upload(*key, mesh);
             }
         }
         self.streaming.free(uploads);
+    }
+}
+
+/// The chunk the window meshes and draws around: the player's own, unless the server centred
+/// their chunk cache well away from them (a mod's view centre, horizon-rust/horizon#19219), where
+/// the chunks it sends are. Within two chunks it is the player's: the cache centre lags a move
+/// across a chunk border by a tick, and vanilla's view area follows the camera there anyway.
+pub(in crate::game) fn view_center(own: (i32, i32), cache: (i32, i32)) -> (i32, i32) {
+    // A server may send any `i32` centre: measured in `i64`, which no pair of them overflows.
+    let away = (i64::from(cache.0) - i64::from(own.0))
+        .abs()
+        .max((i64::from(cache.1) - i64::from(own.1)).abs());
+    if away > 2 { cache } else { own }
+}
+
+#[cfg(test)]
+mod view_center_tests {
+    use super::view_center;
+
+    #[test]
+    fn follows_the_cache_centre_only_when_it_moved_away() {
+        assert_eq!(view_center((0, 0), (0, 0)), (0, 0));
+        // A border crossing the server has not answered yet.
+        assert_eq!(view_center((5, 5), (4, 5)), (5, 5));
+        assert_eq!(view_center((5, 5), (7, 3)), (5, 5));
+        // A mod's view centre far from the player.
+        assert_eq!(view_center((5, 5), (8, 5)), (8, 5));
+        assert_eq!(view_center((0, 0), (-40, 120)), (-40, 120));
+        // Any centre a server sends, however far, measures without overflowing.
+        assert_eq!(view_center((0, 0), (i32::MIN, 0)), (i32::MIN, 0));
+        assert_eq!(
+            view_center((-1, 0), (i32::MAX, i32::MIN)),
+            (i32::MAX, i32::MIN)
+        );
     }
 }

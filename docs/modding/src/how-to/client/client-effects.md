@@ -19,6 +19,9 @@ component lines and advanced information. No attached part is needed for a
 global listener, so this is also how a mod edits vanilla or other mods' tooltips.
 The global event supplies the stack, display settings, player IDs, and the
 request's `advanced` and `creative` flags on native and wasm alike.
+Vanilla enchantment descriptions, including those on enchanted books, retain
+their root `TextContent::Translatable { key, .. }`. Match that key (for example,
+`enchantment.minecraft.sharpness`), not the displayed name, level, or color.
 
 ## Drawing a second world camera
 
@@ -102,14 +105,26 @@ itself, such as an emote's song, a recorded clip or a synthesised tune, for this
   play for `play_sound` hooks and `muffle_sounds` exemptions, and its subtitle shows if the resources have one.
 
 The returned `SoundRef` works as `play_local_sound`'s does (`state`, `stop`, `fade`). `SoundRef::set_position`
-moves a playing sound from the next audio update, so a song played at its player can follow them:
+moves a playing sound from the next audio update, so a song played at its player can follow them. Keep the
+handle while the song plays and move it from a tick hook (`dancer_position` stands for however the mod finds
+the player):
 
 ```rust
-let play = mod_api::SoundPlay::at("mymod:emote.song", mod_api::SoundSource::Players, player_pos);
-// 48 kHz mono, joined 2.5 seconds in.
-if let Some(song) = host.play_local_pcm(&play, &pcm, 48_000, 1, 120_000, 0) {
-    // Each tick, while it plays:
-    song.set_position(&*host, player_pos);
+static SONG: std::sync::Mutex<Option<mod_api::SoundRef>> = std::sync::Mutex::new(None);
+
+// When the emote starts: 48 kHz mono, joined 2.5 seconds in.
+let play = mod_api::SoundPlay::at("mymod:emote.song", mod_api::SoundSource::Players, dancer_position(&*host));
+*SONG.lock().unwrap() = host.play_local_pcm(&play, &pcm, 48_000, 1, 120_000, 0);
+
+// Each client tick, while it plays:
+fn client_tick_post(&self, host: &mut dyn mod_api::ClientHost, _: &mut mod_api::ClientTickPostEvent) {
+    let mut song = SONG.lock().unwrap();
+    if let Some(sound) = *song {
+        // false once the song is over: let the handle go.
+        if !sound.set_position(&*host, dancer_position(&*host)) {
+            *song = None;
+        }
+    }
 }
 ```
 

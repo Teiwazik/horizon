@@ -286,6 +286,27 @@ class CompareTests(unittest.TestCase):
         status, text = self.run_compare(base, {**head, "hook-notes.md": NOTES + "\n## Added\n\nNew.\n"},
                                         allow_added=True)
         self.assertEqual(status, 0, text)
+
+    def test_scoped_part_hook_addition_preserves_existing_guest_dispatch(self):
+        old_hook = {"name": "existing", "neoforge": "existing event"}
+        new_hook = {"name": "can_place_item", "scope": "block_entity", "neoforge": "none"}
+        old_arm = ('12 => { let receiver = super::hooks(); let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.existing(&p); out.put_owned(answer); }\n')
+        new_arm = ('27 => { let receiver = crate::wire::guest::handler::<dyn crate :: BlockEntityPart>(input.take()?)?;'
+                   ' let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.can_place_item(&mut p); out.put_owned(answer); }\n')
+        old_name = 'crate::HookId::Existing => "existing",'
+        new_name = 'crate::HookId::CanPlaceItem => "can_place_item",'
+        fallback = '_ => return Err(crate::wire::WireError::Tag(id)) }\n'
+        base = {"catalog.json": json.dumps({"hooks": [old_hook]}), "hook-notes.md": NOTES,
+                "wire_guest_generated.rs": old_name + "\n" + old_arm + fallback}
+        head = {"catalog.json": json.dumps({"hooks": [new_hook, old_hook]}), "hook-notes.md": NOTES,
+                "wire_guest_generated.rs": new_name + old_name + "\n" + new_arm
+                + old_arm.replace("_52", "_53") + fallback}
+        for allowed in (True, False):
+            with self.subTest(allow_added=allowed):
+                status, text = self.run_compare(base, head, allow_added=allowed)
+                self.assertEqual(status, 0 if allowed else 1, text)
         # An added hook explains new note sections, not an edit to an existing hook's or the general notes.
         for notes in (NOTES.replace("Old.", "Edited.") + "\n## Added\n", NOTES.replace("General.", "Edited.")
                       + "\n## Added\n", "# Hook notes\n\n## Added\n"):
@@ -452,6 +473,26 @@ class CompareTests(unittest.TestCase):
             with self.subTest(name):
                 status, text = self.run_compare(base, {"hook-notes.md": NOTES, **files}, allow_added=True)
                 self.assertEqual(status, 1, text)
+
+    def test_an_added_native_only_unsupported_stub_passes_with_the_flag(self):
+        stub = ('#[cfg(not(target_arch = "wasm32"))]\n'
+                'fn tool_break_block(&mut self, p0: u32) -> bool '
+                '{ crate::wire::guest::unsupported("BackendMut::tool_break_block") }\n')
+        existing_stub = ('#[cfg(not(target_arch = "wasm32"))]\n'
+                         'fn existing_native(&self) -> bool '
+                         '{ crate::wire::guest::unsupported("BackendMut::existing_native") }\n')
+        base_wire = self.forwarders(self.BASE_CALLS).replace("\n}\n", "\n" + existing_stub + "}\n", 1)
+        head_wire = base_wire.replace("\n}\n", "\n" + stub + "}\n", 1)
+        status, text = self.run_compare({"wire_guest_generated.rs": base_wire},
+                                        {"wire_guest_generated.rs": head_wire}, allow_added=True)
+        self.assertEqual(status, 0, text)
+        self.assertIn("Host calls added (accepted): BackendMut::tool_break_block", text)
+        self.assertEqual(self.run_compare({"wire_guest_generated.rs": base_wire},
+                                          {"wire_guest_generated.rs": head_wire}, allow_added=False)[0], 1)
+        # Editing an existing unsupported stub still fails.
+        edited = head_wire.replace("fn existing_native(&self) -> bool", "fn existing_native(&self) -> u32")
+        self.assertEqual(self.run_compare({"wire_guest_generated.rs": base_wire},
+                                          {"wire_guest_generated.rs": edited}, allow_added=True)[0], 1)
 
     def test_a_loops_json_difference_fails_with_the_flag(self):
         status, _ = self.run_compare({"loops.json": NO_LOOPS}, {"loops.json": json.dumps({"loops": [], "x": 1})}, allow_added=True)
