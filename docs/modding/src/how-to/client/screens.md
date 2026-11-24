@@ -68,6 +68,27 @@ focused): the grab is then asked for again when the window gets the focus back. 
 grab; Escape or `mod_screen_close` back to the world grabs the pointer for the world as before, and a screen
 that replaces the mod's gets a free pointer.
 
+## Replacing the title splash
+
+Native and Wasm mods can call `host.title_splash()` from the title's screen render hooks
+(`event.screen.id == "title"`). It returns the exact text the client already picked, including
+special-date and player-name splashes. It does not pick a new line each frame. If you cancel
+`screen_render_pre` to replace the stock title drawing, you can still read the same text in
+`screen_render_post`.
+The loading frontend does not run screen render hooks until it hands the title to the game.
+
+The result is `None` while another screen is active, when the player enables Hide Splash Texts, or
+when no splash was selected.
+
+## GUI-only in-world frames
+
+A full-screen map can return `Flow::Cancel` from `render_frame` while `host.mod_screen()` is its
+own screen. Paint the map in `screen_render_post` and use the regular screen input hooks. The
+game presents the GUI over black in its usual SDR or HDR output, without preparing or drawing the
+world. Full-frame screenshots and video export include the GUI; world icons and scene captures
+wait for a world draw. Normal world rendering resumes on the next frame that does not request
+GUI-only presentation, with fresh temporal history.
+
 ## Decorating Multiplayer rows
 
 Implement the client hook `server_list_row_decorations` to draw on the saved servers in the title's

@@ -1323,7 +1323,13 @@ fn explosion_tag(e: &crate::firework::FireworkExplosion) -> Tag {
 fn explosion_from(e: &Tag) -> crate::firework::FireworkExplosion {
     let ints = |t: Option<&Tag>| match t {
         Some(Tag::IntArray(v)) => v.iter().map(|c| *c as u32).collect(),
-        Some(Tag::List(v)) => v.iter().filter_map(int).map(|c| c as u32).collect(),
+        Some(Tag::ByteArray(v)) => v.iter().map(|&c| i32::from(c as i8) as u32).collect(),
+        Some(Tag::LongArray(v)) => v.iter().map(|&c| c as i32 as u32).collect(),
+        Some(Tag::List(v)) => v
+            .iter()
+            .filter_map(crate::properties::component_int)
+            .map(|c| c as u32)
+            .collect(),
         _ => Vec::new(),
     };
     crate::firework::FireworkExplosion {
@@ -1335,8 +1341,11 @@ fn explosion_from(e: &Tag) -> crate::firework::FireworkExplosion {
         ),
         colors: ints(e.get("colors")),
         fade: ints(e.get("fade_colors")),
-        trail: e.get("has_trail").and_then(int).unwrap_or(0) != 0,
-        twinkle: e.get("has_twinkle").and_then(int).unwrap_or(0) != 0,
+        trail: e.get("has_trail").and_then(component_bool).unwrap_or(false),
+        twinkle: e
+            .get("has_twinkle")
+            .and_then(component_bool)
+            .unwrap_or(false),
     }
 }
 /// An `ItemStackTemplate`: `{id, count?, components?}`.
@@ -1357,7 +1366,9 @@ pub fn all_bricks(sides: &[Option<ItemStack>; 4]) -> bool {
             .is_some_and(|s| &*s.item == "minecraft:brick" && s.count == 1 && s.extra.is_none())
     })
 }
-fn template_from(tag: &Tag) -> Option<ItemStack> {
+/// Decodes an `ItemStackTemplate` (an id string, or `{id, count, components}`), as
+/// brewing outputs and `show_item` hover events carry it; `None` when it doesn't decode.
+pub fn template_from(tag: &Tag) -> Option<ItemStack> {
     use horizon_world::datafix::dynamic::namespaced;
 
     match tag {
@@ -1460,16 +1471,16 @@ pub fn parse_stack(snbt: &str) -> Result<Option<ItemStack>, String> {
     let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
     Ok(crate::item_nbt::item_from_nbt(&tag))
 }
-/// `parse_stack` against the loaded item prototypes, as `ItemStack.CODEC` builds it.
-pub fn parse_stack_with_items(
+/// `parse_stack` against the owning game's item prototypes (`item_from_nbt_in`).
+pub fn parse_stack_in(
     snbt: &str,
-    items: &crate::items::Items,
+    prototypes: &std::collections::HashMap<String, horizon_core::nbt::Compound>,
 ) -> Result<Option<ItemStack>, String> {
     if snbt == "-" {
         return Ok(None);
     }
     let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
-    Ok(crate::item_nbt::item_from_nbt_with_items(&tag, items))
+    Ok(crate::item_nbt::item_from_nbt_in(&tag, prototypes))
 }
 /// `MapDecorations.Entry.CODEC`: a bare type ID uses the default resource namespace.
 /// Keep preserved entry keys and numeric tags intact; this is not registry validation.
@@ -2198,20 +2209,43 @@ pub fn decode_components_for_item(
     (damage, extra)
 }
 
+/// The item prototypes of one game, by item id (`Items::component_defaults`).
+pub type ItemPrototypes = std::collections::HashMap<String, horizon_core::nbt::Compound>;
+
+/// A saved stack as the game that owns `prototypes` takes it in (`ItemStack.CODEC`
+/// decodes through `applyPatch`): [`drop_prototype_values`] against its item's prototype.
+/// True when something left the patch.
+pub fn clean_stack(stack: &mut ItemStack, prototypes: &ItemPrototypes) -> bool {
+    prototypes
+        .get(&*stack.item)
+        .is_some_and(|prototype| drop_prototype_values(stack, prototype))
+}
+
+/// [`clean_stack`] on each of `stacks`; true when one changed.
+pub fn clean_stacks<'a>(
+    stacks: impl IntoIterator<Item = &'a mut ItemStack>,
+    prototypes: &ItemPrototypes,
+) -> bool {
+    stacks.into_iter().fold(false, |changed, stack| {
+        clean_stack(stack, prototypes) | changed
+    })
+}
+
 /// `PatchedDataComponentMap.applyPatch` and `set`: a component whose value
 /// equals the item's `prototype` (`Items::component_defaults`) is no part of
 /// the stack's patch, nor is the removal of a component it lacks. Differing
 /// values and removals of its own components stay. Call this where a
 /// stack is built with the item registry at hand. The context-free codecs
-/// have no prototype to compare against.
-pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nbt::Compound) {
+/// have no prototype to compare against. True when something left the patch.
+pub fn drop_prototype_values(
+    stack: &mut ItemStack,
+    prototype: &horizon_core::nbt::Compound,
+) -> bool {
     let Some(Tag::Compound(mut patch)) = components_tag(stack.damage, stack.data()) else {
-        return;
+        return false;
     };
-    let before = patch.len();
-    patch.retain(|key, value| keep_patch_entry(key, value, Some(prototype)));
-    if patch.len() == before {
-        return;
+    if !prototype_patch(&mut patch, prototype) {
+        return false;
     }
     let old = stack.extra.take();
     let patch = (!patch.is_empty()).then_some(Tag::Compound(patch));
@@ -2225,6 +2259,19 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
         data.map_post_processing = old.map_post_processing;
         data.bundle_selected = old.bundle_selected;
     }
+    true
+}
+
+/// The `applyPatch` rule on a saved patch: drop each value equal to the
+/// prototype's, and each removal of a component the prototype lacks. True
+/// when something was dropped.
+pub fn prototype_patch(
+    patch: &mut horizon_core::nbt::Compound,
+    prototype: &horizon_core::nbt::Compound,
+) -> bool {
+    let before = patch.len();
+    patch.retain(|key, value| keep_patch_entry(key, value, Some(prototype)));
+    patch.len() != before
 }
 
 fn keep_patch_entry(

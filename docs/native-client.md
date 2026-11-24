@@ -9,7 +9,7 @@ craft in the 2x2 inventory grid or on a crafting table, and save and reload worl
 in vanilla's Anvil format.
 
 **Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](status.md#what-the-harnesses-compare)
-in the README scores each subsystem against vanilla and lists what is still
+scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
 On Windows, the launcher uses a stable executable path for each game home across
@@ -65,7 +65,7 @@ Use current stable Rust (1.90+) and JDK 25 (Python 3.11+ only for the developmen
 harnesses). A checkout never
 downloads the game: resource preparation imports **your own copy** (the 26.3
 client from your official launcher install, and the 26.3 server jar you
-downloaded yourself; see [Build from source](#run-from-a-checkout)),
+downloaded yourself),
 verifies it against the pinned checksums, runs vanilla's data generator and small
 exporters against those jars, and extracts the jar's assets and data into ignored
 `.local/horizon-client/26.3/`. Sounds (about 380 MB) are copied from your
@@ -121,6 +121,12 @@ cargo run --release -p horizon-game -- --render-distance 12
 
 Development builds that link quickly: `cargo build --profile fast -p horizon-game`.
 
+On Windows, with the build prerequisites and prepared resources above and `python` on `PATH`, run
+`tools\build-and-run.bat --world "Dev World" --render-distance 8` from the checkout.
+It builds `target\fast\horizon-client.exe`, passes along game arguments, and prints the new
+temporary run directory. Saves, options and logs stay there by default, not in the checkout
+or in your regular Horizon profile. Each invocation starts with a fresh directory.
+
 `HORIZON_OCCLUSION_PROFILE=1` enables detailed entity-occlusion phase and bounds-scan timings
 in `horizon-ctl stats` and `bench`. The normal benchmark keeps these CPU-clock reads disabled;
 query, cache-hit and cull counters remain available without profiling.
@@ -152,6 +158,9 @@ Optional Windows allocator build features are documented in
 Worlds autosave every 6000 ticks (5 minutes), when chunks unload and on quit.
 On headless Linux use `vscreen start ./target/release/horizon-client` and
 `vscreen shot`.
+
+Server dialogs replace the visible menu without closing it. Dismissing the
+dialog returns to the open inventory, container, or other screen.
 
 Sound: the game prints the output it opened (`Horizon: audio output ...`) or
 why it has none (`Horizon: no sound: ...`). It opens none with

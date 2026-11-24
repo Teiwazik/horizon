@@ -1497,7 +1497,7 @@ impl Goal for MeleeAttack {
                 _ => self.interval,
             };
             self.until_attack = adjusted(true, interval);
-            m.swing();
+            m.swing_for_attack(false);
             super::ai::do_hurt_target(m, who, cx);
             // `Fox.this.playSound(FOX_BITE, 1.0F, 1.0F)`: `Entity.playSound`, skipped when silent.
             if let Some(sound) = self.bite {
@@ -1966,10 +1966,13 @@ impl Goal for HurtByTarget {
                 return;
             }
             for other in ids {
-                cx.events.push(MobEvent::SetTarget {
+                // A target-change hook may have switched the selected player:
+                // the alert carries the one this mob now targets.
+                cx.events.push(cx.w.route_player_event(MobEvent::SetTarget {
                     mob: other,
                     target: by,
-                });
+                    player: None,
+                }));
             }
         }
         if cub {

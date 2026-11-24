@@ -97,7 +97,7 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
 ### Moved to native mods
 
 The **FPS counter**, **Keystrokes**, **Zoom** and the **Minimap** are official native mods now (in
-horizon-rust/horizon-mods under `native/<name>/`, [mods.md](modding/src/start/installing.md#horizons-official-mods)), with the same look and
+horizon-rust/horizon-mods under `native/<name>/`, [installing.md](modding/src/start/installing.md#horizons-own-mods)), with the same look and
 options. Players install them from the launcher's Mods page, and the launcher builds them into the game
 ([modding/src/how-to/native-mods.md](modding/src/how-to/native-mods.md)). The game keeps
 the hook points they use (`crates/horizon-client/src/game/native_hooks/`), and `horizon-extras.txt` keeps the old
@@ -123,6 +123,10 @@ The game still draws the minimap, for the native mod (`native_minimap` in `nativ
 - Hidden in first person, while sleeping, in spectator mode, while invisible, and
   whenever the team's name tag visibility would hide it, exactly as the other
   players' tags (`game/interface/names.rs`, `own_name_tag`). Client-only: nothing is sent.
+- A Horizon crate, `horizon-name-tag`, registered by `horizon-official`: its switch per
+  splitscreen player, its line in `horizon-extras.txt` (same key) and its row in the Extras
+  page's Third person group. The engine asks `horizon_hooks::Hooks::own_name_tag` each frame;
+  the plain executable has no own name tag.
 
 ### Hide block-break particles (`hideBlockParticles`, default off)
 - Hides the debris particles that burst from a block when it breaks

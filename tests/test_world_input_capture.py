@@ -653,6 +653,7 @@ struct Game {
 }
 impl Game {
     fn scripted_run(&self) -> bool { self.scripted }
+    fn loading_overlay_preview_active(&self) -> bool { false }
     // The input trace records the motion; it does not change the turn.
     fn note_input(&mut self, _: input_trace::InputOrigin, _: input_trace::TraceKind) {}
     // Handing input back from the controller does not change the turn either.
@@ -709,7 +710,7 @@ fn main() {
             native_screen_pointer: ModScreenPointer { grab, motion: [0.0; 2] },
         };
         game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
-        let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false };
+        let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false, yaw_scale: 1.0 };
         let turned = game.mouse.handle_accumulated_movement(1.0, true, true, look)
             .map_or(false, |(x, y)| x != 0.0 || y != 0.0);
         assert!(!turned, "a mod screen turned the camera (grab={grab})");

@@ -7488,6 +7488,8 @@ def run(ctl, out, resources, checks):
     try:
         if 'recipes-hmod' in checks:
             prepare_recipes_hmod(host, guest)
+        if 'view_center' in checks:
+            prepare_view_center(Path(ctl).parent, host, guest)
         host.pid = host.raw(*launch)['pid']
         # Guests' commands need the world's Allow Commands as well as the LAN's (#372): a creative
         # world has them; everyone plays in survival.
@@ -7565,8 +7567,9 @@ def main():
         sys.exit(str(error))
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    # Recipes is an opt-in native mod; this check requires a game built with it.
-    checks = args.check or [name for name in CHECKS if name != 'recipes-hmod']
+    # Recipes is an opt-in native mod; this check requires a game built with it. view_center builds its wasm
+    # fixture first, so it too runs only when asked for.
+    checks = args.check or [name for name in CHECKS if name not in ('recipes-hmod', 'view_center')]
     results = run(lab.binary(bins, 'horizon-ctl'), out, resources, checks)
     (out / 'results.json').write_text(json.dumps({'checks': results}, indent=2) + '\n')
     print(json.dumps(results, indent=1))
@@ -14503,6 +14506,190 @@ def check_hive_bees(host, guest, out):
 
 CHECKS += ['hive_bees']
 CHECK_FNS['hive_bees'] = check_hive_bees
+
+
+def check_boat_boarding_order(host, guest, out):
+    """The first player aboard keeps the front seat and steering when the second joins (#15941)."""
+    positions = [(game, pos_of(game)) for game in (host, guest)]
+    x, _, z = (math.floor(v) for v in positions[0][1])
+    y = 100
+    spot = (x + 0.5, y, z + 0.5)
+    host('command', command=f'fill {x - 3} {y - 2} {z - 2} {x + 3} {y - 1} {z + 10} minecraft:stone')
+    host('command', command=f'fill {x - 3} {y} {z - 2} {x + 3} {y + 3} {z + 10} minecraft:air')
+    host('command', command=f'fill {x - 1} {y - 1} {z - 1} {x + 1} {y - 1} {z + 9} minecraft:water')
+    tag = 'lan_boat_boarding_order'
+
+    def boat(game, boat_id):
+        return next(o for o in game('status')['objects'] if o['id'] == boat_id)
+
+    result = {}
+    try:
+        for driver, passenger in ((guest, host), (host, guest)):
+            host('command', command=f'summon minecraft:oak_boat {spot[0]} {y - 0.1} {spot[2]} '
+                 f'{{Rotation:[0f,0f],Tags:["{tag}"]}}')
+            for game, dx in ((driver, -2), (passenger, 2)):
+                game('command', command=f'tp @s {spot[0] + dx} {y} {spot[2]}')
+            host.wait(24)
+            guest.wait(12)
+            boat_id = board(driver, 'oak_boat', spot)['id']
+            # Aim at the boat's empty end so the first rider cannot intercept the click.
+            px, py, pz = boat(passenger, boat_id)['position']
+            passenger.raw('look-at', f'{px:.2f}', f'{py + 0.25:.2f}', f'{pz - 0.5:.2f}')
+            passenger.raw('mouse', 'right', 'click')
+            passenger.wait(12)
+            boarded = passenger('status').get('riding') == boat_id
+            if not boarded:
+                # Measure seat assignment and steering even when boarding by interaction failed.
+                passenger('command', command=f'ride @s mount @e[tag={tag},limit=1]')
+            passenger.until(lambda: passenger('status').get('riding'), lambda riding: riding == boat_id, ticks=20)
+            assert driver('status').get('riding') == boat_id
+            host.wait(12)
+            guest.wait(12)
+
+            shared_boat = boat(host, boat_id)
+            start = shared_boat['position']
+            yaw = math.radians(shared_boat['yaw'])
+
+            def offset(position):
+                return round(-(position[0] - start[0]) * math.sin(yaw)
+                             + (position[2] - start[2]) * math.cos(yaw), 3)
+
+            seen = {
+                'passenger_boarded_by_click': boarded,
+                'server_seats': {g.name: offset(server_player(host, g)['position']) for g in (host, guest)},
+                'client_seats': {g.name: offset(pos_of(g)) for g in (host, guest)},
+            }
+            for rider in (passenger, driver):
+                before = boat(host, boat_id)['position']
+                rider.script(['key w down', 'wait 20', 'key w up', 'wait 8'])
+                after = boat(host, boat_id)['position']
+                seen[f'{rider.name}_paddle_blocks'] = round(math.dist(before, after), 3)
+            result[f'{driver.name}_first'] = seen
+            host('command', command=f'kill @e[tag={tag}]')
+        lab.write_json(out / 'boat-boarding-order.json', result)
+    finally:
+        host('command', command=f'kill @e[tag={tag}]')
+        for game, pos in positions:
+            game('command', command='tp @s ' + ' '.join(str(v) for v in pos))
+    for driver, passenger in ((guest, host), (host, guest)):
+        seen = result[f'{driver.name}_first']
+        assert seen['passenger_boarded_by_click'], result
+        for seats in (seen['server_seats'], seen['client_seats']):
+            assert abs(seats[driver.name] - 0.2) < 0.15 and abs(seats[passenger.name] + 0.6) < 0.15, result
+        assert seen[f'{passenger.name}_paddle_blocks'] < 0.15 and seen[f'{driver.name}_paddle_blocks'] > 0.5, result
+    return result
+
+
+CHECKS += ['boat_boarding_order']
+CHECK_FNS['boat_boarding_order'] = check_boat_boarding_order
+
+
+def prepare_view_center(bins, *games):
+    """Build the view-centre fixture (tests/view-center-mod) as a wasm mod and install it in both games, with the
+    wasm std library beside the game program."""
+    # The checkout's tool, run in the fixture's folder (the packager reads the mod from the working directory).
+    tool = ['cargo', 'run', '--locked', '--profile', 'fast', '-q', '--manifest-path', str(ROOT / 'Cargo.toml'),
+            '-p', 'cargo-horizon-mod', '--']
+    std = bins / 'horizon-wasm-std.wasm'
+    if not std.exists():
+        subprocess.run(tool + ['wasm-std', str(std)], cwd=ROOT, check=True)
+    # The packager builds a mod from a folder inside this checkout's target/.
+    work = ROOT / 'target/view-center-mod'
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.copytree(ROOT / 'tests/view-center-mod', work, ignore=shutil.ignore_patterns('target'))
+    subprocess.run(tool + ['horizon-mod', 'build', '--wasm'], cwd=work, check=True)
+    package = (work / 'target/horizon-mod/view_center_fixture.hmod').read_bytes()
+    for game in games:
+        mods = game.work / 'horizon-mods'
+        mods.mkdir(exist_ok=True)
+        (mods / 'view_center_fixture.hmod').write_bytes(package)
+        enabled = game.work / 'horizon-mods.txt'
+        lines = enabled.read_text() if enabled.exists() else ''
+        enabled.write_text(lines + 'mod.view_center_fixture:true\n')
+
+
+def check_view_center(host, guest, out):
+    """`PlayerRef::set_view_center` (#19219), through the fixture's `view <x> <z>` chat line: the guest's chunks
+    stream from a chunk 40 chunks away and its window draws them there while it stays where it is; `view off`, a
+    respawn and a level change each put the tracking back on the guest. The host, on its server thread, does the
+    same once for its own window."""
+    def chunk_of(game):
+        x, _, z = pos_of(game)
+        return math.floor(x) >> 4, math.floor(z) >> 4
+
+    def loaded(game, chunk):
+        return game.raw('block', chunk[0] * 16 + 8, 64, chunk[1] * 16 + 8).get('loaded')
+
+    def streams(game, chunk, ticks=1200):
+        """Wait until the game holds `chunk` and not the one it stands in."""
+        return game.until(lambda: (loaded(game, chunk), loaded(game, chunk_of(game))),
+                          lambda seen: seen == (True, False), ticks=ticks)
+
+    def back_home(game, far, ticks=600):
+        """Wait until the game holds the chunk it stands in again and has forgotten `far`."""
+        return game.until(lambda: (loaded(game, chunk_of(game)), loaded(game, far)),
+                          lambda seen: seen == (True, False), ticks=ticks)
+
+    def view(game, chunk):
+        line = 'view off' if chunk is None else f'view {chunk[0]} {chunk[1]}'
+        game.raw('chat', line)
+        wanted = 'view centre off' if chunk is None else f'view centre {chunk[0]} {chunk[1]}'
+        game.until(lambda: game.raw('messages', 10)['chat'], lambda chat: any(wanted in c for c in chat), ticks=40)
+
+    seen = {}
+    start = pos_of(guest)
+    own = chunk_of(guest)
+    far = (own[0] + 40, own[1])
+    view(guest, far)
+    streams(guest, far)
+    moved = math.dist(pos_of(guest), start)
+    assert moved < 0.5, f'the guest moved {moved} blocks with its view centre'
+    assert loaded(host, chunk_of(host)), 'the guest\'s view centre took the host\'s chunks'
+    drawn = guest.until(lambda: guest('status')['renderer']['drawn_sections'], lambda n: n > 0, ticks=200)
+    guest.wait(40)
+    guest.shot(out, 'view-center-far')
+    seen['set'] = {'far': far, 'moved': moved, 'drawn_sections': drawn}
+
+    view(guest, None)
+    back_home(guest, far)
+    seen['off'] = True
+
+    view(guest, far)
+    streams(guest, far)
+    host('command', command=f'kill {GUEST_NAME}')
+    guest.until(lambda: guest('state').get('screen'), lambda s: s == 'dead', ticks=60)
+    guest.raw('respawn')
+    guest.until(lambda: guest('state'), lambda s: s.get('screen') == 'playing' and s['player']['health'] > 0,
+                ticks=100)
+    back_home(guest, far)
+    seen['respawn'] = True
+
+    view(guest, far)
+    streams(guest, far)
+    x, y, z = pos_of(guest)
+    host('command', command=f'execute in minecraft:the_nether run tp {GUEST_NAME} {x:.2f} 100 {z:.2f}')
+    guest.until(lambda: remote(guest)['dimension'], lambda d: d == 'minecraft:the_nether', ticks=400)
+    host('command', command=f'execute in minecraft:overworld run tp {GUEST_NAME} {x:.2f} {y:.2f} {z:.2f}')
+    guest.until(lambda: remote(guest)['dimension'], lambda d: d == 'minecraft:overworld', ticks=400)
+    back_home(guest, far)
+    seen['level_change'] = True
+    # The window's camera follows the fixture's last accepted reply: put it back on the guest.
+    view(guest, None)
+
+    # The host's own window, on the integrated server thread.
+    host_far = (chunk_of(host)[0], chunk_of(host)[1] + 40)
+    view(host, host_far)
+    streams(host, host_far)
+    host.wait(40)
+    host.shot(out, 'view-center-host-far')
+    view(host, None)
+    back_home(host, host_far)
+    seen['host'] = {'far': host_far}
+    return seen
+
+
+CHECKS += ['view_center']
+CHECK_FNS.update(view_center=check_view_center)
 
 
 if __name__ == '__main__':

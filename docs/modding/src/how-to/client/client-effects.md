@@ -23,6 +23,20 @@ Vanilla enchantment descriptions, including those on enchanted books, retain
 their root `TextContent::Translatable { key, .. }`. Match that key (for example,
 `enchantment.minecraft.sharpness`), not the displayed name, level, or color.
 
+To restrict a tooltip edit to the enchanting table, read the live topmost
+screen from the hook's `&dyn ClientHost`:
+
+```rust,ignore
+let enchanting_table_is_open = host.current_screen().is_some_and(|screen| {
+    screen.id == "inventory" && screen.menu.as_deref() == Some("minecraft:enchantment")
+});
+```
+
+A chest and the player's inventory also report `inventory`, but with a
+different or absent menu type. If a dialog or prompt covers the enchanting
+table, the query reports the covering screen instead. Normal play returns
+`None`. The query works on native and Wasm without subscribing to screen hooks.
+
 ## Drawing a second world camera
 
 Native internals mods can request extra world cameras through `world_views` and
@@ -78,6 +92,18 @@ level's work and on one worker at a time, and their meshes stay 5 seconds after 
 names the level. Once views of a viewed level are drawn, such a view draws the sections
 meshed so far and nothing where a section is not meshed yet.
 
+## Matching the frame's sky and light
+
+A pass in `world_drawn` that draws its own picture (a map, a hologram, a view's
+composite) can sit in the frame's light with `WorldDrawn::look` (`WorldLook`): the
+fog's colour and distances as the terrain mixes them, unit world directions to the
+sun, the moon and the body lighting the frame, `sunAngle`, the sky, ambient and block
+light colours, the sunrise glow, star brightness, under water and water's fog colour,
+and night vision. With a shader pack on, the directions follow the pack's
+`sunPathRotation` and `shader_pack` is set: the pack's own sky, fog, lighting and
+tonemap are its shader code and are already in `color`, so copy from `color` to match
+them exactly, and use `look` for what the pack's uniforms were built from.
+
 ## Muffling sounds
 
 `ClientHost::muffle_sounds(amount, lowpass, ticks, exempt)` temporarily muffles the sound output, for example to accompany ringing ears after a nearby blast:
@@ -90,6 +116,46 @@ meshed so far and nothing where a section is not meshed yet.
 A new call replaces the current muffle; `ticks` of 0 ends it immediately. The effect belongs to the sound output, so every splitscreen player hears it. The call refuses an amount or strength outside 0 to 1, more than 64 exempt events, or an exempt event that is not a namespaced sound ID, without changing the output. Server code cannot call this client-only service.
 
 Play the accompanying sound through `ClientHost::play_local_sound` with a `SoundPlay`.
+
+## Playing your own samples
+
+`ClientHost::play_local_pcm(&sound, samples, rate, channels, start, after)` plays audio the mod decoded or made
+itself, such as an emote's song, a recorded clip or a synthesised tune, for this player only:
+
+- `samples` is signed 16-bit PCM, interleaved, with `channels` (1 or 2) samples to a frame at `rate` frames a
+  second (8000 to 192000). The host copies them during the call.
+- Playback begins `start` frames in, so a player who joins a song already under way hears it from the right
+  place.
+- `sound` is a `SoundPlay`, as for `play_local_sound`: its source's volume slider, volume, pitch, position,
+  attenuation and looping apply, and the sound pauses with the game. Its event is not loaded. It names the
+  play for `play_sound` hooks and `muffle_sounds` exemptions, and its subtitle shows if the resources have one.
+
+The returned `SoundRef` works as `play_local_sound`'s does (`state`, `stop`, `fade`). `SoundRef::set_position`
+moves a playing sound from the next audio update, so a song played at its player can follow them. Keep the
+handle while the song plays and move it from a tick hook (`dancer_position` stands for however the mod finds
+the player):
+
+```rust
+static SONG: std::sync::Mutex<Option<mod_api::SoundRef>> = std::sync::Mutex::new(None);
+
+// When the emote starts: 48 kHz mono, joined 2.5 seconds in.
+let play = mod_api::SoundPlay::at("mymod:emote.song", mod_api::SoundSource::Players, dancer_position(&*host));
+*SONG.lock().unwrap() = host.play_local_pcm(&play, &pcm, 48_000, 1, 120_000, 0);
+
+// Each client tick, while it plays:
+fn client_tick_post(&self, host: &mut dyn mod_api::ClientHost, _: &mut mod_api::ClientTickPostEvent) {
+    let mut song = SONG.lock().unwrap();
+    if let Some(sound) = *song {
+        // false once the song is over: let the handle go.
+        if !sound.set_position(&*host, dancer_position(&*host)) {
+            *song = None;
+        }
+    }
+}
+```
+
+The call returns `None` and plays nothing for an empty clip, a `start` past its end, a rate or channel count
+out of range, or more than 28 800 000 samples (ten minutes of mono at 48 kHz). Server code cannot call it.
 
 ## Showing another time or weather
 

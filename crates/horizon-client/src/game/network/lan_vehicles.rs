@@ -157,6 +157,14 @@ impl Game<'_> {
             return Some((lo, hi, at(i.position)));
         }
         let id = u32::try_from(id).ok()?;
+        // The level's own `minecraft:interaction`: on a server this game holds the
+        // entity itself, with the width and height it was summoned with.
+        if let Some(o) = self.others.iter().find(|o| o.id == id)
+            && let Some(state) = o.interaction
+        {
+            let (lo, hi) = corners(state.bounds(o.position));
+            return Some((lo, hi, at(o.position)));
+        }
         if let Some(b) = self.boats.iter().find(|b| b.id == id) {
             let (lo, hi) = corners(b.bounds());
             return Some((lo, hi, at(b.position)));
@@ -263,6 +271,8 @@ impl Game<'_> {
         }
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
         let boat = self.boats.iter().position(|b| b.id == vehicle);
+        // Choose the seat before swapping this guest into the window player's slot.
+        let boat_seat = usize::from(boat.is_some() && !self.guest_controls_vehicle(conn, vehicle));
         let cart = self.carts.iter().any(|c| c.id == vehicle);
         let mount = self.mobs.iter().any(|m| m.id == vehicle);
         let cushion = self.cushions.iter().any(|c| c.id == vehicle);
@@ -327,7 +337,7 @@ impl Game<'_> {
                     game.dismount(i);
                     return None;
                 }
-                let p = game.player_boat_seat(i);
+                let p = game.boat_seat(i, boat_seat);
                 return Some([p.x, p.y, p.z]);
             }
             // The minecart moves with the rider's input, and lets it out when
@@ -400,7 +410,10 @@ impl Game<'_> {
             .boats
             .iter()
             .position(|b| b.id == vehicle)
-            .map(|i| (self.boats[i].position, self.player_boat_seat(i)))
+            .map(|i| {
+                let seat = usize::from(!self.guest_controls_vehicle(conn, vehicle));
+                (self.boats[i].position, self.boat_seat(i, seat))
+            })
             .or_else(|| {
                 self.carts
                     .iter()

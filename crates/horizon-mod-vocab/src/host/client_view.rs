@@ -29,6 +29,13 @@ pub trait ClientViewClientHost {
     #[access(ClientSetup)]
     fn set_hud_mode(&mut self, mode: HudMode);
     /// Side: client.
+    /// Show styled `line` in this client's action bar, replacing the previous overlay
+    /// message and restarting its normal 60-tick lifetime. Available while playing,
+    /// including from local key callbacks on a remote server; sends nothing to the server.
+    /// An invalid component returns [`TextFormError`] without changing the overlay.
+    #[access(WorldOnly)]
+    fn show_action_bar(&mut self, line: Text) -> Result<(), TextFormError>;
+    /// Side: client.
     /// The window's camera type (`Options.getCameraType`), including its latest pending request.
     #[access(ClientSetup)]
     fn camera_type(&self) -> CameraType;
@@ -107,6 +114,31 @@ pub trait ClientViewClientHost {
         columns: &[(i32, i32)],
         heightmap: Heightmap,
     ) -> Result<Vec<Option<i32>>, String>;
+    /// Side: client.
+    /// The surface of each requested `(x, z)` column, in input order (including repeats).
+    /// Uses the same first free Y as `client_surface_heights`; block, biome and light are
+    /// read from the client level's retained data at the surface, not from generation.
+    /// None for a column whose chunk this client does not hold; never loads a chunk.
+    /// `Err` without reading any column if there is no client world or more than 65,536
+    /// columns (`MAX_COLUMNS`) were requested.
+    #[access(WorldOnly)]
+    fn client_surface_columns(
+        &self,
+        columns: &[(i32, i32)],
+        heightmap: Heightmap,
+    ) -> Result<Vec<Option<SurfaceColumn>>, String>;
+    /// Side: client.
+    /// Chunk arrivals, changes and removals in the current client level (including
+    /// singleplayer). Each touched key occurs once with its current residency.
+    /// Pass None for a full snapshot; a cursor from another level or map, or outside
+    /// the retained history, also returns a full snapshot. A stale or unavailable
+    /// level handle returns None. Loads nothing.
+    #[access(WorldOnly)]
+    fn level_chunk_deltas(
+        &self,
+        level: LevelRef,
+        since: Option<ChunkDeltaCursor>,
+    ) -> Option<ChunkDeltas>;
     /// Side: client.
     /// For a client mod drawing a map past the loaded chunks: each column's surface as this window's far
     /// terrain (the LOD Distance setting) holds it, whether or not the chunk is loaded. It is the finest

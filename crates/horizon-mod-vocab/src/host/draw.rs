@@ -120,7 +120,8 @@ pub trait DrawContext {
     /// block is drawn with its model, full bright and shaded by face, a face
     /// against a solid neighbour in the scene left out; a block with an
     /// `entity` (a mod's) is drawn by `block_entity_submit` as in the
-    /// world too, its `spin` parts turning with the game time. What lies
+    /// world too. A clocked copy of a type with a native scene ticker animates on
+    /// the scene clock; otherwise it uses the client clock. What lies
     /// outside the box is cut off, and the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
     /// the order drawn. Draw it from a screen's drawing hook
@@ -143,6 +144,20 @@ pub trait DrawContext {
     ) -> Result<(), SceneError> {
         Err(SceneError::Unavailable)
     }
+    /// Draws the same scene as [`draw_scene`](Self::draw_scene), then draws `overlays`
+    /// in the order given, with the same view and clip. The overlays blend with the scene
+    /// according to their ARGB alpha and depth mode without occluding one another by depth.
+    /// A bad overlay or more than [`SCENE_MAX_OVERLAYS`] overlays refuses the whole draw,
+    /// without advancing the scene clock.
+    fn draw_scene_with_overlays(
+        &mut self,
+        rect: [f32; 4],
+        scene: &Scene,
+        view: SceneView,
+        overlays: &[SceneOverlay],
+    ) -> Result<(), SceneOverlayError> {
+        Err(SceneError::Unavailable.into())
+    }
     /// Draw a [`Scene`] with additional textured faces in its own coordinates. They
     /// use the scene's projection, scissor and depth along with its blocks, entities
     /// and particles, and do not need or change its clock. Invalid faces refuse the
@@ -156,15 +171,36 @@ pub trait DrawContext {
     ) -> Result<(), SceneWithQuadsError> {
         Err(SceneWithQuadsError::Scene(SceneError::Unavailable))
     }
+    /// Draw one scene, with rigid poses on selected ranges of its blocks.
+    /// Pass sections in increasing block-index order, with nonempty,
+    /// nonoverlapping ranges. Blocks outside the ranges stay still. Model and
+    /// block-entity geometry move together. Culling against a solid neighbor
+    /// only applies within the same section (or among the still blocks), so
+    /// pulling a section away exposes both sides. All geometry shares one
+    /// depth pass, including untouched entities and particles.
+    ///
+    /// The poses change drawing only: the clock, block simulation, and
+    /// particles' collision grid still use the original cells. Use an empty
+    /// section slice for the same draw as [`draw_scene`](Self::draw_scene).
+    fn draw_scene_with_sections(
+        &mut self,
+        rect: [f32; 4],
+        scene: &Scene,
+        view: SceneView,
+        sections: &[SceneSection],
+    ) -> Result<(), SceneSectionError> {
+        Err(SceneError::Unavailable.into())
+    }
     /// `GuiGraphics.enableScissor`: what this hook call draws from now on, until the matching
     /// [`pop_clip`](Self::pop_clip), is cut to `rect` (`[x, y, w, h]` in GUI pixels, as
     /// [`fill`](Self::fill) takes it), the visible part of a sprite, glyph or item kept.
     /// Clips nest: an inner one is cut to the one around it, so it never shows more than that
     /// does. A negative width or height clips everything. What a scrolling list, a scrolling
     /// label or a viewport into a larger page draws through; a scene from
-    /// [`draw_scene`](Self::draw_scene) keeps its own box. A clip still open when the hook call
-    /// returns is closed then, so it also cuts what later listeners of the same call draw:
-    /// close what you open. Refuses a rectangle that is not finite and a 65th open clip,
+    /// [`draw_scene`](Self::draw_scene) keeps its own box. The rectangle follows the current
+    /// translation when opened and stays fixed on screen after that. A clip still open when
+    /// the hook call returns is closed then, so it also cuts what later listeners of the same
+    /// call draw: close what you open. Refuses a non-finite rectangle or a 65th open clip,
     /// leaving the clips as they were. A client's call; nothing is clipped on a server.
     fn push_clip(&mut self, rect: [f32; 4]) -> Result<(), GuiClipRefusal> {
         unimplemented!("DrawContext::push_clip")
@@ -238,6 +274,56 @@ pub trait DrawContext {
     fn widget_text_field(&mut self, field: &TextFieldView) -> TextFieldLayout {
         unimplemented!("DrawContext::widget_text_field")
     }
+    /// Draw a [`InputGlyph`] at the top-left of its layout box, using its stock artwork or key
+    /// label. `argb` multiplies its colours (`0xFFFFFFFF` leaves them unchanged). Returns `false`
+    /// when the surface cannot draw the glyph or the position is not finite.
+    fn input_glyph(&mut self, glyph: &InputGlyph, at: [f32; 2], argb: u32) -> bool {
+        false
+    }
+
+    /// Save the current GUI translation. Returns false without changing it when eight
+    /// translations are already saved. Every listener of a hook call shares the translation,
+    /// so pop what you push: an unpopped one moves what later listeners of the same call draw,
+    /// and is discarded only when the hook call returns.
+    fn push_translation(&mut self) -> bool {
+        unimplemented!("DrawContext::push_translation")
+    }
+    /// Add `by` in GUI pixels to the translation for subsequent draws. Returns false and
+    /// leaves it unchanged if the result is not finite.
+    fn translate(&mut self, by: [f32; 2]) -> bool {
+        unimplemented!("DrawContext::translate")
+    }
+    /// The current GUI translation in pixels. Starts at `[0.0, 0.0]` in each hook call.
+    fn translation(&self) -> [f32; 2] {
+        unimplemented!("DrawContext::translation")
+    }
+    /// Restore the last saved translation. Returns false if this hook call has none saved.
+    fn pop_translation(&mut self) -> bool {
+        unimplemented!("DrawContext::pop_translation")
+    }
+    /// The frame's gameplay-time advance in ticks (`DeltaTracker.getGameTimeDeltaTicks`),
+    /// not the partial tick or the wall-clock GUI easing delta.
+    fn game_time_delta_ticks(&self) -> f32 {
+        unimplemented!("DrawContext::game_time_delta_ticks")
+    }
+    /// The stock HUD hotbar panel's top-left in absolute GUI pixels. Available while its
+    /// items are drawn and in `gui_layer_post` for `minecraft:hotbar`; not for inventory
+    /// slots, the spectator hotbar, or a hidden or cancelled hotbar.
+    fn hotbar_origin(&self) -> Option<[f32; 2]> {
+        unimplemented!("DrawContext::hotbar_origin")
+    }
+    /// Draw only the normal bar, cooldown shade and count for a non-empty stack at `at`
+    /// (its icon's top-left in GUI pixels). `None` uses the stack's count; `Some` overrides
+    /// it, including with an empty string. Unlike [`gui_draw_item_with`](Self::gui_draw_item_with),
+    /// this does not draw the icon or call `item_decorations` again.
+    fn gui_draw_item_decorations_with(
+        &mut self,
+        stack: &ItemStack,
+        at: [f32; 2],
+        text: Option<&str>,
+    ) {
+        unimplemented!("DrawContext::gui_draw_item_decorations_with")
+    }
 }
 /// What a block entity, mob or player submit hook draws with, in blocks under a pose stack (`PoseStack`): one per hook call.
 pub trait BlockEntityDrawContext {
@@ -276,7 +362,7 @@ pub trait BlockEntityDrawContext {
     fn partial(&self) -> f32 {
         unimplemented!("BlockEntityDrawContext::draw_partial")
     }
-    /// The level's game time, for animations.
+    /// The level's game time, or the scene's tick for a ticking scene block entity.
     fn game_time(&self) -> i64 {
         unimplemented!("BlockEntityDrawContext::draw_game_time")
     }
@@ -285,6 +371,7 @@ pub trait BlockEntityDrawContext {
     /// `TextureManager.tick` count): pausing and `/tick freeze` hold it, and the server's
     /// time updates never set it back, unlike `game_time`. Each client counts from its
     /// own start, so it means nothing on the server or to another client.
+    /// A ticking scene block entity uses its scene's tick and partial tick instead.
     fn animation_time(&self) -> f64 {
         unimplemented!("BlockEntityDrawContext::draw_animation_time")
     }
@@ -297,6 +384,15 @@ pub trait BlockEntityDrawContext {
     /// Lights what is drawn next with `light` (as `native_draw_light` reads it).
     fn set_light(&mut self, light: u32) {
         unimplemented!("BlockEntityDrawContext::draw_set_light")
+    }
+    /// What is drawn next shows the enchanted armour glint, as an enchanted piece of armour
+    /// does (`RenderTypes.armorCutoutNoCullGlint`: `enchanted_glint_armor` scrolling over the
+    /// quads' own texture coordinates on their atlas), until `set_glint(false)`: what a mod's
+    /// worn armour drawn in an entity layer shows when its stack `has_foil`. It covers quads,
+    /// boxes, blocks, models and model parts; items keep their own foil, and text, terrain
+    /// models and fluids show none.
+    fn set_glint(&mut self, glint: bool) {
+        unimplemented!("BlockEntityDrawContext::draw_set_glint")
     }
     /// Draws a quad with `corners` in blocks under `draw`'s pose, in a model
     /// face's order (top left, bottom left, bottom right, top right as seen

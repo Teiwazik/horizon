@@ -2386,6 +2386,29 @@ fn a_loot_chest_keeps_the_components_and_lock_it_was_loaded_with() {
     assert!(full.get("keepPacked").is_none());
 }
 #[test]
+fn trial_spawner_save_overlay_uses_normalized_inline_configs() {
+    let saved = horizon_core::nbt::parse_snbt(
+        r#"{id:"minecraft:trial_spawner",x:1,y:2,z:3,normal_config:{spawn_range:4,total_mobs:6.0f},ominous_config:{spawn_range:5,total_mobs:6.0f},components:{"minecraft:custom_data":{k:1}}}"#,
+    )
+    .unwrap()
+    .0;
+    let (pos, spawner) = decode_block_entity(&saved).expect("trial_spawner");
+    let full = full_block_entity_data(
+        pos,
+        &spawner,
+        "minecraft:trial_spawner",
+        Some(&saved),
+        None,
+        None,
+    );
+    assert_eq!(full.get("normal_config"), None);
+    assert_eq!(
+        full.get("ominous_config"),
+        Some(&horizon_core::nbt::parse_snbt("{spawn_range:5}").unwrap().0)
+    );
+    assert_eq!(full.get("components"), saved.get("components"));
+}
+#[test]
 fn spawner_block_entity_round_trips() {
     // A dungeon spawner as vanilla saves it (`id` is mob_spawner, not the block).
     let saved = horizon_core::nbt::parse_snbt(
@@ -2629,6 +2652,61 @@ fn mod_block_entity_round_trips() {
         block_entity_encode::encode(pos, &back, "gtmod:macerator"),
         saved
     );
+    // A stack saved with a value equal to its item's default (`max_stack_size:64`) is
+    // still an item list: the plain decode keeps the patch as saved, so the list
+    // re-encodes exactly and its slots load.
+    let saved = horizon_core::nbt::parse_snbt(
+        r#"{id:"gtmod:macerator",x:5,y:-60,z:12,Items:[{Slot:0b,id:"minecraft:iron_ore",count:3,components:{"minecraft:max_stack_size":64}}]}"#,
+    )
+    .unwrap()
+    .0;
+    let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+    let crate::containers::BlockEntity::Mod(m) = &back else {
+        panic!("not a mod's");
+    };
+    assert!(!m.nbt.contains_key(&"Items".into()));
+    assert_eq!(m.items[0].as_ref().map(|s| s.count), Some(3));
+    assert_eq!(
+        block_entity_encode::encode(pos, &back, "gtmod:macerator"),
+        saved
+    );
+    // Taken in against the world's prototypes the slots are canonical, and a save over
+    // the loaded tag writes them so, keeping every other field as loaded.
+    let snbt = |text: &str| horizon_core::nbt::parse_snbt(text).unwrap().0;
+    let Tag::Compound(ore) = snbt(r#"{"minecraft:max_stack_size":64}"#) else {
+        unreachable!()
+    };
+    let prototypes =
+        crate::item_data::ItemPrototypes::from([("minecraft:iron_ore".to_owned(), ore)]);
+    let slot =
+        r#"{Slot:0b,id:"minecraft:iron_ore",count:3,components:{"minecraft:max_stack_size":64}}"#;
+    let clean_slot = r#"{Slot:0b,id:"minecraft:iron_ore",count:3}"#;
+    let source = snbt(&format!(
+        r#"{{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,Items:[{slot}]}}"#
+    ));
+    let (pos, mut back) = decode_block_entity(&source).expect("mod block entity");
+    assert!(back.clean_stacks(&prototypes));
+    assert!(
+        !back.clean_stacks(&prototypes),
+        "a second clean changes nothing"
+    );
+    assert_eq!(
+        full_block_entity_data(pos, &back, "gtmod:macerator", Some(&source), None, None),
+        snbt(&format!(
+            r#"{{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,Items:[{clean_slot}]}}"#
+        ))
+    );
+    // A chest saves the cleaned slot over its loaded tag.
+    let source = snbt(&format!(
+        r#"{{id:"minecraft:chest",x:0,y:0,z:0,Items:[{slot}]}}"#
+    ));
+    let (pos, mut chest) = decode_block_entity(&source).expect("chest");
+    assert!(chest.clean_stacks(&prototypes));
+    let saved = full_block_entity_data(pos, &chest, "minecraft:chest", Some(&source), None, None);
+    let Some(Tag::List(items)) = saved.get("Items") else {
+        panic!("chest items")
+    };
+    assert_eq!(items.as_slice(), [snbt(clean_slot)].as_slice());
     // `Items` that are not an item list stay the mod's, as saved.
     for items in [
         r#"Items:{energy:5}"#,

@@ -9,7 +9,7 @@ use horizon_client::{
     lang,
     mod_list::{self, Installed},
 };
-use horizon_mod_package::manifest::{MissingJar, collect_jar_requirements, missing_jars};
+use horizon_mod_package::manifest::{MissingJar, jar_requirements_for, missing_jars};
 use horizon_world::{
     item_defaults::ItemData,
     native_load_context::{LoadContext, LoadInputs},
@@ -76,6 +76,8 @@ pub(super) struct CodeSwitches {
 pub(super) struct ModsState {
     pub(super) active_condition_root: Option<Arc<horizon_client::mod_content::RootHold>>,
     pub(super) load_condition_candidate: Option<horizon_world::conditions::LoadConditions>,
+    /// Flags under which the currently installed content root was prepared.
+    pub(super) root_feature_flags: Option<Arc<[String]>>,
     pub(super) load_conditions:
         Arc<std::sync::OnceLock<Result<crate::game::load_conditions::ConditionTable, String>>>,
     pub(super) profession_declarations:
@@ -91,6 +93,9 @@ pub(super) struct ModsState {
     pub(super) dev: Vec<PathBuf>,
     pub(super) native: std::sync::Arc<horizon_mod_package::runtime::Runtime>,
     pub(super) installation_side: horizon_mod_package::manifest::Side,
+    /// Which original jars this run layers: a dedicated server and a headless run leave out
+    /// a jar whose `take` names no `data/` (`LaunchArguments::jar_side`).
+    pub(super) jar_side: horizon_mod_package::manifest::Side,
     pub(super) overrides_dir: PathBuf,
     pub(super) load_notices: Arc<Mutex<Vec<horizon_mod_package::dependencies::Notice>>>,
     pub(super) selected: std::sync::Arc<[horizon_mod_package::selection::SelectedPackage]>,
@@ -717,7 +722,8 @@ pub(super) fn content_overlay(
     let here = std::env::current_dir().unwrap_or_default();
     let original_base = root.to_owned();
 
-    let requirements = collect_jar_requirements(
+    let requirements = jar_requirements_for(
+        sources.jar_side,
         sources
             .native
             .packages()
@@ -827,7 +833,10 @@ pub(super) fn content_overlay(
         let candidate = ContentMod {
             id: m.id.clone(),
             content,
-            jars: m.jar.clone(),
+            jars: (m.jar.iter())
+                .filter(|jar| jar.needed_on(sources.jar_side))
+                .cloned()
+                .collect(),
         };
         match mod_content::accept_mod(&mut mods, candidate, known) {
             Ok(_) if source.content_only => {
@@ -1742,6 +1751,7 @@ impl Game<'_> {
             return;
         }
         let root = self.options.resources.clone();
+        let root_feature_flags = self.mods.root_feature_flags.clone();
         let data_source = self.pack.data_source.clone();
         let data_changes = self.pack.data_changes.clone();
         let additional_data = self.pack.additional_data.clone();
@@ -1751,6 +1761,7 @@ impl Game<'_> {
         let reload = move |g: &mut Game<'_>| {
             let at = std::time::Instant::now();
             g.options.resources = root;
+            g.mods.root_feature_flags = root_feature_flags;
             g.pack.data_source = data_source;
             g.pack.data_changes = data_changes;
             g.pack.additional_data = additional_data;

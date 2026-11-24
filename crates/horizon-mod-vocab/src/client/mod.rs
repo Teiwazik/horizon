@@ -1,5 +1,6 @@
 //! Client-only surfaces: screens, input, sound, drawing and options.
 
+pub(crate) mod baked_models;
 pub(crate) mod block_state_definition;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
@@ -33,8 +34,10 @@ pub mod hud_layout;
 // hidden: module of API-owned HUD values; mods use the re-export
 #[doc(hidden)]
 pub mod hud_mode;
+pub(crate) mod input_glyph;
 pub(crate) mod key_mapping;
 pub(crate) mod keyframe_animation;
+pub(crate) mod loading_overlay;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod mesher;
@@ -62,7 +65,9 @@ pub(crate) mod scene;
 pub(crate) mod screenshot;
 pub(crate) mod skull_models;
 pub(crate) mod special_model_renderers;
+pub(crate) mod star_mesh;
 pub(crate) mod terrain_draw;
+pub(crate) mod title_request;
 pub(crate) mod types;
 /// Buttons and text fields for mod screens.
 pub mod widgets;

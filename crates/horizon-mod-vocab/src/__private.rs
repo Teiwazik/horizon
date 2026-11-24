@@ -98,6 +98,23 @@ pub fn entity_part_hooked(hook: HookId, name: &'static str, kind: &str) -> bool 
         .is_some_and(|table| !table.entity(|| Some(kind)).is_empty())
 }
 
+/// Whether a block entity type has opted into the scene-only ticker.
+pub fn scene_block_entity_ticker(kind: &str) -> Option<BlockEntityTypeKey> {
+    let hook = HookId::BlockEntitySceneTick;
+    if !crate::parts::has_part_hook(hook) {
+        return None;
+    }
+    let parts = crate::parts::parts(hook, "block_entity_scene_tick");
+    if parts
+        .for_hook(hook)?
+        .block_entity_kind(|| Some(kind))
+        .is_empty()
+    {
+        return None;
+    }
+    crate::content::registry_keys::block_entity_type_key(kind)
+}
+
 /// A read backend wrapper for a host the game builds narrowed: the mob tick's
 /// goal view hands itself out as its own backend.
 pub fn backend_ref(inner: &dyn Backend) -> crate::BackendRef<'_> {
@@ -203,6 +220,38 @@ pub mod built {
             biome,
         }
     }
+    /// The loaded client surface snapshot, constructed by the game and only read by mods.
+    pub fn surface_column(
+        height: i32,
+        block: crate::BlockState,
+        biome: String,
+        sky_light: u8,
+        block_light: u8,
+    ) -> crate::SurfaceColumn {
+        crate::SurfaceColumn {
+            height,
+            block,
+            biome,
+            sky_light,
+            block_light,
+        }
+    }
+    /// A chunk journal entry, constructed by the game and read by mods.
+    pub fn chunk_delta(pos: [i32; 2], loaded: bool) -> crate::ChunkDelta {
+        crate::ChunkDelta { pos, loaded }
+    }
+    /// The current result of replaying a loaded chunk journal.
+    pub fn chunk_deltas(
+        cursor: crate::ChunkDeltaCursor,
+        full: bool,
+        changes: Vec<crate::ChunkDelta>,
+    ) -> crate::ChunkDeltas {
+        crate::ChunkDeltas {
+            cursor,
+            full,
+            changes,
+        }
+    }
     /// A retained material run, constructed by the game from the LOD tile.
     pub fn lod_column_footprint(
         min_y: i16,
@@ -262,7 +311,16 @@ pub mod built {
         bytes: u64,
     ) -> crate::ExportStatus {
         crate::ExportStatus {
-            request, name, state, frame, frames, width, height, fps_num, fps_den, bytes,
+            request,
+            name,
+            state,
+            frame,
+            frames,
+            width,
+            height,
+            fps_num,
+            fps_den,
+            bytes,
         }
     }
     /// Wrap a slot in the persistent instance group store.
@@ -292,6 +350,19 @@ pub mod game {
         where
             Self: 'a;
         fn fields(&self) -> Self::Fields<'_>;
+    }
+
+    /// A control prompt resolved by the client, with its layout size and any physical pad source.
+    pub fn input_glyph(
+        label: String,
+        size: [f32; 2],
+        controller: Option<(ControllerGlyphFamily, ControllerButton)>,
+    ) -> InputGlyph {
+        InputGlyph {
+            label,
+            size,
+            controller,
+        }
     }
 
     /// A block entity handle the game names.

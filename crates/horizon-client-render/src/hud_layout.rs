@@ -98,7 +98,7 @@ pub enum GuiDraw {
 pub type Pose = [f32; 6];
 pub const IDENTITY: Pose = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
-/// Applies `op` like JOML's `translate` / `scale` (same float order).
+/// Applies `op` like JOML's `translate` / `scale` / `rotate` (same float order).
 pub fn pose_apply(m: &mut Pose, op: PoseOp) {
     match op {
         PoseOp::Translate(x, y) => {
@@ -110,6 +110,14 @@ pub fn pose_apply(m: &mut Pose, op: PoseOp) {
             m[1] *= x;
             m[2] *= y;
             m[3] *= y;
+        }
+        PoseOp::Rotate(angle) => {
+            let (sin, cos) = angle.sin_cos();
+            let (m00, m01, m10, m11) = (m[0], m[1], m[2], m[3]);
+            m[0] = m00 * cos + m10 * sin;
+            m[1] = m01 * cos + m11 * sin;
+            m[2] = m10 * cos - m00 * sin;
+            m[3] = m11 * cos - m01 * sin;
         }
     }
 }
@@ -259,6 +267,11 @@ pub struct HotbarInputs {
     pub attack: Option<f32>,
 }
 
+/// The origin of the stock item hotbar panel in absolute GUI pixels.
+pub fn hotbar_origin(w: i32, h: i32) -> [i32; 2] {
+    [w / 2 - 91, h - 22]
+}
+
 /// `Hud.extractItemHotbar`.
 pub fn hotbar(w: i32, h: i32, i: &HotbarInputs) -> Vec<GuiDraw> {
     let mut out = Vec::new();
@@ -269,11 +282,12 @@ pub fn hotbar(w: i32, h: i32, i: &HotbarInputs) -> Vec<GuiDraw> {
 /// Appends [`hotbar`] draws to `out` without allocating a new buffer.
 pub fn hotbar_into(w: i32, h: i32, i: &HotbarInputs, out: &mut Vec<GuiDraw>) {
     let center = w / 2;
-    out.push(sprite("hud/hotbar", center - 91, h - 22, 182, 22));
+    let [x, y] = hotbar_origin(w, h);
+    out.push(sprite("hud/hotbar", x, y, 182, 22));
     out.push(sprite(
         "hud/hotbar_selection",
-        center - 91 - 1 + i.selected * 20,
-        h - 22 - 1,
+        x - 1 + i.selected * 20,
+        y - 1,
         24,
         23,
     ));
@@ -320,14 +334,7 @@ pub fn hotbar_into(w: i32, h: i32, i: &HotbarInputs, out: &mut Vec<GuiDraw>) {
     let mut seed = 1;
     for (n, pop) in i.slots.iter().enumerate() {
         if let Some(pop) = pop {
-            slot(
-                n as u32,
-                center - 90 + n as i32 * 20 + 2,
-                h - 16 - 3,
-                seed,
-                *pop,
-                out,
-            );
+            slot(n as u32, x + 3 + n as i32 * 20, y + 3, seed, *pop, out);
         }
         seed += 1;
     }
@@ -649,18 +656,46 @@ fn heart(
 }
 
 impl HealthHud {
+    /// The blink `Hud.extractPlayerHealth` computes before updating health history for this frame.
+    pub fn heart_blink(&self, tick: i32) -> bool {
+        let tick = i64::from(tick);
+        self.health_blink_time > tick && (self.health_blink_time - tick) / 3 % 2 == 1
+    }
+
     /// `Hud.extractPlayerHealth` for a screen of `w` x `h` GUI pixels.
     pub fn layout(&mut self, i: &HealthInputs, w: i32, h: i32) -> Vec<GuiDraw> {
+        self.layout_with_heart_blink(i, w, h, self.heart_blink(i.tick))
+    }
+
+    /// The vanilla layout with an explicit blink argument for `Hud.extractHearts`.
+    pub fn layout_with_heart_blink(
+        &mut self,
+        i: &HealthInputs,
+        w: i32,
+        h: i32,
+        blink: bool,
+    ) -> Vec<GuiDraw> {
         let mut out = Vec::new();
-        self.layout_into(i, w, h, &mut out);
+        self.layout_into_with_heart_blink(i, w, h, blink, &mut out);
         out
     }
 
     /// Appends [`HealthHud::layout`] draws to `out` without allocating a new buffer.
     pub fn layout_into(&mut self, i: &HealthInputs, w: i32, h: i32, out: &mut Vec<GuiDraw>) {
+        self.layout_into_with_heart_blink(i, w, h, self.heart_blink(i.tick), out);
+    }
+
+    /// [`HealthHud::layout_into`] with an explicit blink argument for `Hud.extractHearts`.
+    pub fn layout_into_with_heart_blink(
+        &mut self,
+        i: &HealthInputs,
+        w: i32,
+        h: i32,
+        blink: bool,
+        out: &mut Vec<GuiDraw>,
+    ) {
         let tick = i64::from(i.tick);
         let current = ceil(i.health);
-        let blink = self.health_blink_time > tick && (self.health_blink_time - tick) / 3 % 2 == 1;
         if current < self.last_health && i.damage_cooldown {
             self.last_health_time = i.millis;
             self.health_blink_time = tick + 20;
@@ -821,11 +856,7 @@ impl HealthHud {
 /// the caller (they need the item renderer) and so are the vignette and
 /// nausea blits (their blending needs the screen-effect pipeline).
 pub fn paint(batch: &mut crate::hud::HudBatch, atlas: &crate::hud::HudAtlas, draws: &[GuiDraw]) {
-    if draws.is_empty() {
-        return;
-    }
-    let mut scratch = crate::hud::HudGlyphScratch::new();
-    paint_with_scratch(batch, atlas, draws, &mut scratch);
+    paint_translated(batch, atlas, draws, [0.0; 2]);
 }
 
 /// [`paint`], reusing `scratch` for staged glyphs across any [`GuiDraw::Text`] calls.
@@ -835,11 +866,36 @@ pub fn paint_with_scratch(
     draws: &[GuiDraw],
     scratch: &mut crate::hud::HudGlyphScratch,
 ) {
+    paint_translated_with_scratch(batch, atlas, draws, [0.0; 2], scratch);
+}
+
+/// Paints the same calls starting at `translation` instead of the origin.
+pub fn paint_translated(
+    batch: &mut crate::hud::HudBatch,
+    atlas: &crate::hud::HudAtlas,
+    draws: &[GuiDraw],
+    translation: [f32; 2],
+) {
+    if draws.is_empty() {
+        return;
+    }
+    let mut scratch = crate::hud::HudGlyphScratch::new();
+    paint_translated_with_scratch(batch, atlas, draws, translation, &mut scratch);
+}
+
+/// [`paint_translated`], reusing `scratch` for staged glyphs.
+fn paint_translated_with_scratch(
+    batch: &mut crate::hud::HudBatch,
+    atlas: &crate::hud::HudAtlas,
+    draws: &[GuiDraw],
+    [dx, dy]: [f32; 2],
+    scratch: &mut crate::hud::HudGlyphScratch,
+) {
     if draws.is_empty() {
         return;
     }
     const GUI_SPRITE_PREFIX: &str = "gui/sprites/";
-    let mut stack: SmallVec<[Pose; 4]> = smallvec![IDENTITY];
+    let mut stack: SmallVec<[Pose; 4]> = smallvec![[1.0, 0.0, 0.0, 1.0, dx, dy]];
     // Stack buffer for typical `gui/sprites/<name>` keys; spills only on >116-byte sprite names.
     let mut name_buf = [0u8; 128];
     name_buf[..GUI_SPRITE_PREFIX.len()].copy_from_slice(GUI_SPRITE_PREFIX.as_bytes());
@@ -1046,6 +1102,103 @@ fn opaque(color: u32) -> u32 {
 #[cfg(test)]
 #[path = "hud_layout_gradient_tests.rs"]
 mod gradient_tests;
+
+#[cfg(test)]
+mod pose_tests {
+    use super::*;
+
+    /// A quarter turn about a pivot (`translate`, then `rotate`, as a mod's compass needle
+    /// would push it) lays a fill's corners clockwise round that pivot on the screen.
+    #[test]
+    fn a_rotated_fill_turns_about_the_pivot() {
+        let atlas =
+            crate::hud::HudAtlas::build(&crate::resource_source::ResourceSource::directory(
+                "/nonexistent/horizon-test-assets".into(),
+            ))
+            .unwrap();
+        let mut batch = crate::hud::HudBatch::scratch([854, 480]);
+        let draws = [
+            GuiDraw::Push(vec![
+                PoseOp::Translate(100.0, 50.0),
+                PoseOp::Rotate(std::f32::consts::FRAC_PI_2),
+            ]),
+            GuiDraw::Fill {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 4,
+                color: WHITE,
+            },
+            GuiDraw::Pop,
+        ];
+        paint(&mut batch, &atlas, &draws);
+        let mut corners: Vec<[i32; 2]> = batch
+            .vertices
+            .iter()
+            .map(|v| [v.pos[0].round() as i32, v.pos[1].round() as i32])
+            .collect();
+        corners.sort();
+        corners.dedup();
+        // (0,0) stays at the pivot, (10,0) goes 10 down, (0,4) 4 to the left.
+        assert_eq!(corners, [[96, 50], [96, 60], [100, 50], [100, 60]]);
+    }
+}
+
+#[cfg(test)]
+mod heart_blink_tests {
+    use super::*;
+
+    #[test]
+    fn overriding_blink_changes_only_heart_sprites_and_keeps_damage_history() {
+        let mut vanilla = HealthHud {
+            last_health: 20,
+            display_health: 20,
+            last_health_time: 1_950,
+            health_blink_time: 19,
+            ..HealthHud::default()
+        };
+        let mut suppressed = vanilla.clone();
+        let inputs = HealthInputs {
+            tick: 10,
+            millis: 2_000,
+            health: 15.0,
+            max_health: 20.0,
+            absorption: 0.0,
+            armor: 6,
+            food: 18,
+            saturation: 5.0,
+            kind: HeartKind::Normal,
+            regeneration: false,
+            hunger: false,
+            hardcore: false,
+            damage_cooldown: true,
+            air: 300,
+            max_air: 300,
+            under_water: false,
+            vehicle_hearts: 0,
+        };
+        // A new hit updates the timer, but the frame uses the blink from before the update.
+        assert!(vanilla.heart_blink(inputs.tick));
+        let expected = vanilla.layout(&inputs, 320, 240);
+        let actual = suppressed.layout_with_heart_blink(&inputs, 320, 240, false);
+
+        let is_heart = |draw: &&GuiDraw| matches!(draw, GuiDraw::Sprite { sprite, .. } if sprite.starts_with("hud/heart/"));
+        let is_blink = |draw: &GuiDraw| matches!(draw, GuiDraw::Sprite { sprite, .. } if sprite.starts_with("hud/heart/") && sprite.ends_with("_blinking"));
+        assert!(expected.iter().any(is_blink));
+        assert!(!actual.iter().any(is_blink));
+        assert!(
+            expected
+                .iter()
+                .filter(|draw| !is_heart(draw))
+                .eq(actual.iter().filter(|draw| !is_heart(draw)))
+        );
+        assert_eq!(suppressed.last_health, 15);
+        assert_eq!(suppressed.display_health, 20);
+        assert_eq!(suppressed.last_health_time, 2_000);
+        assert_eq!(suppressed.health_blink_time, 30);
+        assert!(suppressed.heart_blink(15));
+    }
+}
 
 #[cfg(test)]
 mod tests {

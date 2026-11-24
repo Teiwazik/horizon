@@ -1120,6 +1120,12 @@ impl LevelAccess for GameLevel<'_> {
             .get(&[pos.x, pos.y, pos.z])
             .map(|s| s.status == horizon_client::block_entity_anim::ShulkerStatus::Closed)
     }
+    fn shulker_lid_progress(&self, pos: BlockPos) -> Option<f32> {
+        self.world
+            .shulkers
+            .get(&[pos.x, pos.y, pos.z])
+            .map(|s| s.progress)
+    }
     fn remove_block_entity(&mut self, pos: BlockPos, old: BlockStateId, side_effects: bool) -> u8 {
         if let Some(change) = &mut self.command_block_transition
             && change.preserve(self.world, pos, old)
@@ -1140,8 +1146,10 @@ impl LevelAccess for GameLevel<'_> {
         };
         let name = &block.name;
         let tag = Tag::Compound(nbt);
-        if let Some((key, entity)) = horizon_client::save::decode_block_entity_for_block(&tag, name)
+        if let Some((key, mut entity)) =
+            horizon_client::save::decode_block_entity_for_block(&tag, name)
         {
+            entity.clean_stacks(&self.items.component_defaults);
             self.world.block_entities.insert(key, entity);
             if tag.get("LootTable").is_some() {
                 self.emit(LevelEvent::ContainerLootTable { pos, tag });

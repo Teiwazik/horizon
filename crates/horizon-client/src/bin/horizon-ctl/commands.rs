@@ -292,6 +292,23 @@ const CONFIRM: Param = Param {
 
 /// MCP tools that delete or overwrite the player's things (`destructiveHint`).
 pub const DESTRUCTIVE: &[&str] = &["world-delete", "fill", "setblock"];
+/// MCP tools whose result can hold text other people wrote (chat, signs, books, names, MOTDs,
+/// log lines, item names and lore): the MCP server labels it untrusted data (docs/security.md).
+pub const UNTRUSTED: &[&str] = &[
+    "events",
+    "messages",
+    "inventory",
+    "container",
+    "screen",
+    "ui",
+    "entities",
+    "wait-for",
+    "logs",
+    "servers",
+    "book",
+    "friends",
+    "lan",
+];
 /// MCP tools that reach other players or the network (`openWorldHint`): only when the player asks.
 pub const OPEN_WORLD: &[&str] = &["connect", "lan", "friends", "chat", "command"];
 
@@ -807,6 +824,14 @@ pub fn markdown() -> String {
                     args.join("<br>")
                 }
             ));
+        }
+        if group == Group::World {
+            out.push_str(
+                "\n`tp`, `give`, `xp`, `enchant`, `potion`, `effect`, `time`, `summon`, and a writing\n\
+                 `container` require the world's host. To ask a multiplayer server to act, use `command`\n\
+                 with the corresponding server command; the server checks the player's permissions.\n\
+                 Reading `container` as a guest returns the items the client currently knows.\n",
+            );
         }
     }
     out.push_str(
