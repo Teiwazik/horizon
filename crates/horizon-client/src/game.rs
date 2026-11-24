@@ -961,6 +961,9 @@ struct Game<'a> {
     streaming: Streaming,
     lod: Option<horizon_client::lod::Lod>,
     lod_source_attempted: bool,
+    /// Whether the next far terrain created should arm its world-entry
+    /// first-load hold (`Lod::arm_first_load`).
+    lod_first_load: bool,
     lod_observe: horizon_client::fast_hash::FxHashSet<(i32, i32)>,
     /// The server level far terrain keeps the chunks of.
     lod_level: Option<String>,
@@ -1340,6 +1343,9 @@ struct Game<'a> {
     /// The save a native mod asked the title to open (`request_world`), taken by the title's next frame, which
     /// asks the player first.
     native_world_request: Option<native_world_request::Request>,
+    /// What a native mod's own title page asked for (`request_title`), run by the title's next frame as the main
+    /// page's button would run it.
+    native_title_request: Option<mod_api::TitleRequest>,
     /// Armor slots: head, chest, legs, feet.
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
@@ -1704,7 +1710,7 @@ struct Game<'a> {
     /// The mod whose own screen is open (`Screen::Mod`).
     native_mod_screen: Option<String>,
     /// Meshed sections waiting for an upload budget (Horizon settings).
-    pending_uploads: Vec<((i32, i32, i32), horizon_client::mesher::SectionMesh)>,
+    pending_uploads: horizon_client::streaming::PendingUploads,
     upload_pace: upload_pace::UploadPace,
     /// This frame's view frustum, for culling entities and block entities.
     view_frustum: Option<horizon_client::gfx::JoinedFrusta>,
@@ -3150,7 +3156,12 @@ impl Game<'_> {
                 .iter()
                 .filter(|g| h.hub.here(g))
                 .filter(|g| !g.is_fake()) // fake players hold small forced tickets below
-                .map(|g| (g.ticket_chunk(), g.spectator()))
+                // A mod's view centre loads around it as around the player, who keeps their own
+                // chunks loaded where they stand (`Hub::set_view_center`).
+                .flat_map(|g| {
+                    std::iter::once((g.ticket_chunk(), g.spectator()))
+                        .chain(g.view_center.map(|c| (c, g.spectator())))
+                })
                 .collect()
         });
         if let Some(p) = &self.player {
@@ -4877,6 +4888,16 @@ impl Game<'_> {
             // resource-reload failure still shows on the title (#4428).
             let drawn = self.draw_title_screen_with_pre_hook(batch);
             if drawn && let Some(title) = &self.title {
+                let mut decorate = |row: horizon_client::multiplayer::SavedServerRow<'_>,
+                                    batch: &mut HudBatch| {
+                    self.decorate_server_row(row, batch)
+                };
+                let decorate =
+                    (mod_api::__private::listened(mod_api::HookId::ServerListRowDecorations)
+                        && self.title_screen_render_uncovered())
+                    .then_some(
+                        &mut decorate as &mut horizon_client::multiplayer::DecorateServerRow<'_>,
+                    );
                 title.draw_with_items(
                     &self.gui.atlas,
                     Some(&self.pack.item_renderer),
@@ -4885,6 +4906,7 @@ impl Game<'_> {
                     self.settings.file.bool("hideSplashTexts"),
                     self.settings.file.bool("hideServerAddress"),
                     &mut |phase, batch| self.draw_screen_phase(batch, phase),
+                    decorate,
                 );
             }
             // ScreenEvent.Render.Post over the title's own screens: a mod draws
@@ -5403,6 +5425,33 @@ impl Game<'_> {
         let posed = self.skin_frame.borrow().vertices;
         self.entity_motion_posed.borrow_mut().push(posed);
     }
+    /// Visible block entities inside the view frustum (or marked off-screen),
+    /// matching live block states that `BlockEntityRenderer` renders.
+    fn frustum_block_entities<'a>(
+        &'a self,
+        r: &'a Renderer,
+        camera: glam::DVec3,
+        view: Option<horizon_client::gfx::JoinedFrusta>,
+        reach: &'a Arc<[u8]>,
+    ) -> impl Iterator<Item = &'a ([i32; 3], u32)> {
+        r.visible_block_entities_in_frustum(self.settings.chunk_fade, camera, view, Some(reach))
+            .filter(move |(block, section_inside)| {
+                let (pos, state) = **block;
+                self.live_block_entity_render(pos, state)
+                    && (block_entity_off_screen(reach, state)
+                        || *section_inside
+                        || view.is_none_or(|v| {
+                            let o = (glam::DVec3::new(
+                                f64::from(pos[0]),
+                                f64::from(pos[1]),
+                                f64::from(pos[2]),
+                            ) - camera)
+                                .as_vec3();
+                            v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
+                        }))
+            })
+            .map(|(block, _)| block)
+    }
     /// ItemEntityRenderer: items bob and spin; blocks render as small cubes.
     fn entity_geometry(
         &mut self,
@@ -5682,38 +5731,15 @@ impl Game<'_> {
             // Both flags are one byte per state, worked out once (`block_entity_reach`): a frame
             // asks them of every block entity within 256 blocks.
             let reach = block_entity_reach(&self.res);
-            let off_screen = |state: u32| {
-                reach
-                    .get(state as usize)
-                    .is_some_and(|flags| flags & 1 != 0)
-            };
-            let in_view = |p: &[i32; 3]| {
-                view.is_none_or(|v| {
-                    let o = (glam::DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
-                        - camera)
-                        .as_vec3();
-                    v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
-                })
-            };
+            let has_pack = self.pack_ids.is_some();
             // Only materialize `camera_list` / `shadow_only` when a shader pack needs
             // shadow-pass span hiding (#8464); the default path streams frustum-visible
             // block entities directly in a single pass with zero heap allocations.
-            let (camera_list, shadow_only, shadow_only_at) = if self.pack_ids.is_some()
+            let (camera_list, shadow_only, shadow_only_at) = if has_pack
                 && self.occlusion.shadow_casters.0
             {
-                let camera_list: Vec<&([i32; 3], u32)> = r
-                    .visible_block_entities_in_frustum(
-                        self.settings.chunk_fade,
-                        camera,
-                        view,
-                        Some(&reach),
-                    )
-                    .filter(|(block, section_inside)| {
-                        let (pos, state) = **block;
-                        self.live_block_entity_render(pos, state)
-                            && (off_screen(state) || *section_inside || in_view(&pos))
-                    })
-                    .map(|(block, _)| block)
+                let camera_list: Vec<&([i32; 3], u32)> = self
+                    .frustum_block_entities(r, camera, view, &reach)
                     .collect();
                 // A shader pack's shadow pass draws the block entities of every section it draws,
                 // in the view or not (`Renderer::shadow_pass_block_entities`, #8464): those the
@@ -5731,7 +5757,7 @@ impl Game<'_> {
                 (Vec::new(), Vec::new(), None)
             };
             let dynamic_visible = |pos: [i32; 3], state: u32, lo: glam::DVec3, hi: glam::DVec3| {
-                if off_screen(state)
+                if block_entity_off_screen(&reach, state)
                     || shadow_only_at
                         .as_ref()
                         .is_some_and(|set| set.contains(&pos))
@@ -5807,12 +5833,11 @@ impl Game<'_> {
             // and disables their per-section GPU cache. Shader packs still need
             // per-entity span marks, so they keep the callback path.
             let block_entities = out.len();
-            if self.pack_ids.is_some() {
+            if has_pack {
                 let section_revision = |pos| r.block_entity_section_revision(pos);
-                if let Some(shadow_only_at) = &shadow_only_at {
+                static_block_entity_stats = if let Some(shadow_only_at) = &shadow_only_at {
                     let visible = camera_list.into_iter().chain(shadow_only.iter().copied());
-                    static_block_entity_stats = self
-                        .res
+                    self.res
                         .block_entity_render()
                         .render_with_cache_options_and_callbacks(
                             &scene,
@@ -5830,27 +5855,13 @@ impl Game<'_> {
                                     self.hide_spans_from(start, out.len());
                                 }
                             },
-                        );
-                } else {
-                    let visible = r
-                        .visible_block_entities_in_frustum(
-                            self.settings.chunk_fade,
-                            camera,
-                            view,
-                            Some(&reach),
                         )
-                        .filter(|(block, section_inside)| {
-                            let (pos, state) = **block;
-                            self.live_block_entity_render(pos, state)
-                                && (off_screen(state) || *section_inside || in_view(&pos))
-                        })
-                        .map(|(block, _)| block);
-                    static_block_entity_stats = self
-                        .res
+                } else {
+                    self.res
                         .block_entity_render()
                         .render_with_cache_options_and_callbacks(
                             &scene,
-                            visible,
+                            self.frustum_block_entities(r, camera, view, &reach),
                             block_entity_cache,
                             r.block_entity_revision(),
                             Some(&section_revision),
@@ -5860,22 +5871,10 @@ impl Game<'_> {
                                 self.mark_motion(start, motion_block_entity(pos));
                             },
                             |_, _, _, _| {},
-                        );
-                }
+                        )
+                };
             } else {
-                let visible = r
-                    .visible_block_entities_in_frustum(
-                        self.settings.chunk_fade,
-                        camera,
-                        view,
-                        Some(&reach),
-                    )
-                    .filter(|(block, section_inside)| {
-                        let (pos, state) = **block;
-                        self.live_block_entity_render(pos, state)
-                            && (off_screen(state) || *section_inside || in_view(&pos))
-                    })
-                    .map(|(block, _)| block);
+                let visible = self.frustum_block_entities(r, camera, view, &reach);
                 let cache_candidates = r
                     .visible_block_entities_in_frustum(self.settings.chunk_fade, camera, None, None)
                     .filter(|(block, _)| self.live_block_entity_render(block.0, block.1))
@@ -6592,7 +6591,7 @@ impl Game<'_> {
         self.using = None;
         self.set_screen(Screen::Playing);
         self.hide_title();
-        self.clear_lod();
+        self.clear_lod_for_world_entry();
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
@@ -6644,6 +6643,7 @@ impl Game<'_> {
         self.clear_entities();
         self.set_screen(Screen::Playing);
         self.clear_lod();
+        self.lod_first_load = false;
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
@@ -9917,6 +9917,12 @@ impl Game<'_> {
                             {
                                 self.smooth_camera_action();
                             }
+                            // `key.fullbright` takes mouse buttons too (`bind_mouse`), and no
+                            // vanilla mapping translates it: its press is taken here as the key's
+                            // is. It is not swallowed: the mappings on this button still run below.
+                            if pressed {
+                                self.fullbright_key_press(&input);
+                            }
                             for mapped in self.settings.keys.translate_mouse_all(button) {
                                 match mapped {
                                     Err(b)
@@ -10344,6 +10350,16 @@ impl Game<'_> {
                             .is_some_and(|n| self.settings.keys.get("key.smoothCamera") == n)
                     {
                         self.smooth_camera_action();
+                    }
+                    // `key.fullbright` is Horizon's, unbound by default: no vanilla mapping
+                    // translates it, so its press is taken here. It is not swallowed: a key it
+                    // shares with a mapping still drives that mapping, as vanilla runs every
+                    // mapping bound to a key.
+                    if event.state == ElementState::Pressed
+                        && !event.repeat
+                        && let Some(name) = horizon_client::keybinds::key_name(key)
+                    {
+                        self.fullbright_key_press(name);
                     }
                     // ScreenEvent.KeyPressed.Post / KeyReleased.Post: no screen arm
                     // took the key, so the open screen's `keyPressed` returned
@@ -10790,6 +10806,7 @@ impl<'a> Game<'a> {
             streaming,
             lod: None,
             lod_source_attempted: false,
+            lod_first_load: false,
             far_beacons: HashMap::new(),
             lod_observe: Default::default(),
             lod_level: None,
@@ -11001,6 +11018,7 @@ impl<'a> Game<'a> {
             frame_ticks: 0.0,
             title: None,
             native_world_request: None,
+            native_title_request: None,
             armor: [None, None, None, None],
             offhand: None,
             equipment: Default::default(),
@@ -11201,7 +11219,7 @@ impl<'a> Game<'a> {
             view_frustum: None,
             occlusion: Default::default(),
             async_particle_culler: RefCell::new(Default::default()),
-            pending_uploads: Vec::new(),
+            pending_uploads: horizon_client::streaming::PendingUploads::new(),
             upload_pace: Default::default(),
             frame_graph: Default::default(),
             extras: Default::default(),
@@ -11882,6 +11900,10 @@ impl Game<'_> {
 mod sign_chain_tests;
 
 #[cfg(test)]
+#[path = "game/interface/tests/sign_update_tests.rs"]
+mod sign_update_tests;
+
+#[cfg(test)]
 #[path = "game/interface/tests/sign_use_tests.rs"]
 mod sign_use_tests;
 
@@ -11919,6 +11941,12 @@ mod hud_vertex_tests {
         assert!(batch.vertices.is_empty());
         assert!(batch.vertices.capacity() >= capacity);
     }
+}
+
+fn block_entity_off_screen(reach: &[u8], state: u32) -> bool {
+    reach
+        .get(state as usize)
+        .is_some_and(|flags| flags & 1 != 0)
 }
 
 /// For each block state, whether its block entity draws off screen (1: beacons, end gateways,

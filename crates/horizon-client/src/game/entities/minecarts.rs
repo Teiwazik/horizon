@@ -902,12 +902,14 @@ impl Game<'_> {
         if self.minecart_improvements() {
             self.move_along_track_new(c, intent);
         } else if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
+            c.on_rails = true;
             self.move_along_track(c, pos, &rail, intent, slot);
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
                 self.activate_cart(c, rail.powered);
             }
         } else {
+            c.on_rails = false;
             self.come_off_track(c);
             c.fire_move_at = Some(c.position);
         }
@@ -2102,6 +2104,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.carts.is_empty() {
+            return;
+        }
         let a = alpha as f32;
         let Some(uv) = self
             .gui
@@ -2112,6 +2117,7 @@ impl Game<'_> {
         else {
             return;
         };
+        let mut poses = Poses::pooled();
         // Entity.shouldRenderAtSqrDistance: 64 times the bounding box's mean
         // edge, scaled by the view scale.
         let range = (WIDTH + HEIGHT + WIDTH) / 3.0 * 64.0 * self.view_scale();
@@ -2268,7 +2274,7 @@ impl Game<'_> {
                 }
             }
             let m = base * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0));
-            let poses = Poses::new(model);
+            poses.reset(model);
             horizon_client::mobs::render::draw(model, m, &poses, uv, 0xFFFF_FFFF, packed, 0, out);
             self.finish_lit_entity(culling, c, out, entity_start);
         }
@@ -3366,6 +3372,62 @@ mod tnt_cart_power_tests {
             restored.explosion_speed_factor,
             DEFAULT_EXPLOSION_SPEED_FACTOR
         );
+    }
+}
+
+#[cfg(test)]
+mod default_on_rails_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "daily"]
+    fn default_behaviour_updates_on_rails_every_tick() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            assert!(!game.minecart_improvements());
+            let mut chunk = horizon_client::chunk::Chunk::empty(0, 0);
+            chunk.lit = true;
+            game.world.chunks.insert((0, 0), std::sync::Arc::new(chunk));
+            let rail = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:rail")
+                .expect("minecraft:rail state");
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .expect("minecraft:stone state");
+            game.world.set(4, 63, 4, stone).unwrap();
+            game.world.set(4, 64, 4, rail).unwrap();
+            game.world.set(10, 63, 10, stone).unwrap();
+            game.carts.push(Minecart::new(
+                81,
+                CartKind::Rideable,
+                Vec3::new(4.5, 64.0, 4.5),
+            ));
+            assert!(!game.carts[0].on_rails);
+
+            game.tick_carts();
+            assert!(
+                game.carts[0].on_rails,
+                "default minecart behaviour should mark a cart on a rail as on_rails"
+            );
+
+            let air = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:air")
+                .expect("minecraft:air state");
+            game.world.set(4, 64, 4, air).unwrap();
+            game.tick_carts();
+            assert!(
+                !game.carts[0].on_rails,
+                "default minecart behaviour should clear on_rails when off track"
+            );
+        });
     }
 }
 

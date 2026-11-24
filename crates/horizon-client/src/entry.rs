@@ -24,6 +24,7 @@ impl Startup {
 /// and resource marker metadata only: no logging, account loading, mods or worker threads.
 /// Account IO, cwd changes and command registration remain in Options::read, after leases.
 pub fn prepare() -> Startup {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     horizon_mod_package::holder::enter();
     let result: crate::Result<_> = (|| {
         let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -39,7 +40,10 @@ pub fn prepare() -> Startup {
     let Some(options) = options else {
         std::process::exit(0);
     };
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let capture = horizon_mod_package::holder::acquire(&launch);
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let capture = None;
     Startup {
         launch,
         options,
@@ -156,6 +160,14 @@ pub fn start<G>(
     );
     // The log's first line names the build, so a bug report that carries the log says which one it was.
     log::info!("Horizon {}", crash::version());
+    // The machine's power state, on its own thread at 1 Hz and never in the frame loop: the
+    // window's tick says in the log what changed, and the graphics page says what the OS is
+    // reporting about the machine (its energy saver, or a CPU held below full speed;
+    // `horizon_system::power`, docs/graphics.md). A dedicated server has no window and no page,
+    // so it doesn't start the thread.
+    if side == "client" {
+        horizon_system::power::start();
+    }
     // Mods' startup bars and lines (`RegistrationContext::progress`), before they register.
     game::startup_progress::install(side == "server");
     // Mod loading emits refusals; both client and dedicated logs must exist first.
@@ -270,6 +282,14 @@ pub(crate) fn install_client_hooks() {
             let reader = horizon_client_render::api_context::LoopReader(context);
             let context = reader.context();
             mod_api::dispatch_living_heal(&context, entity, amount, cancel);
+        },
+        living_heal_cause: |context, entity, cause, amount| {
+            if !mod_api::__private::listened(mod_api::HookId::LivingHealCause) {
+                return;
+            }
+            let reader = horizon_client_render::api_context::LoopReader(context);
+            let context = reader.context();
+            mod_api::dispatch_living_heal_cause(&context, entity, cause, amount);
         },
         living_breathe: |context, entity, kind, can_breathe, consume, refill| {
             if !mod_api::__private::listened(mod_api::HookId::LivingBreathe) {

@@ -732,6 +732,10 @@ pub(super) struct Remote {
     pub(super) own_stingers: i32,
     /// `Player.DATA_SHOULDER_PARROT_LEFT` and `_RIGHT` of the own player.
     pub(super) own_shoulders: [Option<i32>; 2],
+    /// `Entity.DATA_POSE` of the own player as the server last sent it (a pose a plugin
+    /// shows only this viewer included), with the local pose it arrived over: the third-person
+    /// body draws it until the local pose changes.
+    pub(super) own_pose: Option<(crate::pose::Pose, crate::pose::Pose)>,
     /// The local player's profile UUID (always in the level).
     pub(super) profile: u128,
     /// The local player's profile name: its score holder and team member.
@@ -778,7 +782,7 @@ pub(super) struct Remote {
     overworld_clock: Option<i32>,
     clock_game_time: i64,
     /// `ClientChunkCache.Storage`'s view centre (ClientboundSetChunkCacheCenterPacket).
-    chunk_center: (i32, i32),
+    pub(in crate::game) chunk_center: (i32, i32),
     /// Received events a frame left for the next one, in order, with each
     /// item's arrival time so `BACKLOG_LIMIT` tracks the front item's age
     /// instead of staying overdue for an entire continuous chunk stream.
@@ -2459,6 +2463,9 @@ mod interaction_event_tests;
 
 #[cfg(test)]
 mod native_entity_tests;
+
+#[cfg(test)]
+mod dimension_transition_tests;
 
 #[cfg(test)]
 mod effect_blend_tests;

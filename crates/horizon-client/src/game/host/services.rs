@@ -70,6 +70,17 @@ impl Commands for Game<'_> {
         );
         self.native_run_command_with_output(line)
     }
+    fn command_info(&mut self, label: &str) -> Option<mod_api::CommandInfo> {
+        mod_api::__private::check_access("command_info", mod_api::__private::LoadAccess::WorldOnly);
+        self.native_command_info(label)
+    }
+    fn command_names(&mut self) -> Vec<String> {
+        mod_api::__private::check_access(
+            "command_names",
+            mod_api::__private::LoadAccess::WorldOnly,
+        );
+        self.native_command_names()
+    }
 }
 impl Levels for Game<'_> {
     fn list_levels(&self) -> Vec<LevelRef> {
@@ -81,6 +92,15 @@ impl Messages for Game<'_> {
     fn text_allowed(&self, text: &str) -> Option<bool> {
         mod_api::__private::check_access("text_allowed", mod_api::__private::LoadAccess::WorldOnly);
         self.native_text_allowed(text)
+    }
+    fn console_log(
+        &self,
+        mod_id: &str,
+        level: ConsoleLevel,
+        line: &str,
+    ) -> Result<(), ConsoleLogRefusal> {
+        mod_api::__private::check_access("console_log", mod_api::__private::LoadAccess::WorldOnly);
+        self.native_console_log(mod_id, level, line)
     }
     fn broadcast(&self, line: Text) -> Result<(), mod_api::text::TextFormError> {
         mod_api::__private::check_access("broadcast", mod_api::__private::LoadAccess::WorldOnly);
