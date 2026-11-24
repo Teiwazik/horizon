@@ -75,6 +75,18 @@ world, its culling, the billboards facing the camera and `Camera.view` follow it
 first-person hand and the HUD stay level. It is a hook of its own rather than a field of
 `CameraPoseEvent` so that wasm mods built before it keep loading.
 
+## Hurt feedback
+
+Use `hurt_camera` to change vanilla's camera reaction itself. Multiply the event's `strength` to scale
+the Damage Tilt setting, or set `hurt_dir` to `0.0` for a straight roll. Cancel the event to skip the
+damage tilt and death twist for both the world and the first-person hand. The callback does not
+change damage, walking bob, or additive `camera_shake`.
+
+`heart_blink` changes the blink argument of the vanilla heart draw without replacing the health
+layout or changing its history. From a writable client callback, `host.show_action_bar(text)` shows
+a styled `Text` above this client's hotbar. It works on servers without operator access and does
+not send a packet.
+
 ## Viewed levels
 
 A server can open other levels for a client to view besides the one the player is in (`horizon:levels`,
@@ -110,6 +122,13 @@ A column no tile covers yet is `None`, and every column is `None` while far terr
 after the player moves away: keep what you read. Inside the loaded chunks read them instead
 (`client_surface_heights`), since a far tile can lag an edit. No client world, or more than
 65,536 columns in one call, is `Err` and reads nothing.
+
+`client_lod_columns(&[(tile_x, tile_z, level)])` reads the exact retained CPU tiles, without
+substituting another level. Each ready tile returns its cell width and 256 cells in
+`z * 16 + x` order. A cell holds the top drawn material run, its half-open Y range, biome and
+retained light, or `None` when empty. This also covers detailed runs without ground-picking
+surface metadata. A missing tile is `None`, not 256 empty cells. A call can request at most
+256 tiles and never schedules terrain or reads anything new from the server.
 
 ## Crosshair reads
 

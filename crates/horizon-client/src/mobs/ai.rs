@@ -104,17 +104,9 @@ mod inside_walk_tests {
             bounce_on: |_, _, _, _, _| {},
             // The production binding's own shape: the whole callback staged,
             // a panic contained with it.
-            inside_fire: |_level,
-                          _dimension,
-                          _entity,
-                          _kind,
-                          _state,
-                          at,
-                          _precise,
-                          staged,
-                          _writes| {
+            inside_fire: |_level, _dimension, contact, _precise, _swept, staged, _writes| {
                 let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    fire_like_a_part(at, staged);
+                    fire_like_a_part(contact.position, staged);
                 }));
                 let _ = fired;
             },
@@ -1678,16 +1670,26 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
         {
             let mut staged = mod_api::InsideEffects::default();
             let mut writes = Vec::new();
-            let kind = self.m.kind.id.clone();
-            let id = self.m.id as i32;
+            let m = &*self.m;
             (hooks.inside_fire)(
                 self.level,
                 dimension,
-                id,
-                &kind,
-                state,
-                at,
+                crate::block_contact::Contact {
+                    entity: m.id as i32,
+                    kind: &m.kind.id,
+                    state,
+                    position: at,
+                },
                 precise,
+                &mod_api::SweptEntity::new(
+                    m.position,
+                    m.previous,
+                    m.velocity,
+                    m.extra.avatar_pose == crate::pose::Pose::Crouching,
+                    m.extra.crouching,
+                    m.fall_distance,
+                    true,
+                ),
                 &mut staged,
                 &mut writes,
             );
@@ -2164,6 +2166,8 @@ fn base_tick(
             touches_lava(m, w),
         )
     };
+    // LavaCauldronBlock.entityInside: LAVA_IGNITE and lavaHurt, as in lava.
+    let lava = lava || crate::entities::lava_cauldron_contacts(w.world, w.registry, m.bounds()) > 0;
     block_contact_damage(m, w, level, fire, lava);
     // Enderman.hurtServer and Shulker.hurtServer teleport inside the hurt
     // (fire, lava, a block, an effect).
@@ -6508,6 +6512,25 @@ mod burn_and_rose_tests {
                 assert_eq!(m.fire_ticks, 300);
             },
         );
+        assert!(ran, "the vanilla test resources must be available");
+    }
+
+    /// `LavaCauldronBlock.entityInside` ignites and hurts a mob standing in a
+    /// lava cauldron as lava does (#13100: a chicken farm's cauldron).
+    #[test]
+    #[ignore = "daily"]
+    fn a_lava_cauldron_burns_the_mob_inside_it() {
+        let build = build_with("minecraft:lava_cauldron");
+        let mut test_level = crate::health::TestLevel::new(0);
+        let level = &mut test_level.level();
+        let ran = crate::mobs::world::with_built_test_world(&[], build, |w, types| {
+            let mut m = golem(types);
+            let mut events = Vec::new();
+            let start = m.health;
+            base_tick(&mut m, w, level, &mut events);
+            assert_eq!(m.health, start - 4.0, "one lava hit");
+            assert_eq!(m.fire_ticks, 300, "ignited to the full time");
+        });
         assert!(ran, "the vanilla test resources must be available");
     }
 }

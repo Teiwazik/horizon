@@ -960,6 +960,18 @@ impl Game<'_> {
             }
         }
     }
+    /// `Entity.load` on a live entity (`/data merge`): `getIntOr("PortalCooldown", 0)`
+    /// takes any numeric tag and leaves the portal process as it is.
+    pub(super) fn reload_portal_cooldown(&mut self, id: u32, tag: &Tag) {
+        if let Some(portal) = self.portals.entities.get_mut(&id) {
+            portal.cooldown = tag
+                .get("PortalCooldown")
+                .and_then(horizon_client::nbt_path::int_value)
+                .unwrap_or(0);
+        } else {
+            self.restore_portal_cooldown(id, tag);
+        }
+    }
     /// `Entity.saveWithoutId` writes the live `PortalCooldown`: the countdown
     /// `Entity.processPortalCooldown` ticks down, not the value the entity was
     /// loaded with. Every entity that can stand in a portal takes it from the
@@ -973,23 +985,15 @@ impl Game<'_> {
         );
         horizon_client::nether_portal::put_portal_cooldown(tag, cooldown);
     }
-    /// `Entity.saveWithoutId`: the modeled non-arrow projectile codecs
-    /// share the live cooldown between command reads and chunk writes.
+    /// `Entity.saveWithoutId`: the modeled projectile codecs share the live cooldown
+    /// between command reads and chunk writes. Kept under its name and signature for
+    /// the mod points; the body is `save_portal_cooldown`, which arrows use too.
     pub(super) fn save_projectile_portal_cooldown(
         &self,
         projectile: &horizon_client::projectiles::Projectile,
         tag: &mut Tag,
     ) {
-        if projectile.arrow.is_none()
-            && let Tag::Compound(fields) = tag
-        {
-            let cooldown = self
-                .portals
-                .entities
-                .get(&projectile.id)
-                .map_or(0, |portal| portal.cooldown);
-            fields.insert("PortalCooldown".into(), Tag::Int(cooldown));
-        }
+        self.save_portal_cooldown(projectile.id, tag);
     }
     /// `Entity.getDimensionChangingDelay`, by class: boats and minecarts
     /// (`VehicleEntity`) always 10, projectiles (`Projectile`) 2; any other

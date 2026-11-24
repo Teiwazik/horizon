@@ -6,6 +6,7 @@ pub(crate) mod block_state_definition;
 pub mod camera;
 pub(crate) mod client_reload;
 pub(crate) mod client_session;
+pub(crate) mod closing_save;
 pub(crate) mod debug_entries;
 pub(crate) mod entity_layers;
 pub(crate) mod entity_renderers;
@@ -62,6 +63,7 @@ pub(crate) mod screenshot;
 pub(crate) mod skull_models;
 pub(crate) mod special_model_renderers;
 pub(crate) mod terrain_draw;
+pub(crate) mod title_request;
 pub(crate) mod types;
 /// Buttons and text fields for mod screens.
 pub mod widgets;

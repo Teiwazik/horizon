@@ -151,20 +151,24 @@ pub fn clear_positive_fire(tag: &mut Tag) {
         c.insert("Fire".into(), Tag::Short(0));
     }
 }
-/// A saved Rotation as `Entity.load` takes it (`setRot`, read off vanilla 26.3 by the parity rows): the yaw `% 360`
-/// (so 400 loads as 40 but 270 stays 270 and -190 stays -190: Java's remainder keeps the sign) and the pitch
-/// `% 360` clamped to [-90, 90]; a component that is not finite is discarded (`setYRot`/`setXRot`) and loads as
-/// 0. What a save writes is read with [`rotation`].
+/// `Entity.load`'s angles on a fresh entity: `setYRot` and `setXRot` discard a
+/// non-finite angle (0 stays) and clamp `xRot % 360` to +-90, then `setRot`
+/// takes both `% 360` again.
 pub fn loaded_rotation(tag: &Tag) -> [f32; 2] {
+    loaded_rotation_over(tag, [0.0, 0.0])
+}
+/// [`loaded_rotation`] on an entity that already has `previous` angles
+/// (`/data merge` runs `Entity.load` on the live entity): a non-finite angle
+/// keeps the previous one.
+pub fn loaded_rotation_over(tag: &Tag, previous: [f32; 2]) -> [f32; 2] {
     let [yaw, pitch] = rotation(tag);
-    [
-        if yaw.is_finite() { yaw % 360.0 } else { 0.0 },
-        if pitch.is_finite() {
-            (pitch % 360.0).clamp(-90.0, 90.0)
-        } else {
-            0.0
-        },
-    ]
+    let yaw = if yaw.is_finite() { yaw } else { previous[0] };
+    let pitch = if pitch.is_finite() {
+        (pitch % 360.0).clamp(-90.0, 90.0)
+    } else {
+        previous[1]
+    };
+    [yaw % 360.0, pitch % 360.0]
 }
 /// `TagValueInput.getBooleanOr`: a numeric tag's byteValue is nonzero, with a false default.
 pub fn flag(tag: &Tag, key: &str) -> bool {
@@ -4595,10 +4599,33 @@ pub fn apply_item_components(m: &mut Mob, stack: &crate::items::ItemStack) {
         crate::mobs::Species::Llama | crate::mobs::Species::TraderLlama => {
             (Some("minecraft:llama/variant"), None)
         }
+        // Cat, Wolf, Rabbit and Parrot.applyImplicitComponents: the variant
+        // (and, for cats and wolves, the sound set) on their spawn eggs.
+        crate::mobs::Species::Cat => (
+            Some("minecraft:cat/variant"),
+            Some("minecraft:cat/sound_variant"),
+        ),
+        crate::mobs::Species::Wolf => (
+            Some("minecraft:wolf/variant"),
+            Some("minecraft:wolf/sound_variant"),
+        ),
+        crate::mobs::Species::Rabbit => (Some("minecraft:rabbit/variant"), None),
+        crate::mobs::Species::Parrot => (Some("minecraft:parrot/variant"), None),
         _ => (None, None),
     };
     if let Some(name) = variant.and_then(|id| text(components.other(id))) {
         m.extra.variant = crate::mobs::finalize::variant_index(species, &name);
+    }
+    // Cat and Wolf.applyImplicitComponent also read the collar colour.
+    if matches!(
+        species,
+        crate::mobs::Species::Cat | crate::mobs::Species::Wolf
+    ) && let Some(name) = text(components.other("minecraft:collar_color"))
+        && let Some(id) = crate::mobs::render::DYE_NAMES
+            .iter()
+            .position(|&v| v == name.trim_start_matches("minecraft:"))
+    {
+        m.extra.color = id as u8;
     }
     if let Some(name) = sound.and_then(|id| text(components.other(id)))
         && let Some(i) = crate::mobs::finalize::sound_variants(species)

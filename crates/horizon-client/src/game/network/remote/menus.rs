@@ -370,12 +370,15 @@ impl Game<'_> {
                 r.menu.set(Some((p.container, menu)));
                 r.set_menu_title(None);
             }
+            // A menu whose screen opens replaces a dialog, as below.
+            self.close_dialogs();
             self.remote_open_lectern(target.unwrap_or_default());
             return;
         }
         if let Some(kind) = Self::remote_station_kind(&menu) {
             let title = menu_title(&p.title);
             let pos = target.map_or([0, 0, 0], |t| [t.0, t.1, t.2]);
+            self.close_dialogs();
             self.remote_open_station(p.container, menu, kind, title, pos);
             return;
         }
@@ -389,6 +392,7 @@ impl Game<'_> {
                     .map(|r| r.lang.clone())
                     .unwrap_or_default(),
             );
+            self.close_dialogs();
             self.remote_open_merchant(p.container, title, menu_title(&p.title));
             return;
         }
@@ -452,6 +456,9 @@ impl Game<'_> {
                 return;
             }
         };
+        // `MenuScreens.create` ends in `Gui.setScreen`: the menu's screen replaces a dialog
+        // (and its waiting or warning screen), it does not open under it.
+        self.close_dialogs();
         let title = menu_title(&p.title);
         if let Some(r) = self.remote.as_mut() {
             r.menu.set(Some((p.container, menu.clone())));
@@ -472,7 +479,19 @@ impl Game<'_> {
             let key = target.filter(holds).unwrap_or((i32::MIN, 0, 0));
             self.world.block_entities.insert(key, entity);
             self.container = Some(key);
-            self.open_native_screen(key, target, p.container, &menu, extra);
+            // A server that negotiated menu-extra sends the block's position
+            // when it opens a mod block's screen. Only legacy connections still
+            // infer a screen's block from a click when the payload is absent.
+            let uses_menu_origins = self
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.registries.menu_extra_revision > 0);
+            let layout_target = if uses_menu_origins && extra.is_none() {
+                None
+            } else {
+                target
+            };
+            self.open_native_screen(key, layout_target, p.container, &menu, extra);
             // A mod menu type shows through its mod's screen only: without one
             // (`MenuScreens.create` finds no screen) the window closes again.
             if self.mod_screen.is_none() && mod_type.is_some() {
@@ -499,6 +518,8 @@ impl Game<'_> {
             self.remote_reject_container(p.container);
             return;
         }
+        // `handleMountScreenOpen` sets the mount's inventory screen, over a dialog too.
+        self.close_dialogs();
         if let Some(r) = self.remote.as_mut() {
             r.menu
                 .set(Some((p.container, format!("{MOUNT_MENU}{columns}"))));
