@@ -183,6 +183,19 @@ pub trait PlayersClientHost {
     /// came yet.
     #[access(WorldOnly)]
     fn last_passage_refusal(&self) -> Option<(PassageId, PassageCrossRefusal)>;
+    /// Side: client.
+    /// For a client mod: sets the local player's velocity, in blocks a tick, without sending
+    /// any network packet (for predicted pushes such as conveyor belts and hover boots,
+    /// typically called from `player_tick_pre`). Non-finite values, a spectator, or no local
+    /// player leave the velocity unchanged.
+    #[access(WorldOnly)]
+    fn set_local_player_velocity(&mut self, velocity: [f64; 3]);
+    /// Side: client.
+    /// For a client mod: sets the local player's on-ground flag without sending any network
+    /// packet (for predicted movement such as hover boots or conveyor lifts, typically called
+    /// from `player_tick_pre`). A spectator or no local player is left alone.
+    #[access(WorldOnly)]
+    fn set_local_player_on_ground(&mut self, on_ground: bool);
 }
 /// The handles' reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -912,10 +925,12 @@ pub trait PlayersBackendMut {
     /// that storage's own handler, journalled; the client sees ordinary synced slots, mirrored
     /// after each click and each write through an `ItemPlace` of that storage, never each tick.
     /// A slot past `places` stays the mods' own (`native_menu_clicked`). The menu closes once a
-    /// place stops resolving (the backpack left the hand, the entity is gone) or a held stack is
-    /// no longer the one bound when the slots were backed, checked before each click and at
-    /// each change notice. A `MenuSlotPlace::HeldItem` locks the inventory slot holding that
-    /// stack while the menu is open, so it can't go into itself. Backing again replaces the
+    /// place stops resolving (the backpack left the hand or the mod place, the entity is gone)
+    /// or a held or mod place's stack is no longer the one bound when the slots were backed,
+    /// checked before each click and at each change notice. A `MenuSlotPlace::HeldItem` locks
+    /// the inventory slot holding that stack while the menu is open, and a click that would take
+    /// a `MenuSlotPlace::ModItem` place's stack out of its place is undone, so neither can go
+    /// into itself. Backing again replaces the
     /// places; a slot no longer backed (an empty list, a shorter one) is emptied, never left
     /// holding the copy it showed. A [`MenuSlotBackRefusal`], and nothing changes, for a player
     /// not online or a window that is not their open menu, a menu that is not a blockless mod
@@ -1249,6 +1264,19 @@ pub trait PlayersBackendMut {
         player: PlayerRef,
         areas: &[ChunkArea],
     ) -> Result<(), ChunkAreaRefusal>;
+    /// Side: server.
+    /// Centres the player's chunk tracking on `center`, a chunk of their own level, as
+    /// `ServerPlayer.setCamera` does for a camera entity but without moving the player: the
+    /// chunks around it are loaded (and tick) as around a player, to the server's view distance,
+    /// and sent to their client to the client's view distance, with the chunk cache centre moved
+    /// there so the client keeps and draws them. The chunks around the player themself stay
+    /// loaded but are no longer sent while the centre is elsewhere. `None` puts the tracking
+    /// back on the player. For a camera mod (a drone, a cinematic camera, a remote view). The
+    /// centre ends at a respawn, a level change and when the player leaves. False, changing
+    /// nothing, for a stale handle, a player not online, a centre past the world border's
+    /// farthest chunk (1,875,000 on an axis) and off a server.
+    #[access(WorldOnly)]
+    fn player_set_view_center(&mut self, player: PlayerRef, center: Option<ChunkPos>) -> bool;
     /// Side: server.
     /// `ServerPlayerGameMode.destroyBlock`: breaks the block at `pos` in the player's level as
     /// this player breaks it, as FTB Ultimine does for each block of a vein. The player's own

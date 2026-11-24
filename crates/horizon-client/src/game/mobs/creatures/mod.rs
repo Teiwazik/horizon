@@ -1645,8 +1645,8 @@ impl Game<'_> {
         // `score_destroyed_entities`): LivingEntity.die does not reset them.
         // Raider.die's hero and Villager.tellWitnessesThatIWasMurdered go to
         // the causing entity, not the credited player: a tame wolf's kill is
-        // neither its owner's heroism nor a murder by them.
-        let slain_by_player = by_player && !killed_by_mob(m);
+        // neither its owner's heroism nor a murder by them, nor is a fall's.
+        let slain_by_player = by_player && super::combat::killed_by_player(m);
         self.raider_died(m, slain_by_player, killer.flatten());
         self.villager_murdered(m, slain_by_player, killer.flatten());
         let pos = [m.position.x, m.position.y + 0.5, m.position.z];
@@ -7974,26 +7974,34 @@ impl Game<'_> {
         // Who watches (`Entity.isInvisibleTo`): the local player's team.
         let viewer = self.player_team();
         self.rendered_mobs.set(0);
-        let (skinning, listened) = (self.skinning(), self.mob_render_listened());
-        // What custom entity model animations read of the frame.
-        horizon_client::mobs::cem_anim::set_frame(horizon_client::mobs::cem_anim::Frame {
-            time: self.world.game_time as f64 + alpha,
-            day_time: self.world.day_time as f64 + alpha,
-            dimension: match self.dim {
-                Dim::Overworld | Dim::Extra(_) => 0.0,
-                Dim::Nether => -1.0,
-                Dim::End => 1.0,
-            },
-            player: self.player.as_ref().map_or(camera.to_array(), |p| {
-                [p.position.x, p.position.y, p.position.z]
-            }),
-            player_rot: [self.pitch, self.yaw],
-            paused: self.pause,
-            first_person: self.camera_type.is_first_person(),
-            third_person_reversed: self.camera_type
-                == horizon_client::camera::CameraType::ThirdPersonFront,
-            ..Default::default()
-        });
+        let (skinning, hooks) = (self.skinning(), self.mob_render_listened());
+        let mob_data = self.res.mob_data();
+        // What custom entity model animations read of the frame (only when CEM packs are loaded).
+        if !mob_data
+            .cem
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            horizon_client::mobs::cem_anim::set_frame(horizon_client::mobs::cem_anim::Frame {
+                time: self.world.game_time as f64 + alpha,
+                day_time: self.world.day_time as f64 + alpha,
+                dimension: match self.dim {
+                    Dim::Overworld | Dim::Extra(_) => 0.0,
+                    Dim::Nether => -1.0,
+                    Dim::End => 1.0,
+                },
+                player: self.player.as_ref().map_or(camera.to_array(), |p| {
+                    [p.position.x, p.position.y, p.position.z]
+                }),
+                player_rot: [self.pitch, self.yaw],
+                paused: self.pause,
+                first_person: self.camera_type.is_first_person(),
+                third_person_reversed: self.camera_type
+                    == horizon_client::camera::CameraType::ThirdPersonFront,
+                ..Default::default()
+            });
+        }
         for mob in &self.mobs {
             // LevelRenderer: the entity the view looks out of is not drawn
             // in first person.
@@ -8035,7 +8043,8 @@ impl Game<'_> {
             // effect sets): only the name tag draws (and the outline of a
             // glowing mob, LivingEntityRenderer.getRenderType). A player keeps
             // its armour, elytra and held items (`LivingEntityRenderer.submit`
-            // skips only the body).
+            // skips only the body), and a sulfur cube keeps its contained block
+            // (`SulfurCubeInnerLayer.submit`).
             let invisible = mob.is_invisible();
             // Entity.isInvisibleTo(viewer): a spectator sees it anyway, the
             // body forced translucent (`LivingEntityRenderer.submit`).
@@ -8047,7 +8056,19 @@ impl Game<'_> {
                     true,
                 );
             let layers_only = invisible && outline.is_none() && is_player && !seen_invisible;
-            if invisible && outline.is_none() && !layers_only && !seen_invisible {
+            // An invisible sulfur cube holding a renderable block stays in the loop so
+            // `sulfur_cube_body_geometry` draws its contained block. Like `layers_only`
+            // for invisible players, it also runs the mod render hooks and any registered
+            // mod living renderer (`mod_living_renderer_geometry`), which takes ownership
+            // and suppresses `sulfur_cube_body_geometry` when present.
+            let sulfur_cube_block = mob.species() == Species::SulfurCube
+                && self.sulfur_cube_contained_block(mob).is_some();
+            if invisible
+                && outline.is_none()
+                && !layers_only
+                && !seen_invisible
+                && !sulfur_cube_block
+            {
                 continue;
             }
             let culling = if PRECHECK
@@ -8081,7 +8102,7 @@ impl Game<'_> {
                 .then(|| self.remote_player_name(mob.id))
                 .flatten()
                 .map(|name| PlayerRender { name, local: false });
-            let pre = self.mod_render_pre(mob, who, listened, alpha as f32, camera, packed, out);
+            let pre = self.mod_render_pre(mob, who, hooks, alpha as f32, camera, packed, out);
             let Some(hidden) = pre else {
                 // What the mods drew in its place is culled as the entity's own would be.
                 if culling.rays_only() {
@@ -8095,15 +8116,15 @@ impl Game<'_> {
             // A mod's renderer for the type (`register_entity_renderers`) draws in place of its
             // model and vanilla layers; the mods' layers and post hooks still follow.
             let modded = self.mod_living_renderer_geometry(mob, alpha as f32, camera, packed, out);
-            if mob.species() == Species::SulfurCube && !mob.is_invisible() && !modded {
-                self.sulfur_cube_body_geometry(
+            let drew_sulfur_block = mob.species() == Species::SulfurCube
+                && !modded
+                && self.sulfur_cube_body_geometry(
                     mob,
                     alpha as f32,
                     horizon_client::mobs::render::base_transform(mob, alpha as f32, camera),
                     packed,
                     out,
                 );
-            }
             // Other players on a server: PlayerRenderer's HumanoidArmorLayer.
             let armor = if is_player {
                 self.worn_armor_layers(mob)
@@ -8131,6 +8152,7 @@ impl Game<'_> {
                     Species::Blaze | Species::MagmaCube | Species::GlowSquid | Species::SulfurCube
                 );
             let (mut skinned, mut parts, added) = (None, None, self.mod_layers(mob));
+            let want_parts = hooks.any_post_for(is_player) || added.is_some();
             if posable {
                 let mut models = self.skin_models.borrow_mut();
                 let mut frame = self.skin_frame.borrow_mut();
@@ -8145,7 +8167,7 @@ impl Game<'_> {
                     self.res.mob_data(),
                     &worn,
                     hidden,
-                    (listened || added.is_some()).then_some(&mut parts),
+                    want_parts.then_some(&mut parts),
                     out,
                     &mut skin,
                 );
@@ -8162,7 +8184,7 @@ impl Game<'_> {
                         &worn,
                         &armor,
                         hidden,
-                        (listened || added.is_some()).then_some(&mut parts),
+                        want_parts.then_some(&mut parts),
                         out,
                     );
                 } else if layers_only {
@@ -8175,7 +8197,7 @@ impl Game<'_> {
                         self.res.mob_data(),
                         &worn,
                         &armor,
-                        (listened || added.is_some()).then_some(&mut parts),
+                        want_parts.then_some(&mut parts),
                         out,
                     );
                 } else {
@@ -8189,7 +8211,7 @@ impl Game<'_> {
                         &worn,
                         &armor,
                         hidden,
-                        (listened || added.is_some()).then_some(&mut parts),
+                        want_parts.then_some(&mut parts),
                         out,
                     );
                 }
@@ -8264,7 +8286,7 @@ impl Game<'_> {
                     let color = horizon_client::mobs::render::abgr(rgb);
                     self.skin_frame.borrow_mut().outline_since(first, color);
                 }
-                if invisible && !seen_invisible {
+                if invisible && !seen_invisible && !drew_sulfur_block {
                     out.truncate(entity_start);
                     continue;
                 }
@@ -9010,6 +9032,31 @@ mod tests {
     use super::thrown_item_quad;
     use super::{ProjectileKind, is_item_billboard};
     use horizon_client::camera::CameraType;
+
+    #[test]
+    #[ignore = "daily"]
+    fn mob_geometry_renders_live_projectiles_when_mobs_is_empty() {
+        use horizon_client::projectiles::Projectile;
+        use horizon_core::geometry::Vec3;
+
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            assert!(game.mobs.is_empty());
+            game.rendered_mobs.set(7);
+            let mut projectile =
+                Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, 64.5, 0.5), None);
+            projectile.id = 1;
+            game.creatures.projectiles.push(projectile);
+
+            let mut out = Vec::new();
+            game.mob_geometry(glam::DVec3::new(0.5, 64.5, -4.5), 0.0, &mut out);
+
+            assert_eq!(game.rendered_mobs.get(), 0);
+            assert!(
+                !out.is_empty(),
+                "live projectiles must still produce vertices when self.mobs is empty"
+            );
+        });
+    }
 
     #[test]
     #[ignore = "daily"]
