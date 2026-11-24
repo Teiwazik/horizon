@@ -165,7 +165,10 @@ impl Game<'_> {
     fn water_level_above(&self, b: &Boat) -> f32 {
         let bb = b.bounds();
         let (lo, hi) = (bb.min_position(), bb.max_position());
-        let (y0, y1) = (hi.y.floor() as i32, hi.y.ceil() as i32);
+        // AbstractBoat.getWaterLevelAbove: ceil(maxY - lastYd), so a boat
+        // falling into water scans up to the real surface instead of stopping
+        // one row short.
+        let (y0, y1) = (hi.y.floor() as i32, (hi.y - b.last_yd).ceil() as i32);
         'rows: for y in y0..y1 {
             let mut height = 0.0f32;
             for x in lo.x.floor() as i32..hi.x.ceil() as i32 {
@@ -516,6 +519,8 @@ impl Game<'_> {
                 b.position.z + moved.z,
             );
             b.on_ground = movement.y < 0.0 && moved.y > movement.y;
+            // checkFallDamage saves lastYd before the collisions below zero it.
+            b.last_yd = b.velocity.y;
             b.fall_distance = self.boat_fall(&b, moved.y);
             if (moved.x - movement.x).abs() > 1.0e-7 {
                 b.velocity.x = 0.0;
@@ -1373,11 +1378,7 @@ impl Game<'_> {
             self.swing_arm();
             return true;
         }
-        if sneaking
-            || self.boats[i].out_of_control >= 60.0
-            || self.ridden_by_guest(self.boats[i].id)
-            || !self.boat_has_room(i)
-        {
+        if sneaking || self.boats[i].out_of_control >= 60.0 || !self.boat_has_room(i) {
             return false;
         }
         let id = self.boats[i].id;
@@ -1543,6 +1544,19 @@ impl Game<'_> {
         );
     }
 
+    /// `VehicleEntity.destroy(level, dropItem)`: the boat's item, carrying
+    /// the vehicle's `CustomName` as `DataComponents.CUSTOM_NAME`, like
+    /// the minecart's `cart_drop`.
+    fn boat_drop(&self, id: u32, item: &str) -> ItemStack {
+        let mut stack = ItemStack::new(item, 1);
+        if let Some(name) = self.persist_raw(id).and_then(|raw| raw.get("CustomName")) {
+            let text = horizon_client::entity_nbt::name_text(name);
+            stack.data_mut().custom_name =
+                Some(horizon_client::scoreboard::component_tag(&text.component()));
+        }
+        stack
+    }
+
     pub(super) fn hurt_boat_result(
         &mut self,
         i: usize,
@@ -1639,16 +1653,7 @@ impl Game<'_> {
                     .bool_at(horizon_client::gamerules::vanilla::ENTITY_DROPS)
             {
                 let item = b.entity_type();
-                self.spawn_item_own(
-                    ItemStack {
-                        item: Arc::from(item.as_str()),
-                        count: 1,
-                        damage: 0,
-                        extra: None,
-                    },
-                    at,
-                    10,
-                );
+                self.spawn_item_own(self.boat_drop(id, item.as_str()), at, 10);
                 // AbstractChestBoat.destroy: `chestVehicleDestroyed` drops the
                 // emptied chest again, which only draws each slot's spot.
                 if b.chest {
@@ -1815,6 +1820,39 @@ mod tests {
 
     fn boat() -> Boat {
         Boat::new(1, Arc::from("oak"), Vec3::ZERO, 0.0)
+    }
+
+    /// `AbstractBoat.getWaterLevelAbove` scans up to `ceil(maxY - lastYd)`,
+    /// with the velocity `checkFallDamage` saved before the move's collisions
+    /// zeroed it: a boat whose fall clips on the pool floor still finds the
+    /// water's surface, not the air a row higher.
+    #[test]
+    #[ignore = "daily"]
+    fn a_boat_landing_on_a_pool_floor_scans_up_to_the_water_surface() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let registry = &game.pack.assets.registry;
+            let water = registry.default_state("minecraft:water").unwrap();
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in 0..3 {
+                for z in 0..3 {
+                    game.world.set(x, 199, z, stone).unwrap();
+                    game.world.set(x, 200, z, water).unwrap();
+                    game.world.set(x, 201, z, water).unwrap();
+                }
+            }
+            let mut b = boat();
+            b.position = Vec3::new(1.5, 200.2, 1.5);
+            b.velocity.y = -0.6;
+            let b = game.tick_boat(b, false);
+            assert_eq!(b.position.y, 200.0, "the fall clips on the floor");
+            assert_eq!(b.velocity.y, 0.0, "and the collision zeroes it");
+            // The source at y=201 has air above: 201 + 8/9.
+            assert_eq!(game.water_level_above(&b), 201.0 + 8.0 / 9.0);
+        });
     }
 
     /// `controlBoat`'s push with `Mth`'s sine table (`(float) Math.sin(i /
@@ -2190,6 +2228,33 @@ mod cobweb_tests {
             "powder snow's down multiplier: {} against {}",
             moved.y,
             free_moved.y
+        );
+    }
+}
+#[cfg(test)]
+mod drop_tests {
+    use crate::game::game_tests::tests::server_game;
+
+    /// `VehicleEntity.destroy`: a broken boat drops its item under the
+    /// vehicle's `CustomName` (`DataComponents.CUSTOM_NAME`).
+    #[test]
+    #[ignore = "daily"]
+    fn a_broken_boat_drops_its_item_under_its_name() {
+        let mut resources = None;
+        let mut game = server_game(&mut resources);
+        game.build_registries();
+        game.set_allow_commands(true);
+        assert!(game.run_command(r#"summon oak_boat 8.5 64 8.5 {CustomName:"Raft"}"#));
+        assert_eq!(game.boats.len(), 1);
+        assert_eq!(game.hurt_boat_result(0, 100.0, false, None), Some(true));
+        assert!(game.boats.is_empty(), "the boat is broken");
+        assert_eq!(game.dropped.len(), 1, "the boat item alone");
+        let stack = &game.dropped[0].stack;
+        assert_eq!(&*stack.item, "minecraft:oak_boat");
+        assert_eq!(
+            stack.custom_name().as_deref(),
+            Some("Raft"),
+            "the drop is named as the boat was"
         );
     }
 }

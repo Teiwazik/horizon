@@ -172,7 +172,7 @@ The switch is in three places: Settings > AI in the launcher, Horizon Settings i
 
 | Surface | What happens |
 | --- | --- |
-| Game | opens no control socket, even with `--control` (it logs the refusal); Horizon Settings hides AI Agent...; turning it on in a running game closes the socket at once |
+| Game | opens no control socket, even with `--control` (it logs the refusal); Horizon Settings greys out AI Agent... in its place; turning it on in a running game closes the socket at once |
 | `horizon-ctl` | every command refuses: exit status 4, `{"error": REFUSAL, "kind": "denied"}` |
 | `horizon-ctl mcp` | refuses to start (exit 4, REFUSAL on stderr); a session already running refuses each call |
 | `horizon-launcher mcp` | refuses to start; a running session answers each `tools/call` with error -32000 and REFUSAL |
@@ -267,7 +267,9 @@ turn the switch off.
   `confirm` and carries the MCP `destructiveHint`. In the game these are `world-delete`, `fill`
   and `setblock` (the table's `DESTRUCTIVE`); in the launcher, `remove`, `modpack remove`,
   `mods remove`, `servers forget` and `account sign-out` (`cli_tools::DESTRUCTIVE`), and what
-  decides what the next Play runs or joins: `instance launch`, `instance java` and `game-args`.
+  decides what the next Play runs or joins: `instance launch`, `instance java` and `game-args`,
+  and the `play` tool's `arg` (game arguments passed as they are: `--server`, `--session-file`,
+  `--smoke-report`; no hint, so a plain `play` asks nothing).
   Without `confirm: true` the call is refused and the message says to ask the player. In the game
   CLI the flag is `--confirm`. The launcher CLI asks nothing: a person typing `remove` meant it.
 - **Other people's text is data.** Chat, signs, books, MOTDs, names, mod descriptions and log lines
@@ -278,8 +280,8 @@ turn the switch off.
 - **Ask before reaching out.** A command that sends data or reaches other people carries
   `openWorldHint`, and its description says "only when the player asks". In the game these are
   `connect`, `lan`, `friends`, `chat` and `command`; in the launcher, `servers create` and
-  `share-log`. `play`'s `join` argument says the same. Bug and benchmark reports stay local;
-  there is no telemetry or data collection switch ([Horizon sends nothing](telemetry.md)).
+  `share-log`. `play`'s `join` and `server` arguments say the same. Bug and benchmark reports
+  stay local; there is no telemetry or data collection switch ([Horizon sends nothing](telemetry.md)).
 - **No secrets.** No surface returns tokens, session files, keychain entries or invite secrets
   the player didn't ask to share:
   - accounts are names and UUIDs;
@@ -503,7 +505,7 @@ of the frame ([#8750](https://github.com/horizon-rust/horizon/issues/8750)).
     network annotations;
   - the launcher: generated tools, `confirm`, the reference, the agent configs;
   - `horizon_core::no_ai`;
-  - `options_ui`: the AI Agent page, and that No AI hides it;
+  - `options_ui`: the AI Agent page, and that No AI greys its button out without moving the switch;
   - `input_trace`: origins, the ring, the intrusion rule, `input-log` and the recording writer;
   - `repro`: the format's round trip, the folder slug and the world copy.
 - **`tools/agent_control_e2e.py`** drives a real game, offscreen on macOS and on a virtual screen

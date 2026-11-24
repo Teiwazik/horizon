@@ -14,7 +14,14 @@ The screen holds vanilla's video options and Horizon's own together, built from 
 
 Tab, the arrows, Enter and Space work it from the keyboard (Left and Right step a focused slider, Space lets go of it), a controller moves between its rows and its bumpers between the pages, and the narrator reads each row as a tick box, a slider or a button.
 
-Every setting applies at once, except worker threads, the graphics API, translucent batching and the sizes battery mode halves the client's pools to (chunk building, the tick's helpers, chunk decoding, saves, network and chunk encoding), which apply at the next start (battery mode's frame cap applies at once). A preset sets the quality settings together; changing one of them turns it into Custom. Display preferences (FOV, framerate, VSync, GUI scale, fullscreen, present mode, pacing) leave the preset as it is.
+Every setting applies at once, except worker threads, the graphics API, translucent batching, ray tracing turned on in a game started without it, and the sizes battery mode halves the client's pools to (chunk building, the tick's helpers, chunk decoding, saves, network and chunk encoding), which apply at the next start (battery mode's frame cap applies at once). Ray tracing turned on (On, or Auto with a pack that traces) applies at once only in a game that started with it: ray queries are part of the device the game opens, so after a start without them (Off, or Auto with no such pack) it waits for the next start, as the shader pack screen says of a pack that traces. A preset sets the quality settings together; changing one of them turns it into Custom. Display preferences (FOV, framerate, VSync, GUI scale, fullscreen, present mode, pacing) leave the preset as it is.
+
+**Video Settings → Quality → Textures → Better Grass** controls how grass-like blocks use their top
+texture on their sides. **Pack default** uses Fancy only if an enabled resource pack supplies
+`optifine/bettergrass.properties`; otherwise it leaves vanilla block sides unchanged. **Off** disables
+the effect even with a pack. **Fast** uses the top texture without checking neighboring blocks;
+**Fancy** checks neighboring blocks to blend terrain edges. Fast and Fancy use built-in rules if no
+pack supplies the file. The selected mode is saved in `options.txt` and is not changed by graphics presets.
 
 With VSync off, **Present Mode: Mailbox** uses FIFO on surfaces that do not support Mailbox, so
 the explicit tear-free choice never becomes Immediate. **Auto** still follows vanilla's selection.
@@ -53,7 +60,7 @@ Every preset also turns on the optimizations that leave the picture as it is: as
 | | sky, fog, weather, animated textures, distant plant dither (`ditherCutoutMips`, off by default: cutouts from 64 texels up), resolution scale, dynamic resolution and its target FPS, anti-aliasing (FXAA or TAA), TAA upscaling, screenshot quality, frame generation | `horizon-graphics.txt` |
 | Performance | chunk builder | `options.txt` |
 | | chunk updates and upload budget per frame, worker threads, parallel tick, cave culling, GPU culling, entity and particle culling modes, leaf culling, battery mode, and the block-entity caches (shulker boxes, signs, decorated pots, bells, chests, banners, copper golem statues) | `horizon-graphics.txt` |
-| Shaders | **Shader Packs...**: the list of shader packs, [Horizon's `.hshader` ones](shaders.md) and classic `shaders/` folder ones, and the picked pack's options; shadow cache | `horizon-graphics.txt`, the pack's own options file |
+| Shaders | **Shader Packs...**: the list of shader packs, [Horizon's `.hshader` ones](shaders.md) and classic `shaders/` folder ones, and the picked pack's options; shadow cache; ray tracing (Auto, On, Off) | `horizon-graphics.txt`, the pack's own options file |
 | Advanced | present mode, frame pacing, graphics API, translucent batching, performance overlay (FPS, frame/CPU/GPU times, the render thread's wait on the GPU and the display, frame-time graph) | `horizon-graphics.txt` |
 | HDR | HDR, calibration, black level, peak brightness, paper white, UI brightness, look | `horizon-graphics.txt` |
 

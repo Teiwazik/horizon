@@ -120,7 +120,8 @@ pub trait DrawContext {
     /// block is drawn with its model, full bright and shaded by face, a face
     /// against a solid neighbour in the scene left out; a block with an
     /// `entity` (a mod's) is drawn by `block_entity_submit` as in the
-    /// world too, its `spin` parts turning with the game time. What lies
+    /// world too. A clocked copy of a type with a native scene ticker animates on
+    /// the scene clock; otherwise it uses the client clock. What lies
     /// outside the box is cut off, and the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
     /// the order drawn. Draw it from a screen's drawing hook
@@ -142,6 +143,20 @@ pub trait DrawContext {
         view: SceneView,
     ) -> Result<(), SceneError> {
         Err(SceneError::Unavailable)
+    }
+    /// Draws the same scene as [`draw_scene`](Self::draw_scene), then draws `overlays`
+    /// in the order given, with the same view and clip. The overlays blend with the scene
+    /// according to their ARGB alpha and depth mode without occluding one another by depth.
+    /// A bad overlay or more than [`SCENE_MAX_OVERLAYS`] overlays refuses the whole draw,
+    /// without advancing the scene clock.
+    fn draw_scene_with_overlays(
+        &mut self,
+        rect: [f32; 4],
+        scene: &Scene,
+        view: SceneView,
+        overlays: &[SceneOverlay],
+    ) -> Result<(), SceneOverlayError> {
+        Err(SceneError::Unavailable.into())
     }
     /// Draw a [`Scene`] with additional textured faces in its own coordinates. They
     /// use the scene's projection, scissor and depth along with its blocks, entities
@@ -259,6 +274,12 @@ pub trait DrawContext {
     fn widget_text_field(&mut self, field: &TextFieldView) -> TextFieldLayout {
         unimplemented!("DrawContext::widget_text_field")
     }
+    /// Draw a [`InputGlyph`] at the top-left of its layout box, using its stock artwork or key
+    /// label. `argb` multiplies its colours (`0xFFFFFFFF` leaves them unchanged). Returns `false`
+    /// when the surface cannot draw the glyph or the position is not finite.
+    fn input_glyph(&mut self, glyph: &InputGlyph, at: [f32; 2], argb: u32) -> bool {
+        false
+    }
 
     /// Save the current GUI translation. Returns false without changing it when eight
     /// translations are already saved. Every listener of a hook call shares the translation,
@@ -341,7 +362,7 @@ pub trait BlockEntityDrawContext {
     fn partial(&self) -> f32 {
         unimplemented!("BlockEntityDrawContext::draw_partial")
     }
-    /// The level's game time, for animations.
+    /// The level's game time, or the scene's tick for a ticking scene block entity.
     fn game_time(&self) -> i64 {
         unimplemented!("BlockEntityDrawContext::draw_game_time")
     }
@@ -350,6 +371,7 @@ pub trait BlockEntityDrawContext {
     /// `TextureManager.tick` count): pausing and `/tick freeze` hold it, and the server's
     /// time updates never set it back, unlike `game_time`. Each client counts from its
     /// own start, so it means nothing on the server or to another client.
+    /// A ticking scene block entity uses its scene's tick and partial tick instead.
     fn animation_time(&self) -> f64 {
         unimplemented!("BlockEntityDrawContext::draw_animation_time")
     }

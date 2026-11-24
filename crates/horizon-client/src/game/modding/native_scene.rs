@@ -5,17 +5,19 @@
 //! its armour stand.
 use super::Game;
 use super::native_block_entity_draw::{BlockEntityDraw, place_turning};
+use super::native_scene_live::LiveBlockEntity;
 use glam::{Affine3A, EulerRot, Mat4, Quat, Vec3};
 use horizon_client::{
     block_entity_render::diffuse_lights,
-    hud::{HudAtlas, HudBatch},
+    hud::{HudAtlas, HudBatch, OverlayDepth},
     hud_layout::abgr,
     mesher::Vertex,
 };
 use horizon_world::level::data::state_flags;
 use mod_api::{
-    SCENE_MAX_TEXTURED_QUADS, SceneError, SceneSection, SceneSectionError, SceneTexturedQuad,
-    SceneView, SceneWithQuadsError,
+    SCENE_MAX_OVERLAYS, SCENE_MAX_TEXTURED_QUADS, SceneDepth, SceneError, SceneOverlay,
+    SceneOverlayError, SceneSection, SceneSectionError, SceneTexturedQuad, SceneView,
+    SceneWithQuadsError,
 };
 /// Prepared scene data. Entity fields remain borrowed for the duration of the draw.
 pub(super) struct SceneBlock<'a> {
@@ -127,12 +129,21 @@ impl ProjectedQuad {
     }
 }
 
-/// The view for one draw, with any textured faces already resolved and projected.
+/// An overlay projected into GUI coordinates, with its ABGR colour.
+struct ProjectedOverlay {
+    corners: [[f32; 3]; 4],
+    color: u32,
+    depth: OverlayDepth,
+}
+
+/// The view for one draw, with any textured faces and overlays already resolved
+/// and projected.
 pub(super) struct SceneFrame {
     pub(super) rect: [f32; 4],
     pub(super) view: SceneView,
     matrix: Mat4,
     projected: Vec<ProjectedQuad>,
+    overlays: Vec<ProjectedOverlay>,
 }
 
 impl SceneFrame {
@@ -142,7 +153,76 @@ impl SceneFrame {
             view,
             matrix: scene_matrix(rect, view),
             projected: Vec::new(),
+            overlays: Vec::new(),
         }
+    }
+
+    /// Project the entire overlay list before a living scene advances or any
+    /// geometry is emitted.
+    pub(super) fn with_overlays(
+        mut self,
+        overlays: &[SceneOverlay],
+    ) -> Result<Self, SceneOverlayError> {
+        if !self.view.scale.is_finite() || self.view.scale <= 0.0 {
+            return Err(SceneError::BadView.into());
+        }
+        if overlays.len() > SCENE_MAX_OVERLAYS {
+            return Err(SceneOverlayError::TooManyOverlays);
+        }
+        let m = self.matrix;
+        self.overlays.reserve_exact(overlays.len());
+        let point = |p| m.transform_point3(Vec3::from_array(p));
+        for (index, overlay) in (0u32..).zip(overlays) {
+            let bad = SceneOverlayError::BadOverlay { index };
+            let (corners, argb, depth) = match *overlay {
+                SceneOverlay::Line {
+                    from,
+                    to,
+                    width,
+                    argb,
+                    depth,
+                } => {
+                    let (from, to) = (point(from), point(to));
+                    if !from.is_finite() || !to.is_finite() || !width.is_finite() || width <= 0.0 {
+                        return Err(bad);
+                    }
+                    // The screen-space perpendicular expands each endpoint without changing
+                    // its depth. Use f64 for the direction so large finite deltas don't overflow.
+                    let delta = (to.as_dvec3() - from.as_dvec3()).truncate();
+                    let length = delta.length();
+                    if length == 0.0 {
+                        continue;
+                    }
+                    let offset = (delta.perp() * (f64::from(width) * 0.5 / length))
+                        .as_vec2()
+                        .extend(0.0);
+                    (
+                        [from + offset, from - offset, to - offset, to + offset],
+                        argb,
+                        depth,
+                    )
+                }
+                SceneOverlay::Quad {
+                    corners,
+                    argb,
+                    depth,
+                } => (corners.map(point), argb, depth),
+                _ => return Err(bad),
+            };
+            if !corners.iter().all(|p| p.is_finite()) {
+                return Err(bad);
+            }
+            self.overlays.push(ProjectedOverlay {
+                corners: corners.map(|p| p.to_array()),
+                color: abgr(argb),
+                depth: match depth {
+                    SceneDepth::Tested => OverlayDepth::Tested,
+                    SceneDepth::ThroughWalls => OverlayDepth::ThroughWalls,
+                    _ => return Err(bad),
+                },
+            });
+        }
+        Ok(self)
     }
 
     /// Resolve and validate the caller's faces before any draw or live scene work.
@@ -259,8 +339,9 @@ impl Game<'_> {
     /// the window has no lightmap yet), a face
     /// against a solid neighbour in the scene left out; a block with an
     /// `entity` (a mod's) is drawn by `native_block_entity_submit` as in the
-    /// world too, its `spin` parts turning with the game time. What lies
-    /// outside the box is cut off, and the scene has a depth of its own, so
+    /// world too. Its animation follows the scene clock for a kept ticking copy,
+    /// and otherwise the client clock. What lies outside the box is cut off, and
+    /// the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
     /// the order drawn. `extra` adds quads in the scene's coordinates before
     /// the scene is seen and sorted (a living scene's entities and particles,
@@ -271,6 +352,7 @@ impl Game<'_> {
         batch: &mut HudBatch,
         blocks: &SceneBlocks<'_, '_>,
         frame: SceneFrame,
+        animation: Option<(u64, f32, &[LiveBlockEntity])>,
         extra: impl FnOnce(&mut Vec<SceneQuad>),
     ) -> Result<(), mod_api::SceneError> {
         let SceneFrame {
@@ -278,6 +360,7 @@ impl Game<'_> {
             view,
             matrix: m,
             projected: mut seen,
+            overlays,
         } = frame;
         if !self.native_window() {
             return Err(mod_api::SceneError::Unavailable);
@@ -297,9 +380,21 @@ impl Game<'_> {
         };
         let grass = self.pack.item_renderer.grass_color(0.5, 1.0) as u32;
         let tables = &self.pack.context.tables;
-        let lightmap = self.renderer.as_ref().map(|r| &r.lightmap_pixels);
+        // All zeros until the first lightmap is built: full bright till then.
+        let lightmap = self
+            .renderer
+            .as_ref()
+            .map(|r| &r.lightmap_pixels)
+            .filter(|p| p[3] != 0);
         let mut quads = Vec::new();
-        for (block, group, transform) in blocks.iter() {
+        let (tick, partial, kept) = animation.unwrap_or((0, 0.0, &[]));
+        let mut kept = kept.iter().peekable();
+        for (i, (block, group, transform)) in blocks.iter().enumerate() {
+            let ticking = if kept.peek().is_some_and(|entry| entry.index == i) {
+                kept.next().and_then(|entry| entry.ticking.as_ref())
+            } else {
+                None
+            };
             let first = quads.len();
             let point = |pos| transform.map_or(pos, |pose| pose.transform_point3(pos));
             let direction =
@@ -357,21 +452,38 @@ impl Game<'_> {
                     cull: true,
                 });
             }
-            if let Some(entity) = &block.entity {
-                let entity =
-                    mod_api::ModBlockEntity::new(entity.id.to_string(), entity.fields.clone());
+            if let Some(seed) = block.entity {
+                let original;
+                let (entity, partial, game_time, animation_time) =
+                    if let Some((_, entity)) = ticking {
+                        (
+                            entity,
+                            partial,
+                            i64::try_from(tick).unwrap_or(i64::MAX),
+                            tick as f64 + f64::from(partial),
+                        )
+                    } else {
+                        original =
+                            mod_api::ModBlockEntity::new(seed.id.to_string(), seed.fields.clone());
+                        (
+                            &original,
+                            self.clock.fraction() as f32,
+                            self.world.game_time,
+                            self.animation_time(),
+                        )
+                    };
                 let name = &*self.res.facts().get(block.state).name;
                 let mut draw = BlockEntityDraw::posed(
-                    self.clock.fraction() as f32,
-                    self.world.game_time,
+                    partial,
+                    game_time,
                     240 | 240 << 8,
                     block.pos,
                     Mat4::IDENTITY,
                     diffuse_lights(false),
                     Vec::new(),
                 )
-                .animated(self.animation_time());
-                self.native_block_entity_submit(block.pos, name, block.state, &entity, &mut draw);
+                .animated(animation_time);
+                self.native_block_entity_submit(block.pos, name, block.state, entity, &mut draw);
                 // Its text's new glyphs upload with this screen's batch.
                 batch.patches.append(&mut self.text_patches.borrow_mut());
                 let time = draw.animation();
@@ -432,8 +544,35 @@ impl Game<'_> {
         for face in seen {
             batch.quad_3d(face.corners, face.uv, face.color);
         }
-        batch.depth_since(start, rect);
+        self.finish_scene(batch, start, rect, &overlays);
         Ok(())
+    }
+
+    /// Submits the scene's depth and clip, drawing `overlays` after its geometry
+    /// in the same isolated depth pass.
+    fn finish_scene(
+        &self,
+        batch: &mut HudBatch,
+        start: usize,
+        rect: [f32; 4],
+        overlays: &[ProjectedOverlay],
+    ) {
+        if overlays.is_empty() {
+            batch.depth_since(start, rect);
+            return;
+        }
+        let overlay_start = batch.vertices.len();
+        let uv = horizon_client::gfx::lightning::white_uv(&self.gui.atlas.font.white());
+        for overlay in overlays {
+            batch.quad_3d(overlay.corners, [uv; 4], overlay.color);
+        }
+        let runs = overlays
+            .chunk_by(|a, b| a.depth == b.depth)
+            .scan(overlay_start, |end, run| {
+                *end += run.len() * 6;
+                Some((*end, run[0].depth))
+            });
+        batch.depth_overlays_since(start, overlay_start, rect, runs);
     }
 }
 

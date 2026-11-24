@@ -1,8 +1,8 @@
-# Entities, particles and textured faces in screen scenes
+# Block entities, entities, particles and textured faces in screen scenes
 
 `DrawContext::draw_scene` draws a `Scene` in a screen, as a guide page or a Ponder scene
-shows a structure. A scene of blocks alone is drawn as it always was and keeps nothing. A
-scene can also live: mobs standing among its blocks, and particles that live in it. This is
+shows a structure. A scene without a clock just draws its blocks and keeps nothing. A
+clocked scene can tick copies of mod block entities, pose mobs and animate particles. This is
 GuideME's living scene: a lit furnace shows its flames and smoke, a campfire smokes, fire
 flickers, and dripstone and leaves drip, the way the client's animate tick makes these
 particles for blocks near the player.
@@ -87,21 +87,70 @@ The entity is made for drawing only. It never joins a level and never ticks, and
 part's `register_goals` runs for it. Its age is the clock's tick, so the model's idle
 animations follow the scene's clock. A scene takes at most 16 entities.
 
+## Mod block entities
+
+A native mod can implement `BlockEntityPart::block_entity_scene_tick` on a Part attached
+to its block entity **type** with `Registrar::block_entity_part`. This opts that type into
+scene ticks, including when another mod displays it. The hook gets no host: it can change
+the scene copy's NBT, item slots and menu data, but is never given a level or a live
+block entity handle. The type's existing `block_entity_submit` renderer reads the changed
+fields; it also sees the scene's tick and partial tick rather than the client's time.
+
+```rust
+use mod_api::{BlockEntityPart, BlockEntitySceneTickEvent, BlockPart};
+
+struct Rotor;
+
+#[mod_api::horizon_part]
+impl BlockPart for Rotor {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for Rotor {
+    fn block_entity_scene_tick(&self, event: &mut BlockEntitySceneTickEvent<'_>) {
+        if let Some(angle) = event.fields.data.first_mut() {
+            *angle = (*angle + 5) % 360;
+        }
+    }
+    // The existing block_entity_submit reads entity.data[0] as the angle.
+}
+```
+
+The guide supplies the initial fields in a `SceneBlockEntity` and the block state it
+belongs to. It doesn't register or call the other mod's ticker or renderer itself:
+
+```rust
+use mod_api::{Identifier, Scene, SceneBlock, SceneBlockEntity, SceneClock, item::containers::ModBlockEntityFields};
+
+let mut fields = ModBlockEntityFields::default();
+fields.data.push(0);
+let rotor = SceneBlockEntity::new(Identifier::parse("machines:rotor")?, fields);
+let scene = Scene::new(vec![SceneBlock::new([0, 0, 0], casing_state, Some(rotor))])
+    .with_clock(SceneClock::new(2, page_ticks, partial).animate_blocks(false));
+event.batch.draw_scene(rect, &scene, view)?;
+```
+
+`animate_blocks(false)` disables only block animate ticks (smoke, drips, etc.). The scene
+copy starts at its supplied fields on the first draw and ticks as the scene clock advances.
+You can rebuild the same inputs each frame without resetting the animation. Without a clock
+or a registered scene ticker, the renderer uses the supplied fields and the client clock,
+as before. The live-world client and server tick hooks never run for a scene.
+
 ## The scene's clock and its particles
 
-Entities and particles need a clock. The scene keeps its live particles between draws under
-the calling mod and `clock.id`: give each scene on your screens its own id; another mod's
-id 1 is another scene.
+Entities and particles need a clock. The scene keeps live particles and ticking block entity
+copies between draws under the calling mod and `clock.id`: give each scene on your screens
+its own id; another mod's id 1 is another scene.
 
 - **A tick ahead** of the last tick the scene ran: the scene runs the ticks in between. On
   each tick the blocks run their animate ticks (if `animate_blocks` is set: 64 picks among
-  the scene's own blocks), then the particles move, collide with the scene's blocks and age.
-  The particles in `Scene::particles` are added on the first tick run.
-- **More than 20 ticks ahead** (a page resumed): the scene starts over from no particles
-  and runs only the last 20 ticks, so a frame never stalls.
+  the scene's own blocks), opted-in block entity copies run their scene tick, and particles
+  move, collide with the scene's blocks and age. `Scene::particles` are added on the first
+  tick run.
+- **More than 20 ticks ahead** (a page resumed): the scene clears particles, restores the
+  supplied block entity fields and runs only the last 20 ticks.
 - **The same tick** again: the scene is paused. Nothing is added and nothing moves.
-- **A tick behind**, or changed blocks or entities: the scene starts over with no
-  particles.
+- **A tick behind**, or changed blocks, block entity inputs or entities: the scene starts
+  over with no particles and the supplied block entity fields.
 
 Each tick's randomness is seeded from the id and the tick, and the picks cover the scene's
 blocks, not the view, so the same ticks always give the same picture from any angle. A
@@ -109,9 +158,34 @@ scene holds at most 512 live particles, the blocks' own and the mod's together; 
 no new one is added. The particles are drawn facing the viewer and cut off at the box. The
 game's Particles option applies, as it does in the world. Scenes make no sound.
 
-At most four scenes with entities or particles animate in one frame. A fifth still draws
-its blocks and its last state, but its clock does not advance, and the call returns
-`TooManyScenes`.
+At most four living scenes animate in one frame. A fifth still draws its blocks and
+its last state, but its clock does not advance, and the call returns `TooManyScenes`.
+
+## Lines and solid quads
+
+`DrawContext::draw_scene_with_overlays` draws annotations with the same camera and clip
+rectangle as the scene. Positions are in scene blocks; line widths are in GUI pixels.
+Colours are packed ARGB.
+
+```rust
+use mod_api::{SceneDepth, SceneOverlay};
+
+let overlays = [
+    SceneOverlay::line([0.0, 1.0, 0.0], [1.0, 1.0, 0.0], 2.0, 0xFFFF_FFFF, SceneDepth::Tested),
+    SceneOverlay::quad(
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+        0x8020_80FF,
+        SceneDepth::ThroughWalls,
+    ),
+];
+draw.draw_scene_with_overlays(rect, &scene, view, &overlays)?;
+```
+
+`Tested` hides an annotation behind nearer scene geometry. `ThroughWalls` ignores the
+scene depth. Both draw after the scene, in list order, without writing depth; overlapping
+annotations do not hide one another via depth testing. Invalid geometry or more than
+`SCENE_MAX_OVERLAYS` entries refuses the whole draw with a `SceneOverlayError`. Ordinary
+scene errors are carried as `SceneOverlayError::Scene`.
 
 ## Textured faces
 

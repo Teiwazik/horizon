@@ -1,6 +1,4 @@
 //! Startup shared by the gameplay library and its executable.
-#[path = "horizon_look.rs"]
-mod horizon_look;
 use crate::{crash, game, logging};
 use horizon_mod_package::selection::{Argument, LaunchArguments};
 pub(crate) mod dedicated_arguments;
@@ -102,6 +100,8 @@ pub fn start<G>(
     code: CodeRuntime,
     startup: Startup,
 ) {
+    // The startup spans count from here, before the allocator, hooks and languages are set up.
+    let started = std::time::Instant::now();
     let _ = CODE_RUNTIME.set(code);
     let Startup {
         launch,
@@ -111,7 +111,6 @@ pub fn start<G>(
     runtime_environment::capture(&launch);
     horizon_threads::configure_allocator();
     horizon_chat_filter::install();
-    horizon_look::give();
     // OptiFine's and Polytone's pack formats (platform, docs/layers.md), before any pack loads.
     horizon_client::pack_formats::install();
     // The controller glyphs' pictures: Horizon's own art, until a platform crate registers its own.
@@ -135,7 +134,7 @@ pub fn start<G>(
     horizon_hooks::engine::seal();
     // The text crates ship (`horizon_hooks::lang`), loaded with the game's own languages.
     horizon_client::lang::install_crate_files(horizon_hooks::lang::engine::all());
-    horizon_client::spans::startup::init(std::time::Instant::now());
+    horizon_client::spans::startup::init(started);
     logging::set_game_home(launch.context.home.clone());
     // The dedicated server logs in its own folder, as vanilla's does; the game in its home.
     let (home, side, thread) = if launch
@@ -402,6 +401,27 @@ pub(crate) fn install_client_hooks() {
             let reader = horizon_client_render::api_context::LoopReader(context);
             let context = reader.context();
             mod_api::dispatch_living_flying_speed(&context, entity, kind, speed);
+        },
+        can_swim_in_fluid_listened: || {
+            mod_api::__private::listened(mod_api::HookId::CanSwimInFluid)
+        },
+        can_swim_in_fluid: |context, entity, kind, fluid, fire_resistance, can_swim| {
+            let reader = horizon_client_render::api_context::LoopReader(context);
+            mod_api::dispatch_can_swim_in_fluid(
+                &reader.context(),
+                entity,
+                kind,
+                fluid,
+                fire_resistance,
+                can_swim,
+            );
+        },
+        living_fluid_travel_listened: || {
+            mod_api::__private::listened(mod_api::HookId::LivingFluidTravel)
+        },
+        living_fluid_travel: |call| {
+            let reader = horizon_client_render::api_context::LoopReader(call.context);
+            mod_api::dispatch_living_fluid_travel(&reader.context(), call.values);
         },
         block_jump_factor: |context, state, factor| {
             crate::game::block_jump_factor(context, state, factor);

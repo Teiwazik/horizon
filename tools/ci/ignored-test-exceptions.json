@@ -770,6 +770,14 @@
   {
     "package": "horizon-client-render",
     "target": "lib",
+    "test": "level_loading::styled_loading_overlay_blends_both_logo_halves_on_gpu",
+    "path": "crates/horizon-client-render/src/level_loading.rs",
+    "reason": "requires a software Vulkan adapter",
+    "rationale": "Explicit software Vulkan test in tools/ci/ignored-tests/manual-horizon-client-render.txt; asserts both logo halves and the stock and styled progress bar on the real HUD pipeline."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
     "test": "particles::tick_bench::particle_tick_cost",
     "path": "crates/horizon-client-render/src/particles/tick_bench.rs",
     "reason": "a measurement, not a check",
@@ -858,6 +866,14 @@
   {
     "package": "horizon-core",
     "target": "lib",
+    "test": "paletted::tests::benchmark_pack_and_unpack_widths",
+    "path": "crates/horizon-core/src/paletted/tests.rs",
+    "reason": "microbenchmark; run with --ignored --nocapture",
+    "rationale": "Explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: microbenchmark; run with --ignored --nocapture. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-core",
+    "target": "lib",
     "test": "paletted::tests::benchmark_palette_ids",
     "path": "crates/horizon-core/src/paletted.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
@@ -878,6 +894,14 @@
     "path": "crates/horizon-core/src/random/positional.rs",
     "reason": "benchmark",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: benchmark. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-core",
+    "target": "lib",
+    "test": "storage::tests::benchmark_unpack",
+    "path": "crates/horizon-core/src/storage.rs",
+    "reason": "microbenchmark; run with --ignored --nocapture",
+    "rationale": "Explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: microbenchmark of PackedStorage::unpack_into; run with --release --ignored --nocapture. Not selected by daily shards; its correctness is covered by the other storage tests."
   },
   {
     "package": "horizon-items",

@@ -23,6 +23,20 @@ Vanilla enchantment descriptions, including those on enchanted books, retain
 their root `TextContent::Translatable { key, .. }`. Match that key (for example,
 `enchantment.minecraft.sharpness`), not the displayed name, level, or color.
 
+To restrict a tooltip edit to the enchanting table, read the live topmost
+screen from the hook's `&dyn ClientHost`:
+
+```rust,ignore
+let enchanting_table_is_open = host.current_screen().is_some_and(|screen| {
+    screen.id == "inventory" && screen.menu.as_deref() == Some("minecraft:enchantment")
+});
+```
+
+A chest and the player's inventory also report `inventory`, but with a
+different or absent menu type. If a dialog or prompt covers the enchanting
+table, the query reports the covering screen instead. Normal play returns
+`None`. The query works on native and Wasm without subscribing to screen hooks.
+
 ## Drawing a second world camera
 
 Native internals mods can request extra world cameras through `world_views` and
@@ -77,6 +91,18 @@ client (viewed levels) are meshed only while a view names one, after the player'
 level's work and on one worker at a time, and their meshes stay 5 seconds after no view
 names the level. Once views of a viewed level are drawn, such a view draws the sections
 meshed so far and nothing where a section is not meshed yet.
+
+## Matching the frame's sky and light
+
+A pass in `world_drawn` that draws its own picture (a map, a hologram, a view's
+composite) can sit in the frame's light with `WorldDrawn::look` (`WorldLook`): the
+fog's colour and distances as the terrain mixes them, unit world directions to the
+sun, the moon and the body lighting the frame, `sunAngle`, the sky, ambient and block
+light colours, the sunrise glow, star brightness, under water and water's fog colour,
+and night vision. With a shader pack on, the directions follow the pack's
+`sunPathRotation` and `shader_pack` is set: the pack's own sky, fog, lighting and
+tonemap are its shader code and are already in `color`, so copy from `color` to match
+them exactly, and use `look` for what the pack's uniforms were built from.
 
 ## Muffling sounds
 

@@ -31,6 +31,7 @@ use super::pack_uniforms::{self, FrameUniforms, PackInputs};
 mod blend_capability;
 #[cfg(test)]
 mod blend_capability_tests;
+mod executor;
 mod indirect;
 mod packed;
 mod sky;
@@ -1296,8 +1297,6 @@ pub(super) type TerrainDraw<'a> = dyn FnMut(
         Option<(u32, &wgpu::BindGroupLayout)>,
     ) + 'a;
 
-pub(super) use super::external::ShadowView;
-
 /// An arena page's key, native vertices and optional per-quad source records.
 pub(super) type TerrainPage = (u32, wgpu::Buffer, Option<wgpu::Buffer>);
 
@@ -2475,6 +2474,18 @@ impl Refused {
     /// fault, so nothing to report to the player.
     pub fn is_cancelled(&self) -> bool {
         self.reason == Self::CANCELLED
+    }
+    /// The reason of a pack that found no room in video memory for what it makes as it loads:
+    /// not the pack's fault either, and the same files may load the next time.
+    const NO_ROOM: &str = "video memory is full";
+    pub(super) fn no_room() -> Self {
+        Self {
+            reason: Self::NO_ROOM.into(),
+            notes: Vec::new(),
+        }
+    }
+    pub fn is_no_room(&self) -> bool {
+        self.reason == Self::NO_ROOM
     }
 }
 
@@ -4655,6 +4666,11 @@ impl PackPost {
         self.hand = Some((pass, geometry));
     }
 
+    /// The pack's `sunPathRotation` in degrees: how far it turns the sky's bodies' path.
+    pub fn sun_path_rotation(&self) -> f32 {
+        self.uniforms.shadow.sun_path_rotation
+    }
+
     /// Whether the pack draws the first-person hand itself.
     pub fn has_hand(&self) -> bool {
         self.hand.is_some()
@@ -4922,27 +4938,6 @@ impl PackPost {
         }
     }
 
-    /// What the shadow camera draws of the terrain this frame, when the pack draws it.
-    pub fn shadow_view(&self, frame: &super::Frame) -> Option<ShadowView> {
-        if !self.has_shadow() {
-            return None;
-        }
-        let shadow = &self.uniforms.shadow;
-        Some(ShadowView {
-            cull: pack_uniforms::shadow_culling(frame, shadow),
-            light: pack_uniforms::shadow_light(frame, shadow),
-            distance: (shadow.render_mul > 0.0).then_some(shadow.distance * shadow.render_mul),
-            unculled: match self.shadow_culling {
-                horizon_shaders::ShadowCulling::On => None,
-                horizon_shaders::ShadowCulling::Off => Some(f32::INFINITY),
-                horizon_shaders::ShadowCulling::Reversed => Some(shadow.voxel_distance),
-            },
-            every_face: true,
-            view_casters: true,
-            depth_planes: false,
-        })
-    }
-
     /// Whether the buffers `pass` writes have different sizes at the current render size: then
     /// it is skipped, as one whose `size.buffer` sizes never meet is when the pack loads. Only
     /// a pass writing buffers sized relative to the render size and in pixels can.
@@ -4960,7 +4955,7 @@ impl PackPost {
         self.terrain.is_some() || self.terrain_cutout.is_some() || self.terrain_undrawn
     }
 
-    /// Whether the pack's shadow pass draws terrain (`shadow_view`).
+    /// Whether the pack's shadow pass draws terrain.
     pub fn has_shadow(&self) -> bool {
         self.shadow_targets.is_some()
             && (self.shadow_terrain.is_some() || self.shadow_water.is_some())

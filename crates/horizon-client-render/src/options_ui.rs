@@ -5,6 +5,7 @@
 mod draw;
 mod pack_drop;
 
+use horizon_optifine::better_grass::Mode as BetterGrassMode;
 use std::time::Instant;
 
 pub use crate::settings::Opt;
@@ -272,6 +273,7 @@ impl Opt {
             Opt::Particles => "options.particles",
             Opt::EntityDistance => "options.entityDistanceScaling",
             Opt::EntityShadows => "options.entityShadows",
+            Opt::BetterGrass => "horizon.options.better_grass",
             Opt::BiomeBlend => "options.biomeBlendRadius",
             Opt::Preset => "options.graphics.preset",
             Opt::Mipmaps => "options.mipmapLevels",
@@ -839,6 +841,12 @@ impl Opt {
                 "options.particles.minimal",
             ][usize::from(s.particles.min(2))]),
             Opt::EntityShadows => on_off(s.entity_shadows),
+            Opt::BetterGrass => tr(match s.better_grass_mode() {
+                BetterGrassMode::Auto => "horizon.options.better_grass.auto",
+                BetterGrassMode::Off => "options.off",
+                BetterGrassMode::Fast => "options.clouds.fast",
+                BetterGrassMode::Fancy => "options.clouds.fancy",
+            }),
             Opt::Vignette => on_off(s.vignette),
             Opt::Autosave => on_off(s.autosave_indicator),
             Opt::CutoutLeaves => on_off(s.cutout_leaves),
@@ -1175,6 +1183,19 @@ impl Opt {
             }
             Opt::Particles => s.particles = next(s.particles, 3),
             Opt::EntityShadows => s.entity_shadows = !s.entity_shadows,
+            Opt::BetterGrass => {
+                let order = [
+                    BetterGrassMode::Auto,
+                    BetterGrassMode::Off,
+                    BetterGrassMode::Fast,
+                    BetterGrassMode::Fancy,
+                ];
+                let i = order
+                    .iter()
+                    .position(|&mode| mode == s.better_grass_mode())
+                    .unwrap();
+                s.better_grass = order[usize::from(next(i as u8, order.len() as u8))];
+            }
             Opt::Vignette => s.vignette = !s.vignette,
             Opt::Autosave => s.autosave_indicator = !s.autosave_indicator,
             Opt::CutoutLeaves => s.cutout_leaves = !s.cutout_leaves,
@@ -1490,7 +1511,7 @@ fn section_title(text: Text, y: f32, w: f32) -> Widget {
 }
 
 /// A registered key's binding as Controls shows it: its modifiers' key names, then its key's.
-fn binding_text(key: &str, modifiers: u32) -> Text {
+pub fn binding_text(key: &str, modifiers: u32) -> Text {
     let mut text = Text::empty();
     for (bit, name) in [
         (crate::mod_list::SHIFT, "key.keyboard.left.shift"),
@@ -2897,6 +2918,7 @@ impl OptionsUi {
                     Opt::Vignette,
                     Opt::AttackIndicator,
                     Opt::ChunkFade,
+                    Opt::BetterGrass,
                 ]));
                 self.filter_option_rows(rows)
             }
@@ -7894,17 +7916,42 @@ mod tests {
                 Page::ModBrowser,
             ]
         );
-        // No AI hides the AI Agent page.
+        // No AI greys AI Agent... out and moves neither it nor the switch (#18635).
+        let agent_and_switch = |ui: &mut OptionsUi, s: &Settings| {
+            let (widgets, _, _, _) = ui.layout(s, 427.0, 240.0);
+            widgets
+                .into_iter()
+                .filter_map(|w| match w.kind {
+                    WKind::Button {
+                        act: act @ (Act::Push(Page::Agent) | Act::Extra(crate::extras::Item::NoAi)),
+                        active,
+                        ..
+                    } => Some((act, active, [w.x, w.y, w.w, w.h])),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         let mut no_ai = Settings::default();
         no_ai.extras.no_ai = true;
-        let (widgets, _, _, _) = ui.layout(&no_ai, 427.0, 240.0);
-        assert!(!widgets.iter().any(|w| matches!(
-            &w.kind,
-            WKind::Button {
-                act: Act::Push(Page::Agent),
-                ..
-            }
-        )));
+        let off = agent_and_switch(&mut ui, &s);
+        let on = agent_and_switch(&mut ui, &no_ai);
+        let states = |buttons: &[(Act, bool, [f32; 4])]| -> Vec<(Act, bool)> {
+            buttons
+                .iter()
+                .map(|(act, active, _)| (act.clone(), *active))
+                .collect()
+        };
+        let agent = Act::Push(Page::Agent);
+        let switch = Act::Extra(crate::extras::Item::NoAi);
+        assert_eq!(
+            states(&off),
+            [(agent.clone(), true), (switch.clone(), true)]
+        );
+        assert_eq!(states(&on), [(agent, false), (switch, true)]);
+        let places = |buttons: &[(Act, bool, [f32; 4])]| -> Vec<[f32; 4]> {
+            buttons.iter().map(|b| b.2).collect()
+        };
+        assert_eq!(places(&on), places(&off));
         // The AI Agent page: the switch, Copy and the status the game sets.
         ui.push(Page::Agent);
         ui.agent_status = vec!["Waiting for an agent.".into()];

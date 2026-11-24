@@ -5,6 +5,7 @@ horizon-client game::api_values::loot_values::query_tests::queried_ability_parts
 horizon-client game::api_values::read_stack_tests::read_consumers_forward_nonresident_stacks_and_mutants lib daily slow
 horizon-client game::big_dripleaf_tests::a_leaf_stays_flat_under_an_entity_that_cannot_tilt_it lib daily resources
 horizon-client game::big_dripleaf_tests::a_leaf_tilts_under_a_mob_an_item_a_boat_a_minecart_and_a_trident lib daily resources
+horizon-client game::boats::tests::a_boat_landing_on_a_pool_floor_scans_up_to_the_water_surface lib daily resources
 horizon-client game::commands::modprofile::tests::modprofile_state_and_report_side_effects lib daily child-process
 horizon-client game::commands::profiles::save_all_command_tests::a_failed_save_fails_at_the_source_only lib daily resources
 horizon-client game::commands::profiles::save_all_command_tests::a_guests_save_all_reaches_the_other_operators lib daily resources
@@ -12,6 +13,7 @@ horizon-client game::commands::profiles::save_all_command_tests::a_save_all_keep
 horizon-client game::commands::profiles::save_all_command_tests::every_source_of_a_guests_save_all_keeps_its_feedback lib daily resources
 horizon-client game::commands::selector_bounds_tests::actual_selector_uses_body_overlap_but_distance_stays_at_the_origin lib daily game-boot
 horizon-client game::commands::world_cmds::allay_owner_damage_tests::allay_owner_adapters_compare_the_actual_player_uuid lib daily game-boot
+horizon-client game::commands::world_cmds::swing_command_tests::a_second_swing_inside_a_mobs_first_half_is_refused lib daily resources
 horizon-client game::container_loot::tests::commands_clone_and_structures lib daily child-process
 horizon-client game::container_loot::tests::player_and_world_triggers lib daily child-process
 horizon-client game::container_loot::tests::random_selection_streams lib daily resources
@@ -19,9 +21,16 @@ horizon-client game::container_loot::tests::seeds_and_fill_listeners lib daily c
 horizon-client game::container_loot::tests::transfers_between_containers lib daily child-process
 horizon-client game::crafting_recipe_kind_tests::registered_crafting_remainder_drops_through_server_item_toss lib daily resources
 horizon-client game::crafting_recipe_kind_tests::unregistered_serializer_failed_reload_preserves_previous_recipes lib daily resources
+horizon-client game::creatures::mob_pearl_hook_tests::a_landed_ender_pearl_bursts_into_portal_particles lib daily resources
 horizon-client game::dedicated::tests::console_logging_survives_closed_stdout lib daily child-process
 horizon-client game::dispenser::decision_tests::crown_is_prepared_once_for_three_and_eight_dispenser_candidates lib daily resources
+horizon-client game::dispenser::tests::dispensed_shears_cut_the_leads_a_server_player_holds lib daily game-boot
 horizon-client game::dragon::tests::a_fireballs_breath_cloud_starts_at_its_hit_position lib daily resources
+horizon-client game::end_crystal_room_tests::a_dragon_over_the_cell_refuses_the_crystal_and_its_flight_frees_it lib daily resources
+horizon-client game::end_crystal_room_tests::a_dropped_item_in_the_cell_refuses_the_crystal lib daily resources
+horizon-client game::end_crystal_room_tests::a_refused_crystal_ends_the_click_before_the_off_hand lib daily resources
+horizon-client game::end_crystal_room_tests::a_removed_mob_in_the_cell_does_not_refuse_the_crystal lib daily resources
+horizon-client game::end_crystal_room_tests::the_clicking_client_ends_the_click_where_the_crystal_is_refused lib daily resources
 horizon-client game::entity_sections::tests::a_real_mob_tick_tells_inside_each_position_write lib daily resources
 horizon-client game::equip_answers::tests::an_unpreparable_listening_stack_refuses_instead_of_using_the_data_answer lib daily resources
 horizon-client game::equip_answers::tests::local_shift_click_prepares_once_and_preserves_a_refused_helmet lib daily resources
@@ -47,6 +56,7 @@ horizon-client game::fishing::impact::tests::bobbers_notify_before_entity_deflec
 horizon-client game::fishing::impact::tests::entity_impact_includes_items_and_cancel_skips_hooking lib daily resources
 horizon-client game::fishing::impact::tests::misses_water_and_the_closed_gate_emit_no_bobber_impact lib daily resources
 horizon-client game::fishing::impact::tests::removing_a_bobber_in_its_impact_clears_the_line_without_rewards lib daily resources
+horizon-client game::fishing::incoming_block_hit_tests::a_bobber_chimes_on_every_amethyst_block lib daily resources
 horizon-client game::fullbright_key_tests::a_mouse_bound_fullbright_press_toggles_the_extra_and_keeps_the_buttons_mappings lib daily game-boot
 horizon-client game::fullbright_key_tests::the_fullbright_key_toggles_the_extra_and_does_nothing_where_the_server_holds_it_off lib daily game-boot
 horizon-client game::game_mode::tests::leaving_creative_keeps_the_carried_stack lib daily resources
@@ -54,8 +64,14 @@ horizon-client game::game_mode::tests::the_tick_swap_out_of_creative_keeps_the_c
 horizon-client game::ghasts::ghastling_hatch_tests::hatched_ghastling_spawns_non_persistent lib daily resources
 horizon-client game::gui_clips::dispatch_tests::a_hook_call_clips_what_its_mod_draws_and_closes_what_it_leaves_open lib daily resources
 horizon-client game::gui_entity::tests::a_screen_draws_a_mob_by_type_once_and_refuses_what_it_cant_draw lib daily game-boot
+horizon-client game::horse_jump_sound_tests::a_guests_riding_jump_plays_the_jump_sound_once lib daily resources
 horizon-client game::initial_spawn_tests::a_spawn_search_follows_the_level_seed lib daily resources
+horizon-client game::item_entities::give_fake_item_tests::give_that_fits_draws_from_the_players_random lib daily resources
+horizon-client game::item_entities::give_fake_item_tests::give_that_fits_spawns_a_fake_item_that_is_never_picked_up lib daily resources
+horizon-client game::item_entities::item_rain_fire_tests::rain_puts_a_burning_item_out_with_the_hiss lib daily resources
+horizon-client game::item_entities::item_rain_fire_tests::rain_puts_out_what_a_fire_block_ignites_in_the_same_tick lib daily resources
 horizon-client game::item_entities::orb_pickup_tests::a_player_picks_a_random_orb_not_the_first lib daily resources
+horizon-client game::lan::mob_states::mob_swing_animation_tests::a_mobs_spear_thrust_reaches_guests_as_a_stab lib daily resources
 horizon-client game::lan_actions::admin_feedback::tests::a_level_zero_operator_hears_another_operators_command lib daily resources
 horizon-client game::lan_actions::admin_feedback::tests::a_level_zero_splitscreen_seat_hears_no_admin_line lib daily resources
 horizon-client game::lan_actions::admin_feedback::tests::an_integrated_server_without_commands_tells_no_one lib daily resources
@@ -246,6 +262,7 @@ horizon-client game::server_travel::changed_dimension_tests::a_nether_portal_tri
 horizon-client game::server_travel::changed_dimension_tests::an_end_gateway_jump_within_the_level_is_not_heard_on_any_server lib daily resources
 horizon-client game::server_travel::credits_respawn_tests::the_credits_respawn_waits_for_the_client_to_load lib daily resources
 horizon-client game::split::players::tests::offline_guests_join_only_local_servers lib daily network
+horizon-client game::star_stage_tests::star_build_and_cancellation_reach_world_pixels lib daily resources
 horizon-client game::stations::tests::resource_tooltip_includes_mod_edits_and_falls_back_to_base_lines_reentrantly lib daily resources
 horizon-client game::stats::phantom_spawn_tests::no_phantoms_under_a_roof_the_sky_light_does_not_reach lib daily game-boot
 horizon-client game::stats::phantom_spawn_tests::phantoms_spawn_under_a_glass_roof lib daily game-boot

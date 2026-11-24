@@ -4,8 +4,8 @@
 //! (`Renderer::set_external_pipeline`), each point is one `Option` test.
 //!
 //! Workspace-internal: the trait names the engine's frame, its mesh format and its pass order,
-//! has one implementer in this workspace, carries no stability promise and is never exposed to
-//! mods. A mesher or pass change updates its implementer in the same PR. HDR output
+//! carries no stability promise and is never exposed to mods. A mesher or pass change
+//! updates its implementers in the same PR. HDR output
 //! (`output.rs`, `frame_policy`) is not an implementer: it stays the one output stage after the
 //! frame, and a pipeline draws into the frame it gives.
 //!
@@ -208,6 +208,10 @@ pub struct Capabilities {
     /// Besides `engine_resolve`, TAA upscales its world and sharpens it as without a pack: its
     /// `[tonemap]`, if it has one, never reads `previous`, which is then larger than the world.
     pub engine_upscale: bool,
+    /// Without `engine_resolve`, the renderer still moves the world's projection by TAA's
+    /// sub-pixel offset every frame and says it in `frame.jitter` (`[frame] jitter`), for the
+    /// pack's own temporal pass; it doesn't resolve, upscale or keep a history for it.
+    pub jitter: bool,
 }
 
 /// What the renderer hands the pack's post stage (`ExternalPipeline::run_post`).
@@ -406,6 +410,9 @@ pub struct EntityLayers<'a> {
     /// Their group 3: the pack's frame, with this frame's version of the kept resources the
     /// stage reads where it reads any.
     pub frame: &'a wgpu::BindGroup,
+    /// `[entity] surface = true`: the surface target both pipelines write beside the colour,
+    /// the one the material stage's solid terrain writes.
+    pub surface: Option<&'a wgpu::TextureView>,
 }
 
 /// A section the grid may draw from this frame: its arena page, the base vertex of its solid

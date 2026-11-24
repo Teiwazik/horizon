@@ -212,6 +212,7 @@ pub(super) struct PackStack {
     pub(super) content: DataPack,
     pub packs: Vec<Arc<DataPack>>,
     pub enabled: Vec<String>,
+    pub(super) feature_flags: Box<[String]>,
     /// The predicate tags `PackStack::validate` bound (loading.rs).
     tags: std::sync::OnceLock<registry_graph::BoundTags>,
 }
@@ -242,6 +243,7 @@ pub(super) fn pack_stack(
         builtin,
         packs: packs.into_iter().map(Arc::new).collect(),
         enabled,
+        feature_flags: enabled_features.into(),
         tags: Default::default(),
     }
 }
@@ -382,6 +384,7 @@ impl Game<'_> {
         horizon_client::mod_content::check_jars(
             &self.options.resources,
             &horizon_client::logging::game_home().join("jars"),
+            self.options.mods.jar_side,
         )
         .map_err(|error| {
             ReloadStageError::OriginalJars(
@@ -389,7 +392,7 @@ impl Game<'_> {
             )
         })?;
         let next_root = self
-            .stage_condition_inventory()
+            .stage_condition_inventory(enabled_features)
             .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
         let resources = next_root
             .as_ref()
@@ -441,6 +444,7 @@ impl Game<'_> {
             self.options.resources = root.prepared().to_owned();
             self.pack.data_source = root.data().clone();
             self.pack.data_changes = root.data_changes().clone();
+            self.mods.root_feature_flags = self.mods.candidate_feature_flags();
             self.mods.data_switched = true;
         }
         self.install_loop_context(context);
@@ -849,7 +853,19 @@ impl Game<'_> {
         if let Err((key, a)) = self.parse_macro_lines(f, &lines) {
             return Err(failure(&key, &a));
         }
-        if self.exec.functions.len() >= 128 {
+        // `CallFunction.execute` queues the body one frame deeper with no depth
+        // limit; vanilla only stops it at the command quota
+        // (`ExecutionContext.runCommandQueue`). Here each call is a native
+        // frame, so `max_command_sequence_length` (up to `i32::MAX`) alone
+        // could overflow the guest stack. One level (`run_function`,
+        // `execute_line`, `run_chain` and the `function` command) measured
+        // about 9.7 KiB in a debug build; at a 16 KiB budget the guest stack
+        // holds 8192 levels. A deeper call returns `NoReturn` and its body does
+        // not run.
+        const FUNCTION_CALL_STACK_BYTES: usize = 16 * 1024;
+        const MAX_FUNCTION_DEPTH: usize =
+            horizon_guest_stack::GUEST_STACK_BYTES / FUNCTION_CALL_STACK_BYTES;
+        if self.exec.functions.len() >= MAX_FUNCTION_DEPTH {
             return Ok(Outcome::NoReturn);
         }
         self.exec.functions.push(f.id.clone());
@@ -955,11 +971,19 @@ impl Game<'_> {
         let source = self.command_source.unwrap_or_else(|| self.player_source());
         let mut out = Vec::new();
         for f in functions {
-            out.push(match self.run_function(&f, args, source)? {
+            let result = match self.run_function(&f, args, source)? {
                 Outcome::NoReturn => None,
                 Outcome::Value(v) => Some(v),
                 Outcome::Fail => Some(0),
-            });
+            };
+            out.push(result);
+            // `ExecuteCommand.addIsolatedCall` queues the tag's functions with
+            // `returnParentFrame`: a `return` (value or fail) runs
+            // `Frame.discard` on the isolated frame, so the tag's remaining
+            // functions never start.
+            if result.is_some() {
+                break;
+            }
         }
         Ok(out)
     }
@@ -3948,3 +3972,7 @@ mod schedule_reload_tests;
 #[cfg(test)]
 #[path = "functions/loading_tests.rs"]
 mod loading_tests;
+
+#[cfg(test)]
+#[path = "functions/recursion_tests.rs"]
+mod recursion_tests;

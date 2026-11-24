@@ -45,7 +45,8 @@ cargo horizon-mod check target/horizon-mod/my_mod.hmod   # the registry's checks
   with `--key <public key> --signature <file>.minisig`. It reads `.hmod`, `.hpack`, resource pack `.zip`
   and `.hshader` files.
 - `registry build|review|check|list|release|page` is the registry repository's CI ([the registry index](../reference/registry-index.md)).
-- `use-jar <path>` records an original Java jar as an external asset/data source, without copying it into the mod
+- `use-jar <path> [--take <prefix>]...` records an original Java jar as an external asset/data source, without
+  copying it into the mod, optionally layering only the prefixes it takes
   ([Java jars as external assets](#java-jars-as-external-assets)).
 
 ## Declare content in code
@@ -139,6 +140,17 @@ leaves the file byte-for-byte unchanged; a hash already listed with another ID o
 not another entry. Use `[[jar]]` tables rather than an inline `jar = [...]` array when adding further jars with the command.
 The list is ordered: new references are appended, not sorted.
 
+To layer only part of the jar, name the prefixes it takes:
+
+```sh
+cargo horizon-mod use-jar /path/to/original-mod.jar --take assets/original_mod --take assets/minecraft/atlases
+```
+
+Each `--take` is checked as the manifest's `take` is, and also against the jar itself: an entry that matches no
+file in it is refused. A jar that takes no `data/` is client-only: servers and headless runs never fetch it
+([Taking part of a jar](../reference/manifest.md#original-java-jar-layers)). Listing a jar already listed with
+another `take` is an error; edit its entry instead.
+
 Jar bytes stay external. The launcher finds the exact hash locally or asks before downloading that exact file from
 Modrinth. Its `assets/` and `data/` are passive pack layers below the Horizon mod's own files; a player-local runtime
 cache is not part of the mod package. Do not copy a jar or its extracted files into the mod's source or `.hmod`.
@@ -207,12 +219,37 @@ A block gets a block item of its own id by default. `"item": false` gives it non
 `Block.asItem` is air (what a block drops comes from its loot table). `"block_item": "<item id>"` (with `"item": false`) makes the block
 that other item instead, an item of the mod or a vanilla one, such as `"minecraft:diamond"`: pick-block and
 `Block.asItem` both read it, and the load fails naming the block when no such item exists. `"none"` is not an item id;
-write `"item": false`. A sign's wall form takes its sign's item through `wall_block`, not `block_item`.
+write `"item": false`.
 
 Pick-block takes the block's item by default. `"pick_item": "<item id>"` names a different one, with any `item` and
 `block_item`: vanilla's `getCloneItemStack`, which lets a mature crop pick its seed while `Block.asItem` stays what it
 is (air for `"item": false`). It is an item of the mod or a vanilla one, and the load fails naming the block when no
-such item exists. A sign's wall form picks its sign's item through `wall_block`, so it declares no `pick_item`.
+such item exists.
+
+#### Floor, wall and ceiling forms
+
+A block with its own item can name a separate wall form, regardless of its template:
+
+```json
+{ "template": "minecraft:torch", "wall_block": "ruby:sconce_wall" }
+```
+
+```json
+{ "template": "minecraft:wall_torch", "item": false }
+```
+
+`wall_block` is the full ID of a distinct block owned by the same mod. It must have
+`"item": false`, no `block_item` or `pick_item`, and cannot be paired with another item
+or name its own wall form. Both forms share the primary block's item for `Block.asItem`
+and the wall form's pick-block; give each form its own loot table as needed.
+
+With `wall_block`, `"attachment_direction": "down"` (the default for non-signs) tries
+the primary form against a floor; `"up"` tries it against a ceiling instead. Horizontal
+directions try the wall form, in the normal placement order. Pairing does not change
+either block's support rules: choose suitable templates and, in native mods, give
+each block its own `state_for_placement` hook to set its properties. Neither hook
+can return a state of the other block. A dispenser ordinarily drops the item, just
+like a vanilla torch; pairing doesn't register dispenser placement.
 
 `push_reaction` sets vanilla's `BlockBehaviour.Properties.pushReaction` to `"PUSH_PULL"`, `"PUSH"`, `"POPPED"`, `"IMMOVEABLE"`, or `"IGNORE_ENTITY"`.
 
@@ -299,8 +336,9 @@ one with the item names its wall form:
 
 The same goes for `minecraft:oak_hanging_sign` and `minecraft:oak_wall_hanging_sign`. `wall_block` is what the
 sign's item places on a wall, a block of the same mod, declared in its files when the sign is; without it the
-item places the template's wall sign. The wall form has no item of its own, and its sign's item is what picking
-it gives. `wood_type` names the editor's background:
+item places the template's wall sign. Signs still require their matching wall template
+and direction (`"down"` for standing signs, `"up"` for hanging signs).
+`wood_type` names the editor's background:
 `ruby:elm` is `assets/ruby/textures/gui/signs/elm.png` (24x26) and `assets/ruby/textures/gui/hanging_signs/elm.png`
 (16x16), and a bare name is vanilla's, such as `cherry`; without it the template's wood is used. The board is
 the block's model: `minecraft:block/template_sign_rot_0` to `_rot_3` and `template_wall_sign`, and for hanging

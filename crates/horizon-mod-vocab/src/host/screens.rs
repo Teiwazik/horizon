@@ -101,6 +101,18 @@ pub trait ScreensClientHost {
     #[access(ClientSetup)]
     #[default_on_unavailable]
     fn request_client_quit(&self) -> bool;
+    /// Shows the branded loading overlay over the current screen for `desired_ms` milliseconds
+    /// starting with its first frame. Its progress runs from zero to full, then the underlying
+    /// screen is shown again, without loading resources or a world. Escape or the controller's
+    /// Back/Start button dismisses it early.
+    /// Returns false for a zero duration, an existing preview, a real load, scripted run or
+    /// shutdown, or without the primary window's client (including headless and server contexts).
+    ///
+    /// Not on wasm: this previews the native loading-overlay style hook. The unavailable host
+    /// default is false.
+    #[access(ClientSetup)]
+    #[default_on_unavailable]
+    fn preview_loading_overlay(&self, desired_ms: u32) -> bool;
     /// Side: client.
     /// Opens the player's inventory as the inventory key does: locally, with
     /// no packet (the player menu is always open on the server). Riding a
@@ -121,6 +133,11 @@ pub trait ScreensClientHost {
     #[access(ClientSetup)]
     fn mod_screen(&self) -> Option<&str>;
     /// Side: client.
+    /// Name of the active Options page (`"key_binds"`, `"controls"`, `"main"`, etc.)
+    /// when `Screen::Options` is open, or `None` when another screen is active.
+    #[access(ClientSetup)]
+    fn options_page(&self) -> Option<String>;
+    /// Side: client.
     /// The open menu's title (the block's name, or the one it was given),
     /// as plain text.
     #[access(ClientSetup)]
@@ -133,6 +150,15 @@ pub trait ScreensClientHost {
     /// The same screen identifier provided to screen hooks.
     #[access(ClientSetup)]
     fn observed_screen_id(&self) -> Option<ScreenId>;
+    /// The topmost open screen, including dialogs and prompts, without needing a rendered view.
+    /// `None` during normal play or when no screen represented by the screen hooks is open.
+    /// A covering screen does not report an underlying screen's menu.
+    ///
+    /// Available in read-only client hooks, including `Hooks::item_tooltip`. The enchanting
+    /// table reports `id == "inventory"` and `menu.as_deref() == Some("minecraft:enchantment")`
+    /// on native and wasm alike.
+    #[access(ClientSetup)]
+    fn current_screen(&self) -> Option<ScreenIdentity>;
     /// Side: client.
     /// Whether a specific key is currently held down.
     /// `key` is the vanilla physical key name (`key.keyboard.left.shift`, for example).

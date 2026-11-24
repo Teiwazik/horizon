@@ -722,6 +722,9 @@ pub(super) struct Remote {
     pub(super) glowing: std::collections::HashSet<i32>,
     /// The player's own shared flag 5 (`Entity.isInvisible`) as the server last set it.
     pub(super) own_invisible: bool,
+    /// The player's own shared flag 6 (`Entity.isCurrentlyGlowing` on a client) as the
+    /// server last set it: its Glowing tag or effect.
+    pub(super) own_glowing: bool,
     /// The player's own shared flag 0 (`Entity.isOnFire`) as the server last
     /// set it: its fire (blaze fireballs, fire aspect, lightning) never
     /// reaches the window's own `fire_ticks` otherwise.
@@ -737,7 +740,7 @@ pub(super) struct Remote {
     /// body draws it until the local pose changes.
     pub(super) own_pose: Option<(crate::pose::Pose, crate::pose::Pose)>,
     /// The local player's profile UUID (always in the level).
-    pub(super) profile: u128,
+    pub(in crate::game) profile: u128,
     /// The local player's profile name: its score holder and team member.
     pub(super) profile_name: String,
     /// `MultiPlayerGameMode.destroyBlockPos`, `.destroyProgress` and the face last sent: the block
@@ -1369,7 +1372,7 @@ impl Game<'_> {
     fn remote_break_restricted(&self, pos: [i32; 3]) -> bool {
         self.remote_break_restricted_body(pos)
     }
-    fn remote_use_block(&mut self, hand: Hand) -> bool {
+    pub(in crate::game) fn remote_use_block(&mut self, hand: Hand) -> bool {
         self.remote_use_block_body(hand)
     }
     pub(in crate::game) fn predict_item_on_block(
@@ -1410,6 +1413,15 @@ impl Game<'_> {
     ) -> (InteractionResult, DryUse) {
         self.remote_block_reacts_body(hit, held)
     }
+    fn remote_block_reacts_hand(
+        &mut self,
+        hand: Hand,
+        hit: &super::Hit,
+        held: Option<&ItemStack>,
+    ) -> (InteractionResult, DryUse) {
+        self.remote_block_reacts_hand_body(hand, hit, held)
+    }
+    #[allow(dead_code)] // the mod API's point; the hand-aware one is what the game calls
     pub(super) fn remote_block_template(
         &mut self,
         hit: &super::Hit,
@@ -1417,6 +1429,15 @@ impl Game<'_> {
         without_item: bool,
     ) -> (InteractionResult, DryUse) {
         self.remote_block_template_body(hit, held, without_item)
+    }
+    pub(super) fn remote_block_template_hand(
+        &mut self,
+        hand: Hand,
+        hit: &super::Hit,
+        held: Option<&ItemStack>,
+        without_item: bool,
+    ) -> (InteractionResult, DryUse) {
+        self.remote_block_template_hand_body(hand, hit, held, without_item)
     }
     fn predict_place(&mut self, (pos, changes): &DryPlace, seq: i32) {
         self.predict_place_body((pos, changes), seq)

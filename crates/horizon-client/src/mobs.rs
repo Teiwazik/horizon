@@ -125,6 +125,7 @@ pub mod warden;
 pub mod warden_brain;
 pub mod witch;
 pub mod wither;
+pub mod wolf;
 
 #[cfg(test)]
 mod invisible_follow_tests;
@@ -1769,6 +1770,9 @@ pub enum MobEvent {
         count: u32,
     },
     Sound(&'static str, [f64; 3], f32, f32),
+    /// `Entity.playSound`: a sound at `at` in the entity's own sound source,
+    /// which the event's category alone would not give.
+    SourcedSound(&'static str, mod_api::SoundSource, [f64; 3], f32, f32),
     ProfessionWorkSound(Arc<str>, [f64; 3], f32, f32),
     /// `level.playSound(null, mob, sound, source, volume, pitch)`: a sound
     /// bound to mob `mob` (`ServerLevel.playSeededSound`'s entity overload),
@@ -1845,14 +1849,28 @@ pub enum MobEvent {
         velocities: Vec<Vec3>,
     },
     /// `LivingEntity.hurtArmor` (`doHurtEquipment`): a hit that landed on a mob
-    /// wearing body armour (a horse's) leaves the piece owing
-    /// `max(1, damage / 4)` durability. The host applies it: it is the one
-    /// that knows the item's maximum, whether it wears when hurt at all and
-    /// whether a fire hit leaves it alone (`ItemStack.canBeHurtBy`).
+    /// wearing body armour (a horse's, or a wolf's body item that is not its
+    /// armour) leaves the piece owing `max(1, damage / 4)` durability. The host
+    /// applies it: it is the one that knows the item's maximum, whether it
+    /// wears when hurt at all and whether a fire hit leaves it alone
+    /// (`ItemStack.canBeHurtBy`). A wolf's wolf armour wears inside the hit
+    /// instead (`wolf::wear_body`): `canArmorAbsorb` reads the slot again on the
+    /// next one.
     ArmorHurt {
         mob: u32,
         amount: f32,
         source: crate::health::HurtSource<'static>,
+    },
+    /// `LivingEntity.onEquippedItemBroken`: the `stack` in `slot` broke, so the
+    /// slot is empty. The host broadcasts the slot's break event to the clients
+    /// (`entityEventForEquipmentBreak`) and, in a window that is its own client,
+    /// breaks the stack here (`breakItem`: its break sound and five crumbs) —
+    /// that window has already lost it from the slot.
+    EquipmentBroke {
+        mob: u32,
+        slot: horizon_core::equipment_slot::EquipmentSlot,
+        stack: crate::items::ItemStack,
+        at: [f64; 3],
     },
     /// `LivingEntity.updateFallFlying`: every 20 glide ticks the glider in
     /// `slot` (the one `Util.getRandom` picked) takes one point of wear,
@@ -2657,6 +2675,39 @@ pub struct SpawnSetup {
 include!("mobs/seen.rs");
 
 impl Mob {
+    /// Its saved stacks as the game that owns `prototypes` takes them in
+    /// (`ItemStack.CODEC`, `applyPatch`): its equipment, chest, carried inventory, an
+    /// allay's item and a trader's results. A trade's costs are `ItemCost` predicates,
+    /// not stacks: they keep what they require.
+    pub fn clean_stacks(&mut self, prototypes: &crate::item_data::ItemPrototypes) {
+        use crate::item_data::clean_stacks;
+        let extra = &mut self.extra;
+        clean_stacks(extra.equipment.iter_mut().flatten(), prototypes);
+        clean_stacks(extra.items.iter_mut().flatten(), prototypes);
+        clean_stacks(&mut extra.inventory, prototypes);
+        if let Some(villager) = extra.villager.as_mut() {
+            clean_stacks(&mut villager.inventory, prototypes);
+        }
+        if let Some(allay) = extra.allay.as_mut() {
+            clean_stacks(allay.inventory.as_mut(), prototypes);
+        }
+        if let Some(trade) = extra.trade.as_mut() {
+            clean_stacks(trade.offers.iter_mut().map(|o| &mut o.result), prototypes);
+        }
+    }
+
+    /// [`Self::clean_stacks`] on a mob decoded from its saved `tag`. A villager's
+    /// or piglin's carried stacks merge as they load (`SimpleContainer.fromItemList`),
+    /// so they are read again from `tag`, each taken in before it merges.
+    pub fn clean_saved_stacks(
+        &mut self,
+        tag: &horizon_core::nbt::Tag,
+        prototypes: &crate::item_data::ItemPrototypes,
+    ) {
+        villager::reload_container(self, tag, prototypes);
+        self.clean_stacks(prototypes);
+    }
+
     /// The name used by command replies: CustomName, style and all, comes before the type.
     pub fn command_name(&self) -> crate::text::Text {
         villager::command_name(self)
@@ -3017,37 +3068,45 @@ pub fn apply_brain_events(
     events: &mut Vec<MobEvent>,
     from: usize,
 ) {
+    apply_brain_events_slots(mobs, level, events, from);
+}
+pub fn apply_brain_events_slots<L: mob_slot::MobSlots + ?Sized>(
+    mobs: &mut L,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    from: usize,
+) {
     let mut i = from;
     while i < events.len() {
         match events[i] {
             MobEvent::BreedTarget { mob, partner } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.mob_by_id_mut(mob) {
                     animal_brain::set_breed_partner(m, partner);
                 }
                 events.remove(i);
             }
             MobEvent::LockGaze { mob, partner } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.mob_by_id_mut(mob) {
                     animal_brain::lock_gaze(m, partner);
                     villager_brain::lock_gaze_half(m, Who::Mob(partner));
                 }
                 events.remove(i);
             }
             MobEvent::Retreat { mob, from, at } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.mob_by_id_mut(mob) {
                     piglin::receive_retreat(m, from, at);
                 }
                 events.remove(i);
             }
             MobEvent::StartRiding { rider, vehicle } => {
-                i = riders::start_riding_event(mobs, events, i, rider, vehicle);
+                i = riders::start_riding_event_slots(mobs, events, i, rider, vehicle);
             }
             MobEvent::StartFollowing { fish, leader } => {
-                aquatic::start_following(mobs, fish, leader);
+                aquatic::start_following_slots(mobs, fish, leader);
                 events.remove(i);
             }
             MobEvent::SchoolSize { leader, by } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == leader) {
+                if let Some(m) = mobs.mob_by_id_mut(leader) {
                     m.extra.followers += by;
                 }
                 events.remove(i);
@@ -3057,7 +3116,7 @@ pub fn apply_brain_events(
             MobEvent::Breed {
                 parent, partner, ..
             } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == partner) {
+                if let Some(m) = mobs.mob_by_id_mut(partner) {
                     m.extra.age = 6000;
                     m.extra.in_love = 0;
                     animal_brain::forget_breed_target(m, parent);
@@ -3077,7 +3136,7 @@ pub fn apply_brain_events(
             } => {
                 let mut sound = None;
                 let mut raised = Vec::new();
-                let fish = mobs.iter().find(|m| m.id == mob);
+                let fish = mobs.iter_mobs().find(|m| m.id == mob);
                 if source.attacker_species.is_none() {
                     source.attacker_species = fish.map(Mob::species);
                 }
@@ -3110,7 +3169,7 @@ pub fn apply_brain_events(
                     .map(|(aim, pos, silent)| (Some(aim), Some(pos), silent))
                     .unwrap_or((None, None, true));
                 let mut hit_level = level.reborrow().attacked_by(&attack);
-                if let Some(t) = mobs.iter_mut().find(|m| m.id == target)
+                if let Some(t) = mobs.mob_by_id_mut(target)
                     && t.damage_aimed(&mut hit_level, amount, source, aim)
                 {
                     t.add_effect("minecraft:poison", poison_ticks, 0);
@@ -3846,6 +3905,17 @@ impl Mob {
             _ => 300,
         }
     }
+    /// `Entity.getSoundSource`: the mixer group this mob's sounds play in,
+    /// hostile for a killer bunny whatever its species' default.
+    pub fn sound_source(&self) -> mod_api::SoundSource {
+        if (self.species() == Species::Rabbit && self.extra.variant == rabbit::EVIL)
+            || ai::hostile_species(self.species())
+        {
+            mod_api::SoundSource::Hostile
+        } else {
+            mod_api::SoundSource::Neutral
+        }
+    }
     /// `Mob.getMainArm`: the left arm when the mob is left-handed, a player's
     /// `mainHand` option for a player mob.
     pub fn main_arm_left(&self) -> bool {
@@ -4121,7 +4191,7 @@ impl Mob {
             witch,
         );
         // Wolf.actuallyHurt: wolf armor takes the damage instead of the wolf.
-        let absorbed = self.wolf_armor_absorbs(&source);
+        let absorbed = wolf::armor_absorbs(self, &source);
         let mut knock = true;
         let window = cooldown;
         container.record_should_cause_side_effects(!window);
@@ -4142,7 +4212,7 @@ impl Mob {
         }
         let mut through = 0.0;
         if absorbed {
-            self.hurt_wolf_armor(dealt);
+            wolf::hurt_armor(self, dealt);
         } else {
             through = self.soak_hit(dealt, &source, &container);
             container.record_reduction(Reduction::Absorption, dealt - through);
@@ -4164,20 +4234,28 @@ impl Mob {
             self.record_damage(source, dealt);
         }
         container.record_health_damage(through);
-        // LivingEntity.hurtArmor: `Horse` is the only mob that overrides it, and
-        // it hands `doHurtEquipment` the body slot alone. A wolf's armour has
-        // its own rule (`Wolf.actuallyHurt`, `hurt_wolf_armor`) and a player's
-        // four pieces theirs, so the other "body slot" species — donkey, mule,
+        // LivingEntity.hurtArmor: `Horse` and `Wolf` override it, and both hand
+        // `doHurtEquipment` the body slot alone — the wolf's only on a hit its
+        // armour did not take (`Wolf.actuallyHurt`). A player's four pieces
+        // have their own, so the other "body slot" species — donkey, mule,
         // llama, camel, the skeleton and zombie horses — wear nothing.
+        // The wolf's own armour wears here, inside the hit, before the next one
+        // reads the slot (`Wolf.canArmorAbsorb`); a body item of another kind
+        // wears on the host, which knows its maximum and Unbreaking.
         if let Some(damage) = armor_hit
-            && self.species() == Species::Horse
             && self.extra.body_id().is_some()
         {
-            self.outbox.push(MobEvent::ArmorHurt {
-                mob: self.id,
-                amount: damage,
-                source: crate::health::mob_source(&source, level.attack()),
-            });
+            if wolf::wears_body(self, absorbed) {
+                wolf::wear_body(self, damage);
+            } else if self.species() == Species::Horse
+                || (self.species() == Species::Wolf && !absorbed)
+            {
+                self.outbox.push(MobEvent::ArmorHurt {
+                    mob: self.id,
+                    amount: damage,
+                    source: crate::health::mob_source(&source, level.attack()),
+                });
+            }
         }
         // Animal.actuallyHurt: damage taken ends love mode (`resetLove`).
         if drops::is_animal(self.species()) {
@@ -4319,58 +4397,6 @@ impl Mob {
             self.last_direct = Some(direct);
         }
         hurt
-    }
-    /// `Wolf.canArmorAbsorb`: it wears wolf armor and the damage type is not
-    /// in `#bypasses_wolf_armor` (drowning, magic, thorns, in a wall, out of
-    /// the world and the untyped kills).
-    fn wolf_armor_absorbs(&self, source: &Damage) -> bool {
-        self.species() == Species::Wolf
-            && self.extra.body_id() == Some("minecraft:wolf_armor")
-            && !matches!(
-                source.kind,
-                DamageKind::Drown
-                    | DamageKind::Magic
-                    | DamageKind::IndirectMagic
-                    | DamageKind::InWall
-                    | DamageKind::Thorns
-                    | DamageKind::OutOfWorld
-                    | DamageKind::Cramming
-                    | DamageKind::Generic
-                    | DamageKind::GenericKill
-                    | DamageKind::OutsideBorder
-                    | DamageKind::Starve
-                    | DamageKind::Wither
-            )
-    }
-    /// `Wolf.actuallyHurt`: the armor loses `ceil(damage)` durability, cracks
-    /// at `Crackiness.WOLF_ARMOR` steps and breaks at its maximum.
-    fn hurt_wolf_armor(&mut self, damage: f32) {
-        let crack = |lost: i32| {
-            let left = (WOLF_ARMOR_DURABILITY - lost) as f32 / WOLF_ARMOR_DURABILITY as f32;
-            [0.95_f32, 0.69, 0.32].iter().filter(|t| left < **t).count()
-        };
-        let before = self.extra.body_damage();
-        let after = before + damage.ceil() as i32;
-        let at = [self.position.x, self.position.y, self.position.z];
-        if after >= WOLF_ARMOR_DURABILITY {
-            self.extra.set_body_stack(None);
-            self.outbox
-                .push(MobEvent::Sound("item.wolf_armor.break", at, 1.0, 1.0));
-        } else {
-            self.extra.set_body_damage(after);
-            if crack(before) != crack(after) {
-                self.outbox
-                    .push(MobEvent::Sound("item.wolf_armor.crack", at, 1.0, 1.0));
-                // Twenty scutes fly off, a block above the wolf's feet.
-                self.outbox.push(MobEvent::ItemParticles {
-                    item: "minecraft:armadillo_scute",
-                    at: [at[0], at[1] + 1.0, at[2]],
-                    spread: [0.2, 0.1, 0.2],
-                    speed: 0.1,
-                    count: 20,
-                });
-            }
-        }
     }
     /// One game tick. Returns false once the mob should be removed.
     pub fn tick(

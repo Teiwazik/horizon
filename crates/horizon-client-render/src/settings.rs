@@ -3,6 +3,7 @@
 //! The option screens live in `options_ui`.
 use crate::keybinds::KeyBinds;
 use crate::options_file::{OptionsFile, V};
+use horizon_optifine::better_grass::Mode as BetterGrassMode;
 use horizon_protocol::packets::configuration::ClientInformation;
 use std::{fs, path::Path};
 
@@ -18,11 +19,17 @@ pub fn set_source_volumes(volumes: [f32; 11]) {
 pub fn sound_source(event: &str) -> usize {
     let e = event.trim_start_matches("minecraft:");
     let index = |name: &str| SOUND_SOURCES.iter().position(|n| *n == name).unwrap_or(0);
-    const HOSTILE: [&str; 36] = [
+    const HOSTILE: [&str; 42] = [
         "zombie",
         // ShulkerBullet.getSoundSource: HOSTILE (ShulkerBullet.java:63).
         "shulker_bullet",
         "skeleton",
+        // Shulker and Hoglin override getSoundSource; Zoglin and Creaking
+        // extend Monster. All four are HOSTILE in pinned vanilla 26.3.
+        "shulker",
+        "hoglin",
+        "zoglin",
+        "creaking",
         "creeper",
         "spider",
         "cave_spider",
@@ -47,6 +54,9 @@ pub fn sound_source(event: &str) -> usize {
         "elder_guardian",
         "silverfish",
         "zombified_piglin",
+        // AbstractPiglin extends Monster.
+        "piglin",
+        "piglin_brute",
         "wither_skeleton",
         "bogged",
         "breeze",
@@ -160,6 +170,7 @@ pub struct Settings {
     pub particles: u8,
     pub entity_distance: f32,
     pub entity_shadows: bool,
+    pub better_grass: BetterGrassMode,
     pub biome_blend: i32,
     /// "fast", "fancy", "fabulous" or "custom".
     pub graphics_preset: String,
@@ -271,6 +282,7 @@ impl Default for Settings {
             particles: 0,
             entity_distance: 1.0,
             entity_shadows: true,
+            better_grass: BetterGrassMode::Auto,
             biome_blend: 2,
             graphics_preset: "fancy".into(),
             mipmap_levels: 4,
@@ -361,6 +373,11 @@ fn put_s(f: &mut OptionsFile, key: &str, v: &str) {
     }
 }
 impl Settings {
+    /// The saved preference; the active pack determines whether `Auto` enables Better Grass.
+    pub fn better_grass_mode(&self) -> BetterGrassMode {
+        self.better_grass
+    }
+
     /// The index in `video_modes` of the preferred fullscreen mode, -1 (the desktop's own mode)
     /// when none is set or the monitor lacks it: `Monitor.indexOfMode`.
     pub fn video_mode_index(&self) -> i32 {
@@ -527,6 +544,12 @@ impl Settings {
             particles: f.int("particles") as u8,
             entity_distance: f.double("entityDistanceScaling") as f32,
             entity_shadows: f.bool("entityShadows"),
+            better_grass: match f.name("horizonBetterGrass").as_str() {
+                "off" => BetterGrassMode::Off,
+                "fast" => BetterGrassMode::Fast,
+                "fancy" => BetterGrassMode::Fancy,
+                _ => BetterGrassMode::Auto,
+            },
             biome_blend: f.int("biomeBlendRadius"),
             graphics_preset: f.name("graphicsPreset"),
             mipmap_levels: f.int("mipmapLevels"),
@@ -643,6 +666,16 @@ impl Settings {
         put_i(&mut f, "particles", i32::from(self.particles));
         put_f(&mut f, "entityDistanceScaling", self.entity_distance);
         put_b(&mut f, "entityShadows", self.entity_shadows);
+        put_name(
+            &mut f,
+            "horizonBetterGrass",
+            match self.better_grass {
+                BetterGrassMode::Auto => "auto",
+                BetterGrassMode::Off => "off",
+                BetterGrassMode::Fast => "fast",
+                BetterGrassMode::Fancy => "fancy",
+            },
+        );
         put_i(&mut f, "biomeBlendRadius", self.biome_blend);
         put_name(&mut f, "graphicsPreset", &self.graphics_preset);
         put_name(
@@ -861,6 +894,7 @@ pub enum Opt {
     Particles,
     EntityDistance,
     EntityShadows,
+    BetterGrass,
     BiomeBlend,
     Preset,
     Mipmaps,
@@ -991,6 +1025,23 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn better_grass_keeps_explicit_off_distinct_from_pack_default() {
+        let mut s = Settings::parse("");
+        assert_eq!(s.better_grass_mode(), BetterGrassMode::Auto);
+        for mode in [
+            BetterGrassMode::Off,
+            BetterGrassMode::Fast,
+            BetterGrassMode::Fancy,
+            BetterGrassMode::Auto,
+        ] {
+            s.better_grass = mode;
+            s = Settings::parse(&s.serialize());
+            assert_eq!(s.better_grass_mode(), mode);
+        }
+    }
+
     #[test]
     fn the_narrator_reads_its_status_and_the_voice_under_master() {
         let s = Settings::parse("narrator:2\nsoundCategory_master:0.5\nsoundCategory_voice:0.5\n");
@@ -1058,6 +1109,12 @@ mod tests {
             ("block.note_block.trumpet_exposed", 2),
             ("entity.shulker_bullet.hit", 5),
             ("entity.shulker_bullet.hurt", 5),
+            ("entity.shulker.ambient", 5),
+            ("entity.hoglin.ambient", 5),
+            ("entity.zoglin.ambient", 5),
+            ("entity.creaking.ambient", 5),
+            ("entity.piglin.ambient", 5),
+            ("entity.piglin_brute.ambient", 5),
             ("entity.cow.hurt", 6),
             ("entity.ender_dragon.flap", 5),
             ("entity.ender_dragon.growl", 5),

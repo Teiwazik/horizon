@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::Mat4;
 use horizon_shader_api::check::CheckedStage;
-use horizon_shader_api::{Report, StageKind};
+use horizon_shader_api::{Jitter, Report, StageKind};
 
 /// Failure to build a `NativePack`: either cancelled because a newer build superseded it, or
 /// refused with the reason to show the player.
@@ -70,6 +70,8 @@ pub struct NativePack {
     pub traces: bool,
     /// Its terrain pipelines bind the arenas' quad looks (`looks::wanted`): sections carry them.
     pub looks: bool,
+    /// `[frame] jitter`: it asks for the world's sub-pixel offset under its own post chain.
+    pub jitter: bool,
     /// With kept resources, what lets a rebuild keep them (`carry`).
     kept: Option<super::native_post::kept::Signature>,
 }
@@ -655,6 +657,11 @@ impl NativePack {
         let pack = Self {
             traces: report.manifest.ray_tracing.is_some(),
             looks: terrain.looks.is_some(),
+            jitter: match &report.manifest.jitter {
+                Jitter::Off => false,
+                Jitter::On => true,
+                Jitter::While(id) => option_on(constants, Some(id)),
+            },
             kept,
             frame,
             sky,
@@ -713,7 +720,8 @@ impl NativePack {
     }
 
     /// Binds the water mirror the renderer drew this frame, and outside the title screen
-    /// fits the opaque copies and the material stage's surface target to its targets.
+    /// fits the opaque copies, and the surface target (the material's or the entity stage's), to
+    /// its targets.
     pub fn prepare_world_targets(&mut self, world: WorldTargets<'_>) {
         let WorldTargets {
             device,
@@ -731,7 +739,8 @@ impl NativePack {
         if self.frame.fit_opaque(device, depth, color) {
             self.post.refresh_opaque(&self.frame);
         }
-        let writes = self.material.as_ref().is_some_and(|m| m.writes_surface);
+        let writes = self.material.as_ref().is_some_and(|m| m.writes_surface)
+            || self.entity.as_ref().is_some_and(|e| e.writes_surface);
         let size = if writes {
             [depth.width(), depth.height()]
         } else {
@@ -819,6 +828,8 @@ impl NativePack {
             looks: self.looks,
             engine_resolve,
             engine_upscale: engine_resolve && self.post.upscalable(),
+            // Where the renderer resolves the world, its TAA jitters it already.
+            jitter: self.jitter && !engine_resolve,
         }
     }
 
@@ -1117,15 +1128,32 @@ file = \"material.wgsl\"
             linear: true,
             ..terrain_shape(&globals, &empty)
         };
-        let built = NativePack::new(&device, &queue, &linear, pack(""), &[], Default::default());
-        let linear = built.expect("the pack builds").0.capabilities();
-        assert_eq!(
-            linear,
-            Capabilities {
-                replaces_sky: true,
-                ..Capabilities::default()
-            }
-        );
+        let linear_does = |stages: &str| {
+            let built = NativePack::new(
+                &device,
+                &queue,
+                &linear,
+                pack(stages),
+                &[],
+                Default::default(),
+            );
+            built.expect("the pack builds").0.capabilities()
+        };
+        let sky = Capabilities {
+            replaces_sky: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(linear_does(""), sky);
+        // `[frame] jitter`: a pack that resolves its own world gets TAA's offset alone; where
+        // the renderer resolves it, its TAA jitters already.
+        let jitter = "[frame]\njitter = true\n";
+        let jittered = Capabilities {
+            jitter: true,
+            ..sky
+        };
+        assert_eq!(linear_does(jitter), jittered);
+        assert_eq!(linear_does("[frame]\njitter = false\n"), sky);
+        assert_eq!(does(jitter), plain);
         let hides = Capabilities {
             hides_clouds: true,
             hides_sun: true,

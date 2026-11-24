@@ -518,6 +518,23 @@ fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
 }
 
+/// On Vulkan, naga's SPIR-V writer leaves a loop it proves finite without the bound wgpu forces
+/// on every loop (`naga::back::bounded_loop`, THIRD_PARTY_NOTICES.md), so the driver's compiler
+/// sees its trip count; its HLSL and MSL writers still bound them all.
+/// `HORIZON_SHADER_LOOP_PROOFS=0` bounds every loop of every shader again, for A/B checks: read
+/// once, before the renderer makes its first pipeline.
+fn shader_loop_proofs() {
+    static READ: std::sync::Once = std::sync::Once::new();
+    READ.call_once(|| {
+        if std::env::var("HORIZON_SHADER_LOOP_PROOFS").as_deref() == Ok("0") {
+            naga::back::bounded_loop::set_enabled(false);
+            log::info!(
+                "Horizon renderer: HORIZON_SHADER_LOOP_PROOFS=0: every shader loop keeps wgpu's bound"
+            );
+        }
+    });
+}
+
 pub(crate) mod animate;
 mod arena;
 pub mod capture;
@@ -612,7 +629,8 @@ mod rt;
 mod screenshot;
 pub use screenshot::{PendingScreenshot, ScreenshotSave};
 mod screenshot_readback;
-mod stars;
+#[doc(hidden)]
+pub mod stars;
 mod surface_setup;
 use surface_setup::{AdapterChoice, AdapterFailure, open_adapter, pick_adapter, set_up_surface};
 mod off_page;
@@ -2078,6 +2096,8 @@ pub struct Renderer {
     hdr_driver: Option<String>,
     /// Whether the Look setting is Horizon's, kept for the HDR output made when HDR turns on.
     hdr_lighting_setting: bool,
+    /// Player's hardware ray tracing setting (`Graphics::ray_tracing`).
+    ray_tracing_mode: crate::graphics::RayTracingMode,
     /// The shader pack's post-processing, and the dimension (legacy id) it was loaded for.
     pack_post: Option<(i32, Option<pack_post::PackPost>)>,
     /// A `shaders/` pack whose pipelines build on a thread of their own (`load_shader_pack`).
@@ -2105,8 +2125,7 @@ pub struct Renderer {
     /// Rain and snow handed to a shader pack's `gbuffers_weather`, once a pack draws them.
     pack_weather: Option<pack_weather::PackWeather>,
     /// The block sprites as one atlas, while a shader pack is loaded.
-    pack_atlas: Option<pack_atlas::PackAtlas>,
-    pack_material_atlases: Option<[pack_atlas::PackAtlas; 2]>,
+    pack_atlases: pack_atlas::Atlases,
     /// The shared atlas's LabPBR normal and specular paged maps (`set_shared_material_maps`),
     /// which shader packs read for entities, items and the hand.
     shared_material_maps: [Option<wgpu::Texture>; 2],
@@ -2752,6 +2771,7 @@ impl Renderer {
         request: output::FrameRequest,
         display: output::DisplayReading,
     ) -> Result<Self> {
+        shader_loop_proofs();
         let Opened {
             instance,
             surface,
@@ -2791,7 +2811,13 @@ impl Renderer {
             }
             None => {
                 let _step = crate::spans::startup::step("renderer.open_device");
-                open_device(&window, offscreen, api, request.needs(layers)).await?
+                open_device(
+                    &window,
+                    offscreen,
+                    api,
+                    request.needs(layers, settings.ray_tracing),
+                )
+                .await?
             }
         };
         // A device that is already lost, one `previous` handed over included, makes every
@@ -4984,7 +5010,7 @@ impl Renderer {
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
             window,
-            ray_scene: rt::scene::RayScene::forced(&device),
+            ray_scene: rt::scene::RayScene::forced(&device, settings.ray_tracing),
             looks_layout: None,
             device,
             reuse,
@@ -5217,6 +5243,7 @@ impl Renderer {
             entity_atlas: atlas_view.clone(),
             hdr: None,
             hdr_lighting_setting: true,
+            ray_tracing_mode: settings.ray_tracing,
             emission_stats,
             output_caps,
             output_rejected: None,
@@ -5239,8 +5266,7 @@ impl Renderer {
             pack_entity_rest: Vec::new(),
             cloud_bindings,
             pack_weather: None,
-            pack_atlas: None,
-            pack_material_atlases: None,
+            pack_atlases: Default::default(),
             shared_material_maps: [None, None],
             pack_terrain_flat: false,
             separate_ao: false,
@@ -5358,17 +5384,22 @@ impl Renderer {
         self.core_lines =
             program.and_then(|program| core_lines::CoreLines::new(&self.device, format, program));
     }
-    /// The resource packs' `core/sky` and `core/stars` (`HudAtlas::sky_shader`,
-    /// `stars_shader`), or the built-in sky and stars.
+    /// The resource packs' sky disc, stars, and sunrise/sunset programs, or the built-in sky.
     pub fn set_sky_shaders(
         &mut self,
         disc: Option<&crate::core_shader::CoreProgram>,
         stars: Option<&crate::core_shader::CoreProgram>,
+        sunrise: Option<&crate::core_shader::CoreProgram>,
     ) {
         // As `set_lines_shader`: not on a frame of linear light.
         let keep = !self.output.frame.linear_light;
-        let (disc, stars) = (disc.filter(|_| keep), stars.filter(|_| keep));
-        self.core_sky = core_sky::CoreSky::new(&self.device, self.output.frame.format, disc, stars);
+        self.core_sky = core_sky::CoreSky::new(
+            &self.device,
+            self.output.frame.format,
+            disc.filter(|_| keep),
+            stars.filter(|_| keep),
+            sunrise.filter(|_| keep),
+        );
     }
     /// A resource pack's `core/lightmap` (`HudAtlas::lightmap_shader`), which draws the
     /// lightmap texture in place of the CPU-built vanilla formula.
@@ -7017,6 +7048,29 @@ impl Renderer {
             hdr.look = on;
         }
     }
+    /// Applies the player's `rayTracing` setting (`Graphics::ray_tracing`), dropping or building
+    /// `RayScene` immediately when the device supports hardware ray queries.
+    pub fn set_ray_tracing(&mut self, mode: crate::graphics::RayTracingMode) {
+        if self.ray_tracing_mode == mode {
+            return;
+        }
+        self.ray_tracing_mode = mode;
+        let traces = self.executor.is_some_and(|c| c.ray_scene);
+        let had = self.ray_scene.is_some();
+        rt::scene::follow(
+            &mut self.ray_scene,
+            &self.device,
+            rt::query::wanted(rt::query::switch_with(mode), traces),
+        );
+        // The pack's trace groups hold the dropped scene's buffers: they go with it, so a later
+        // scene, whose generations start over, never draws with them.
+        if had
+            && self.ray_scene.is_none()
+            && let Some(native) = &mut self.external
+        {
+            native.bind_scene(&self.device, None, glam::DVec3::ZERO);
+        }
+    }
     /// Measures which pixels of each block sprite may shine (`hdr_stats`), at the current
     /// masks. Only with HDR output on: nothing else reads them.
     pub fn measure_emission(&mut self) {
@@ -7107,8 +7161,7 @@ impl Renderer {
         block_ids: &[i32],
     ) -> std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused> {
         if pack.is_none() {
-            self.pack_atlas = None;
-            self.pack_material_atlases = None;
+            self.pack_atlases.release();
         }
         let instance = wgpu::vertex_attr_array![5=>Float32x4];
         let vertex = wgpu::VertexBufferLayout {
@@ -7124,15 +7177,21 @@ impl Renderer {
         let buffers = [Some(vertex), Some(instances)];
         let flat = self.pack_terrain_flat;
         let sprite_rects = self
-            .pack_atlas
+            .pack_atlases
+            .colour
             .as_ref()
             .map_or_else(Vec::new, |a| a.rects_table());
         let post = pack.map(|post| {
             let world = pack_post::World {
-                atlas: self.pack_atlas.as_ref().map(|a| (a.view.clone(), a.size())),
+                atlas: self
+                    .pack_atlases
+                    .colour
+                    .as_ref()
+                    .map(|a| (a.view.clone(), a.size())),
                 sprite_rects: &sprite_rects,
                 material_maps: self
-                    .pack_material_atlases
+                    .pack_atlases
+                    .materials
                     .as_ref()
                     .map(|a| [a[0].view.clone(), a[1].view.clone()]),
                 lightmap: self.lightmap_view.clone(),
@@ -7141,16 +7200,20 @@ impl Renderer {
                     .atlas_texture
                     .as_ref()
                     .map_or([1, 1], |t| [t.width(), t.height()]),
-                terrain: self.pack_atlas.as_ref().map(|_| pack_post::Geometry {
-                    // Flat terrain programs pull their vertices (`pack_atlas::PULL_FLAT`).
-                    buffers: if flat { &[] } else { &buffers },
-                    table: self.flat.as_ref().filter(|_| flat).map(|f| &f.draw_layout),
-                    depth_write: true,
-                    atlas: None,
-                    material_maps: true,
-                    ids: None,
-                    cull: true,
-                }),
+                terrain: self
+                    .pack_atlases
+                    .colour
+                    .as_ref()
+                    .map(|_| pack_post::Geometry {
+                        // Flat terrain programs pull their vertices (`pack_atlas::PULL_FLAT`).
+                        buffers: if flat { &[] } else { &buffers },
+                        table: self.flat.as_ref().filter(|_| flat).map(|f| &f.draw_layout),
+                        depth_write: true,
+                        atlas: None,
+                        material_maps: true,
+                        ids: None,
+                        cull: true,
+                    }),
                 block_ids,
                 celestial: self
                     .hud
@@ -7185,8 +7248,7 @@ impl Renderer {
             Ok(post) => post,
             Err(e) => {
                 self.pack_post = Some((dimension, None));
-                self.pack_atlas = None;
-                self.pack_material_atlases = None;
+                self.pack_atlases.release();
                 return Err(e);
             }
         };
@@ -7227,6 +7289,13 @@ impl Renderer {
         if let Some((_, Some(post))) = &mut self.pack_post {
             post.reset_history(&self.device);
         }
+        // `[frame] jitter` advances TAA's Halton phase: a restarted pack starts it again.
+        self.world_post.reset_temporal_sequence();
+    }
+    /// Whether the running Horizon pack moves the world by TAA's offset under its own post
+    /// chain (`[frame] jitter`), the player's TAA on or off.
+    pub fn pack_jitters(&self) -> bool {
+        self.executor.is_some_and(|c| c.jitter)
     }
     /// The running shader pack's kind: `iris` (a `shaders/` pack) or `native` (one of
     /// Horizon's own).
@@ -7352,13 +7421,19 @@ impl Renderer {
         let queue = self.queue.clone();
         let adapter = self.adapter.clone();
         let format = self.output.frame.format;
-        let atlas = self.pack_atlas.as_ref().map(|a| (a.view.clone(), a.size()));
+        let atlas = self
+            .pack_atlases
+            .colour
+            .as_ref()
+            .map(|a| (a.view.clone(), a.size()));
         let sprite_rects = self
-            .pack_atlas
+            .pack_atlases
+            .colour
             .as_ref()
             .map_or_else(Vec::new, |a| a.rects_table());
         let material_maps = self
-            .pack_material_atlases
+            .pack_atlases
+            .materials
             .as_ref()
             .map(|a| [a[0].view.clone(), a[1].view.clone()]);
         let lightmap = self.lightmap_view.clone();
@@ -7376,7 +7451,7 @@ impl Renderer {
         let table = (self.flat.as_ref())
             .filter(|_| flat)
             .map(|f| f.draw_layout.clone());
-        let terrain = self.pack_atlas.is_some();
+        let terrain = self.pack_atlases.colour.is_some();
         let clouds = self.cloud_bindings.clone();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancelled = cancel.clone();
@@ -7418,9 +7493,20 @@ impl Renderer {
             pack_post::PackPost::new(&device, &queue, &adapter, pack, format, world, &cancelled)
         };
         // A pack is not the game's code: a panic building it turns the pack off (#3525).
+        // Video memory running out under it is neither's fault, whatever else failed after it:
+        // nothing it built is kept (error scopes are each thread's own).
+        let scoped = self.device.clone();
+        let build = move || {
+            let memory = scoped.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let built = crate::crash::contain(build);
+            match pollster::block_on(memory.pop()) {
+                Some(_) => Ok(Err(pack_post::Refused::no_room())),
+                None => built,
+            }
+        };
         let thread = std::thread::Builder::new()
             .name("Shader pack".into())
-            .spawn(move || crate::crash::contain(build));
+            .spawn(build);
         match thread {
             Ok(thread) => {
                 // The last pack doesn't draw this dimension meanwhile.
@@ -7501,20 +7587,25 @@ impl Renderer {
     }
     /// Drops the running shader pack, of either kind.
     pub fn drop_shader_packs(&mut self) {
+        self.unload_shader_pack();
+        self.pack_atlases.release();
+    }
+    /// Drops the running shader pack for its `shaders/` pack to be loaded again (its options or
+    /// the tags its ids read changed). The block atlases stay: they are made from the game's
+    /// sprites, not from the pack, and `pack_inputs` makes them again only where those changed.
+    pub fn unload_shader_pack(&mut self) {
         self.world_held = false;
         self.pack_loading = None;
         self.native_pack_loader.cancel();
         self.pack_post = None;
         self.replace_executor(None);
-        self.pack_atlas = None;
-        self.pack_material_atlases = None;
         self.separate_ao = false;
     }
     /// Sets whether shader pack terrain inputs pass vertex alpha to `hz_Color.a` (`separateAo=true`).
     pub fn set_separate_ao(&mut self, separate_ao: bool) {
         if self.separate_ao != separate_ao {
             self.separate_ao = separate_ao;
-            if let Some(atlas) = &mut self.pack_atlas {
+            if let Some(atlas) = &mut self.pack_atlases.colour {
                 atlas.separate_ao = separate_ao;
             }
         }
@@ -7695,8 +7786,7 @@ impl Renderer {
                 }
                 self.pack_metadata = Some(built.metadata);
                 self.pack_post = None;
-                self.pack_atlas = None;
-                self.pack_material_atlases = None;
+                self.pack_atlases.release();
                 NativePackOutcome::Installed {
                     context,
                     labels: built.labels,
@@ -7762,14 +7852,16 @@ impl Renderer {
         }
         self.pack_metadata = Some(metadata);
         self.pack_post = None;
-        self.pack_atlas = None;
-        self.pack_material_atlases = None;
+        self.pack_atlases.release();
         Ok(labels)
     }
     /// What a shader pack's gbuffers programs read from Horizon's geometry: the sky's, and
     /// terrain's in the pack's block atlas (made here when missing; none when it does not fit).
-    pub fn pack_inputs(&mut self) -> horizon_shaders::GameInputs {
-        let terrain = self.pack_terrain_inputs();
+    /// Refused where video memory has no room for the atlas: none is kept then.
+    pub fn pack_inputs(
+        &mut self,
+    ) -> std::result::Result<horizon_shaders::GameInputs, pack_post::Refused> {
+        let terrain = self.pack_terrain_inputs()?;
         // A geometry stage reads flat draws' vertices itself, through their index buffer.
         let terrain_geometry = terrain
             .clone()
@@ -7785,7 +7877,7 @@ impl Renderer {
                     index: "hz_indices[@]".to_owned(),
                 }
             });
-        horizon_shaders::GameInputs {
+        Ok(horizon_shaders::GameInputs {
             terrain_geometry,
             entity_geometry: Some(pack_entities::geometry_inputs()),
             sky: Some(pack_sky::inputs()),
@@ -7796,80 +7888,41 @@ impl Renderer {
             lines: Some(pack_lines::inputs()),
             hand: Some(pack_hand::inputs()),
             ..pack_atlas::game_terrain(terrain, &self.pack_lava_layers, true)
-        }
+        })
     }
 
-    fn pack_terrain_inputs(&mut self) -> Option<horizon_shaders::GbuffersInputs> {
+    fn pack_terrain_inputs(
+        &mut self,
+    ) -> std::result::Result<Option<horizon_shaders::GbuffersInputs>, pack_post::Refused> {
         // Flat draws whenever the device has them (`render` keeps them on with a pack).
         let flat = self.flat.is_some() && self.flat_on;
-        // Flat draws read each sprite's place from a table: the atlas is stitched as the game's.
-        // Other draws need the grid.
-        if !flat && self.pack_atlas.as_ref().is_some_and(|a| a.is_stitched()) {
-            self.pack_atlas = None;
-        }
-        if self.pack_atlas.is_none() {
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-            let layers = self
-                .sprite_textures
-                .iter()
-                .map(|t| t.depth_or_array_layers())
-                .sum();
-            let sprite = self.sprite_textures[0].width();
-            // Vanilla's padding counts the anisotropy bit only with anisotropic filtering.
-            let anisotropy_bit = if self.texture_filtering == 2 {
-                u32::from(self.max_anisotropy).trailing_zeros()
-            } else {
-                0
-            };
-            let stitched = flat
-                .then(|| {
-                    pack_atlas::PackAtlas::stitched(
-                        &self.device,
-                        &mut encoder,
-                        &self.sprite_textures,
-                        self.sprite_split,
-                        sprite,
-                        &self.sprite_native,
-                        self.mipmap_option,
-                        anisotropy_bit,
-                    )
-                })
-                .flatten();
-            if flat && stitched.is_none() {
-                log::warn!(
-                    "shader pack block atlas: the sprites don't stitch on this device, a grid instead"
-                );
-            }
-            let mut atlas = stitched.or_else(|| {
-                pack_atlas::PackAtlas::new(
-                    &self.device,
-                    &mut encoder,
-                    &self.sprite_textures,
-                    self.sprite_split,
-                    layers,
-                    sprite,
-                )
-            });
-            if let Some(atlas) = &mut atlas {
-                atlas.separate_ao = self.separate_ao;
-            }
-            self.pack_material_atlases = atlas.as_ref().and_then(|colour| {
-                let maps = self.pbr_maps.as_ref()?;
-                let make = |kind: usize, encoder: &mut wgpu::CommandEncoder| {
-                    let arrays: Vec<_> = maps.iter().map(|pair| pair[kind].clone()).collect();
-                    colour.material_for(&self.device, encoder, &arrays, layers)
-                };
-                Some([make(0, &mut encoder)?, make(1, &mut encoder)?])
-            });
-            self.pack_atlas = atlas;
-            self.queue.submit([encoder.finish()]);
+        // Vanilla's padding counts the anisotropy bit only with anisotropic filtering.
+        let anisotropy_bit = if self.texture_filtering == 2 {
+            u32::from(self.max_anisotropy).trailing_zeros()
+        } else {
+            0
+        };
+        let sprites = pack_atlas::Sprites {
+            arrays: &self.sprite_textures,
+            split: self.sprite_split,
+            native: &self.sprite_native,
+            maps: self.pbr_maps.as_deref(),
+            flat,
+            mip_option: self.mipmap_option,
+            anisotropy_bit,
+        };
+        // The queue first waits for the frame on the submit thread, so the device can be
+        // waited for.
+        let queue: &wgpu::Queue = &self.queue;
+        if !self.pack_atlases.ready(&self.device, queue, &sprites) {
+            return Err(pack_post::Refused::no_room());
         }
         self.pack_terrain_flat = flat;
-        Some(
-            self.pack_atlas
-                .as_ref()?
-                .terrain_inputs(self.pack_terrain_flat),
-        )
+        let separate_ao = self.separate_ao;
+        Ok(self.pack_atlases.colour.as_mut().map(|atlas| {
+            atlas.separate_ao = separate_ao;
+            atlas.terrain_inputs(flat)
+        }))
     }
     /// The macros this renderer gives shader packs: the GL extensions this device has
     /// (subgroups, when it has them), and the vendor, renderer and mipmap levels
@@ -8245,7 +8298,7 @@ impl Renderer {
                     );
                 },
             );
-            if let Some(atlases) = &self.pack_material_atlases {
+            if let Some(atlases) = &self.pack_atlases.materials {
                 for (kind, layers) in changed.into_iter().enumerate() {
                     if layers.is_empty() {
                         continue;
@@ -8255,7 +8308,7 @@ impl Renderer {
                 }
             }
         }
-        if let Some(atlas) = &self.pack_atlas {
+        if let Some(atlas) = &self.pack_atlases.colour {
             atlas.copy(
                 &self.device,
                 encoder,
@@ -8573,23 +8626,63 @@ impl Renderer {
         laps.lap("r_prepare");
         // Frame generation: its present thread acquires and presents, this frame draws
         // into frames of its own. Not over menus that blur the frame, a shader pack's own post
-        // passes, HDR output without the HUD's layer (or the float frame HDR was started
-        // with) or the title screen.
+        // passes (an Iris-style pack's; a native pack draws inside the frame's passes, so the
+        // offscreen frames carry it and it is allowed unless HORIZON_FRAMEGEN_NATIVE_PACK=0),
+        // HDR output without the HUD's layer (or the float frame HDR was started with) or
+        // the title screen.
         let fg = !frame.gui_only
             && self.frame_export.is_none()
             && self.frame_gen.on
             && !(self.frame_gen.paused || self.frame_gen.refused || self.frame_gen.no_room)
+            // Without HDR, the frame is the surface's format, except a native pack's float
+            // frame, which draws through a readback stand-in.
             && (self.hdr.as_ref()).map_or(
-                self.output.frame.format == self.config.format.remove_srgb_suffix(),
+                self.executor.is_some()
+                    || self.output.frame.format == self.config.format.remove_srgb_suffix(),
                 hdr::Hdr::layered,
             )
             && !frame.title
             && frame.menu_blur.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.executor.is_none()
+            && (self.executor.is_none() || frame_gen::native_pack_allowed())
             && (self.surface.is_none()
                 || self.config.usage.contains(wgpu::TextureUsages::COPY_DST));
-        if !fg {
+        // Why frame generation stayed off while the player asked for it, once per
+        // condition change: a wrong-looking refusal is otherwise invisible.
+        if !fg && self.frame_gen.on && self.frame_export.is_none() && !frame.title {
+            let reason =
+                if self.frame_gen.paused || self.frame_gen.refused || self.frame_gen.no_room {
+                    None // Its own state; it said so when it changed.
+                } else if self.hdr.as_ref().is_some_and(|h| !h.layered()) {
+                    Some("HDR output without the HUD's layer")
+                } else if self.hdr.is_none()
+                    && self.executor.is_none()
+                    && self.output.frame.format != self.config.format.remove_srgb_suffix()
+                {
+                    Some("the float frame HDR was started with")
+                } else if frame.menu_blur.is_some() {
+                    None // Transient: the pause menu's blur.
+                } else if self.pack_post.as_ref().is_some_and(|p| p.1.is_some()) {
+                    Some("a shaders/ pack's own post passes")
+                } else if self.executor.is_some() && !frame_gen::native_pack_allowed() {
+                    Some("HORIZON_FRAMEGEN_NATIVE_PACK=0")
+                } else if !(self.surface.is_none()
+                    || self.config.usage.contains(wgpu::TextureUsages::COPY_DST))
+                {
+                    Some("the surface cannot be copied to")
+                } else {
+                    None
+                };
+            if let Some(reason) = reason
+                && self.frame_gen.logged_refusal.as_deref() != Some(reason)
+            {
+                log::info!("Horizon renderer: frame generation off while enabled ({reason})");
+                self.frame_gen.logged_refusal = Some(reason.to_owned());
+            }
+        }
+        if fg {
+            self.frame_gen.logged_refusal = None;
+        } else {
             self.frame_gen.stop();
         }
         // Waits for the submit thread since the last frame's present (this frame's uploads).
@@ -8599,6 +8692,9 @@ impl Renderer {
         // for them (#13624) frame generation is off until the surface is configured again.
         let fg_frames = if fg {
             let config = self.surface_config();
+            // The world target takes the frame's format: a pack's output pass draws
+            // its composed picture onto it directly, and the engine's resolve does
+            // the same without a pack.
             let format = self.output.frame.format;
             let (device, frame_gen) = (&self.device, &mut self.frame_gen);
             let made = frame_targets::made(device, frame_targets::Kind::FrameGeneration, || {
@@ -8611,7 +8707,7 @@ impl Renderer {
                     &config,
                 );
                 if frames.is_some() {
-                    frame_gen.world(device, &self.world_post, &self.config, format);
+                    frame_gen.world(device, &config, format);
                 }
                 frames
             });
@@ -8680,7 +8776,10 @@ impl Renderer {
         let size = [self.config.width, self.config.height];
         let target_texture = match (&surface_frame, &mut self.hdr) {
             (_, Some(hdr)) => hdr.frame(&self.device, size),
-            _ if let Some((real, _)) = &fg_frames => real.clone(),
+            _ if let Some((real, _)) = &fg_frames => self
+                .readback
+                .target(&self.device, real, self.output.frame.format, false)
+                .unwrap_or_else(|| real.clone()),
             // A screenshot of a swapchain without COPY_SRC (OpenGL), and a float frame
             // with HDR off, draw into a texture of their own, then onto the swapchain or
             // the offscreen target.
@@ -8835,9 +8934,12 @@ impl Renderer {
             hdr_gain,
             hdr_settings,
         ));
+        // A pack that resolves its own world may still ask for TAA's offset (`[frame] jitter`).
+        let pack_jitter = !frame.title && self.executor.is_some_and(|c| c.jitter);
         let jitter = self.world_post.jitter(
             [self.config.width, self.config.height],
             taa,
+            pack_jitter,
             view_proj,
             frame.camera,
         );
@@ -9096,18 +9198,15 @@ impl Renderer {
         if let Some(pipeline) = self.external.as_mut().filter(|_| !frame.title) {
             pipeline.begin_frame(&state);
         }
-        let shadow_view = self
-            .pack_post
-            .as_ref()
-            .and_then(|p| p.1.as_ref())
-            .filter(|_| !frame.title)
-            .and_then(|p| p.shadow_view(frame))
-            .or_else(|| {
-                self.external
-                    .as_ref()
-                    .filter(|_| !frame.title)?
-                    .shadow_request(&state)
-            });
+        let shadow_view = if frame.title {
+            None
+        } else {
+            self.pack_post
+                .as_ref()
+                .and_then(|p| p.1.as_ref())
+                .and_then(|p| external::ExternalPipeline::shadow_request(p, &state))
+                .or_else(|| self.external.as_ref()?.shadow_request(&state))
+        };
         let pack_terrain = !frame.title
             && self
                 .pack_post
@@ -10034,7 +10133,24 @@ impl Renderer {
                     fog,
                 )
             });
-            core.prepare(&mut self.uploads, &mut encoder, &sky, stars.as_deref());
+            let sunrise_color = frame.sky.sunrise_color;
+            let sunrise = (core.draws_sunrise() && sunrise_color[3] > 0.001).then(|| {
+                core_sky::uniforms(
+                    block,
+                    projection,
+                    core_sky::sunrise_model_view(view.view, frame.sky.sun_angle, sunrise_color[3]),
+                    sunrise_color,
+                    fog_color,
+                    fog,
+                )
+            });
+            core.prepare(
+                &mut self.uploads,
+                &mut encoder,
+                &sky,
+                stars.as_deref(),
+                sunrise.as_deref(),
+            );
         }
         let skin = frame.skin.filter(|skin| match &mut self.entity_skin {
             Some(skinner) => skinner.register(&self.device, &mut self.uploads, &mut encoder, skin),
@@ -10869,8 +10985,11 @@ impl Renderer {
             };
             section_draw_calls = mesh_calls + translucent_calls;
         }
+        // The frame draws into whatever `target_texture` gave: the surface's image,
+        // a readback stand-in in the frame's format (a 0.2 pack's float frame, with
+        // frame generation too), or HDR's own frame. The view is in its format.
         let view_target = target_texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.output.frame.format),
+            format: Some(target_texture.format().remove_srgb_suffix()),
             ..Default::default()
         });
         if let Some(timer) = &mut self.gpu_timer {
@@ -11132,13 +11251,8 @@ impl Renderer {
                 let mut fog_ends = globals.fog_ends;
                 fog_ends[3] = plane;
                 // Water samples the mirror at its jittered screen position: the mirror takes the
-                // world's jitter, while TAA runs.
-                let mirrored = view::mirror_view_projection(view_proj, plane);
-                let mirrored = if taa && self.world_post.taa {
-                    jitter * mirrored
-                } else {
-                    mirrored
-                };
+                // world's jitter (TAA's or the pack's; identity while the world is still).
+                let mirrored = jitter * view::mirror_view_projection(view_proj, plane);
                 let mirror_globals = Globals {
                     view_proj: mirrored.to_cols_array_2d(),
                     inverse_view,
@@ -11436,16 +11550,29 @@ impl Renderer {
                 }
                 let own_stars = self.executor.is_some_and(|c| c.hides_stars);
                 if !frame.title
-                    && frame.stars.is_some()
+                    && let Some((rotation, brightness)) = frame.stars
+                    && brightness > 0.0
                     && !pack_draws_sky
                     && !own_stars
                     && pack_sky_visibility.stars
                 {
-                    match self.core_sky.as_ref().filter(|c| c.draws_stars()) {
-                        Some(core) => core.draw_stars(&mut pass),
-                        None => self.stars.draw(&mut pass),
+                    let core = self.core_sky.as_ref().filter(|c| c.draws_stars());
+                    if self.stars.draw_stage(
+                        &self.device,
+                        &mut pass,
+                        core,
+                        || {
+                            if core.is_some() {
+                                rotation
+                            } else {
+                                native_pack::sky_turn(pack_tilt, frame.end_sky) * rotation
+                            }
+                        },
+                        frame.sky.star_angle,
+                        brightness,
+                    ) {
+                        pass.set_bind_group(0, &self.group, &[]);
                     }
-                    pass.set_bind_group(0, &self.group, &[]);
                 }
                 if !frame.title && frame.dark_disc && !pack_draws_sky {
                     self.draw_visible_void(&mut pass, pack_sky_visibility);
@@ -12015,8 +12142,17 @@ impl Renderer {
                     }
                     pass.set_bind_group(0, &self.group, &[]);
                 }
-                if frame.stars.is_some() {
-                    self.stars.draw(&mut pass);
+                // The deferred route never runs with a pack's core stars (`should_defer_sky`).
+                if let Some((rotation, brightness)) = frame.stars
+                    && self.stars.draw_stage(
+                        &self.device,
+                        &mut pass,
+                        None,
+                        || native_pack::sky_turn(pack_tilt, frame.end_sky) * rotation,
+                        frame.sky.star_angle,
+                        brightness,
+                    )
+                {
                     pass.set_bind_group(0, &self.group, &[]);
                 }
                 if frame.dark_disc {
@@ -12032,6 +12168,15 @@ impl Renderer {
                 pass.set_bind_group(0, &self.group, &[]);
                 pack_frame(&mut pass);
                 pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            }
+            // `[entity] surface`: the stage's entities write the surface target too, over the
+            // material stage's solid terrain or into a cleared one. The mods' prepared draws
+            // are Horizon's own pipeline throughout, which writes the colour alone.
+            let entity_surface = entity_stage.and_then(|e| e.surface);
+            let prepared = !self.prepared_draws.is_empty();
+            if let Some(target) = entity_surface {
+                drop(pass);
+                pass = terrain_pass(&mut encoder, target, surface.is_none());
             }
             if static_entity_quads > 0 {
                 pass.stage(self.own_timing.as_mut(), "static block entities");
@@ -12061,12 +12206,16 @@ impl Renderer {
                 }
                 pass.set_bind_group(0, &self.group, &[]);
             }
+            if entity_surface.is_some() && prepared {
+                drop(pass);
+                pass = plain_pass(&mut encoder);
+            }
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            if entity_quads > 0 || !self.prepared_draws.is_empty() {
+            if entity_quads > 0 || prepared {
                 pass.stage(self.own_timing.as_mut(), "entities");
                 external::set_entity_pipeline(
                     &mut pass,
-                    entity_stage,
+                    entity_stage.filter(|e| !prepared || e.surface.is_none()),
                     &self.entity_pipeline,
                     false,
                 );
@@ -12089,6 +12238,11 @@ impl Renderer {
                     );
                 }
                 pass.set_bind_group(0, &self.group, &[]);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            }
+            if entity_surface.is_some() && !prepared {
+                drop(pass);
+                pass = plain_pass(&mut encoder);
                 pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             }
             if entity_stage.is_some() {
@@ -12815,6 +12969,7 @@ impl Renderer {
             }
         } else if let Some((color, depth)) = &scaled
             && native_post
+            && fg_frames.is_none() // frame generation's branch runs the chain itself
             && let Some(native) = &mut self.external
         {
             native.run_post(external::WorldPost {
@@ -12861,7 +13016,22 @@ impl Renderer {
                 screen: &view_target,
                 resolved: resolved.as_ref(),
             });
-        } else if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
+        } else if let (Some((_, generated)), Some((color, depth))) = (&fg_frames, &scaled) {
+            // Frame generation owns this frame; the branch above (the ordinary native
+            // one) is skipped for it. A native pack's post chain runs here as without
+            // frame generation, and its output is composed by draw_generated: onto the
+            // readback stand-in at the frame's format, finished onto the real frame.
+            if native_post && let Some(native) = self.external.as_mut() {
+                native.run_post(external::WorldPost {
+                    device: &self.device,
+                    encoder: &mut encoder,
+                    world: (color, depth),
+                    size: self.world_post.size().unwrap_or([1, 1]),
+                    display: self.world_post.resolved_size().unwrap_or([1, 1]),
+                    window: [target_texture.width(), target_texture.height()],
+                    scene: self.ray_scene.as_ref().map(|s| (s, frame.camera)),
+                });
+            }
             let camera = frame_gen::Camera {
                 jittered,
                 view_proj,
@@ -12901,6 +13071,13 @@ impl Renderer {
                     Some((_, depth)) => (depth, self.world_post.size().unwrap_or(size)),
                     None => (self.depth.as_ref().expect(WINDOW_DEPTH), size),
                 };
+                let look = pack_uniforms::world_look(
+                    frame,
+                    (self.pack_post.as_ref())
+                        .and_then(|p| p.1.as_ref())
+                        .map(|p| p.sun_path_rotation())
+                        .or_else(|| self.external.as_ref().map(|p| p.sun_path_rotation())),
+                );
                 native_render::world_drawn(&mut native_render::WorldDrawn {
                     device: &self.device,
                     queue: &self.queue,
@@ -12926,6 +13103,7 @@ impl Renderer {
                         nearest: &self.sprite_nearest,
                         filtered: &self.sprite_sampler,
                     },
+                    look,
                 });
             }
         }
@@ -12987,11 +13165,14 @@ impl Renderer {
             world,
         } = present;
         // A 0.2 pack in SDR: its picture finishes on 8 bits before the hand, the camera overlays
-        // and the HUD draw over it (`overlay_format`).
+        // and the HUD draw over it (`overlay_format`). With frame generation the finish lands
+        // on its real frame, whose format is the surface's.
         let finished = (self.output.frame.overlay_format != self.output.frame.format)
             .then(|| {
                 let image = surface_frame.as_ref().map(|f| &f.texture);
-                image.or(self.offscreen.as_ref())
+                image
+                    .or(fg_frames.as_ref().map(|f| &f.0))
+                    .or(self.offscreen.as_ref())
             })
             .flatten()
             .and_then(|image| {

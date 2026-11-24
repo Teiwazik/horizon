@@ -183,6 +183,27 @@ impl DrawContext for GameDrawContext<'_, '_> {
         )?;
         Ok(())
     }
+    fn draw_scene_with_overlays(
+        &mut self,
+        rect: [f32; 4],
+        scene: &mod_api::Scene,
+        view: SceneView,
+        overlays: &[SceneOverlay],
+    ) -> Result<(), SceneOverlayError> {
+        if !self.game.native_window() {
+            return Err(SceneError::Unavailable.into());
+        }
+        let rect = self.translated_corners(rect);
+        let frame = SceneFrame::new(rect, view).with_overlays(overlays)?;
+        let blocks = crate::game::api_values::aggregates::scene_blocks(&scene.blocks)?;
+        self.game.native_draw_scene(
+            &mut *self.surface,
+            &SceneBlocks::stationary(&blocks),
+            scene,
+            frame,
+        )?;
+        Ok(())
+    }
     fn push_clip(&mut self, rect: [f32; 4]) -> Result<(), GuiClipRefusal> {
         let rect = self.translated_rect(rect);
         self.clips.push(self.surface, rect)
@@ -287,6 +308,10 @@ impl DrawContext for GameDrawContext<'_, '_> {
         let at = self.translated_at(at);
         self.game
             .native_gui_draw_item_decorations_with(&mut *self.surface, &stack, at, text)
+    }
+    fn input_glyph(&mut self, glyph: &InputGlyph, at: [f32; 2], argb: u32) -> bool {
+        self.game
+            .native_input_glyph_draw(&mut *self.surface, glyph, at, argb)
     }
 }
 /// [`BlockEntityDrawContext`] on the game's `crate::game::native_block_entity_draw::BlockEntityDraw`.

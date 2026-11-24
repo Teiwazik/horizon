@@ -251,7 +251,7 @@ closes anyway). Before, the menu took that B.
 
 ## Glyphs
 
-Code asks for a glyph by what the button does, never by a button. The chain runs from the job to the art:
+Gameplay and menu prompts ask for a glyph by what the button does. The chain runs from the job to the art:
 
 1. **What it does** (`gamepad::GlyphOf`): a gameplay action, `GlyphOf::Bound("key.jump")`, or a menu's fixed
    job, `GlyphOf::Menu(MenuJob::Back)`. Menus aren't rebindable, so `MenuJob::button` is the one map from a
@@ -272,10 +272,10 @@ confirms and jumps. Inside `pad_glyph`, a `Glyph` turns its part back into the b
 art and the label, so South shows that A. `GlyphStyle` is only the setting: the Glyphs choice and
 `horizon-controller.txt` keep `nintendo` and `nintendoLetters` as before.
 
-What the types guarantee: no code outside `pad_glyph` can turn a bare `Button` into art or a label, and none
-can make `Glyphs` without the `PadSettings` its letters come from. What they don't: a caller holding the
-settings could still pass another pad's family, so gameplay reads the player's through `Game::glyph` and
-`Game::menu_glyph`.
+`Glyph::physical` is for prompts that explicitly document a controller's physical button. It takes
+the selected artwork family and skips the letter remap, including when drawing a button that was
+already resolved from a gameplay role. The mod SDK uses this path without exposing the atlas.
+Gameplay still reads the player's bindings and art through `Game::glyph` and `Game::menu_glyph`.
 
 A new screen asks for a glyph like this:
 
@@ -399,7 +399,7 @@ The shell paints through `graphics_style`, which follows the menu style the laye
 (`menu_style::install`). Its `surfaces` picks one of two looks, with the same layout:
 
 - `Surfaces::Flat`: see-through glass panels and flat controls in the style's colours. The official game
-  gives this with Horizon's Blocks palette (`horizon_look.rs`).
+  gives this with Horizon's Blocks palette (`horizon-game/src/look.rs`).
 - `Surfaces::Vanilla`: what vanilla's Options screens draw, from the player's resource packs. Panels are
   the list background between its header and footer separators, and the open page is a selection
   list's entry (a grey edge round black, white with the focus). Controls are the `widget/*` sprites: a
