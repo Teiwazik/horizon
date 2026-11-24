@@ -1145,7 +1145,10 @@ file = \"material.wgsl\"
         // `[frame] jitter`: a pack that resolves its own world gets TAA's offset alone; where
         // the renderer resolves it, its TAA jitters already.
         let jitter = "[frame]\njitter = true\n";
-        let jittered = Capabilities { jitter: true, ..sky };
+        let jittered = Capabilities {
+            jitter: true,
+            ..sky
+        };
         assert_eq!(linear_does(jitter), jittered);
         assert_eq!(linear_does("[frame]\njitter = false\n"), sky);
         assert_eq!(does(jitter), plain);

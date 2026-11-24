@@ -7204,6 +7204,13 @@ impl Renderer {
         if let Some((_, Some(post))) = &mut self.pack_post {
             post.reset_history(&self.device);
         }
+        // `[frame] jitter` advances TAA's Halton phase: a restarted pack starts it again.
+        self.world_post.reset_temporal_sequence();
+    }
+    /// Whether the running Horizon pack moves the world by TAA's offset under its own post
+    /// chain (`[frame] jitter`), the player's TAA on or off.
+    pub fn pack_jitters(&self) -> bool {
+        self.executor.is_some_and(|c| c.jitter)
     }
     /// The running shader pack's kind: `iris` (a `shaders/` pack) or `native` (one of
     /// Horizon's own).
