@@ -33,7 +33,8 @@ pub struct WorldDrawn<'a> {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorldLook {
-    /// The sky's and the fog's colours, linear 0 to 1, alpha 1 (`Globals::fog_color` for
+    /// The sky's and the fog's colours, 0 to 1 as vanilla gives them (sRGB-encoded, not linear),
+    /// alpha 1 (`Globals::fog_color` for
     /// `fog_color`: water's or lava's fog when the camera is in it).
     pub sky_color: [f32; 4],
     pub fog_color: [f32; 4],

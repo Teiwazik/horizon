@@ -12905,7 +12905,8 @@ impl Renderer {
                     frame,
                     (self.pack_post.as_ref())
                         .and_then(|p| p.1.as_ref())
-                        .map(|p| p.sun_path_rotation()),
+                        .map(|p| p.sun_path_rotation())
+                        .or_else(|| self.external.as_ref().map(|p| p.sun_path_rotation())),
                 );
                 native_render::world_drawn(&mut native_render::WorldDrawn {
                     device: &self.device,

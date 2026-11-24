@@ -525,7 +525,7 @@ fn day_fraction(degrees: f32) -> f32 {
 }
 
 /// The frame's [`WorldLook`](crate::render_slots::WorldLook) for `world_drawn`:
-/// `sun_path_rotation` is the shader pack's (`None`: no pack drew the frame).
+/// `sun_path_rotation` is the shader pack's, a `shaders/` or a native one (`None`: no pack drew the frame).
 pub fn world_look(frame: &Frame, sun_path_rotation: Option<f32>) -> crate::render_slots::WorldLook {
     let tilt = sun_path_rotation.unwrap_or(0.0);
     let sky = &frame.sky;

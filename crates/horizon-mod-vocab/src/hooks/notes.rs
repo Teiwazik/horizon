@@ -1341,12 +1341,7 @@ what a mod draws there shows in that frame. Draw contexts remain the API-typed d
   entity atlas, the shared quad index buffer and the block sprite arrays ([block textures](#block-textures)). Not
   called on the title screen's panorama. `motion` says which mob, player or dropped item each run of the entity quads
   is, by its entity id, so a mod can match an entity's vertices with last frame's (a motion blur's own motion
-  vectors); `spans` only name the type. `look` (`WorldLook`) is the sky, fog, light and water the frame was drawn
-  under, so a mod pass can match them: the sky and fog colours with the fog's distances (`Globals::fog`), unit world
-  directions to the sun, the moon and the body lighting the frame (turned by a shader pack's `sunPathRotation`),
-  `sunAngle`, the sky light's factor and colour, the ambient and block light colours, the sunrise glow, the stars,
-  under water and water's fog colour, night vision, and whether a shader pack drew the frame (its own sky, fog and
-  tonemap are then in `color`; these are what its uniforms were built from).
+  vectors); `spans` only name the type.
 - `hand_drawn(hand)`: the first-person hand and held item are drawn, after `world_drawn` and before
   entity outlines, post effects, screen effects and the HUD, on every frame `world_drawn` runs. `HandDrawn`
   holds the device, queue and encoder, the frame's colour target with the hand in it, the hand's camera-relative
