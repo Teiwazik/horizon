@@ -460,8 +460,11 @@ fn an_output_writes_a_kept_texture_at_its_size() {
 /// (and the last, which draws the picture) still gets alpha 1.
 #[test]
 fn an_output_keeps_the_pass_s_alpha() {
+    // `tex` is rgba16float here, not RES's r32float, so the alpha it keeps is a channel it has.
+    let tex =
+        "[[resource]]\nname = \"tex\"\nformat = \"rgba16float\"\nsize = [4, 4]\nkeep = \"view\"\n";
     let manifest = format!(
-        "{HEAD}{RES}[[post]]\nfile = \"own.wgsl\"\noutput = \"own\"\n\
+        "{HEAD}{tex}[[post]]\nfile = \"own.wgsl\"\noutput = \"own\"\n\
          [[post]]\nfile = \"kept.wgsl\"\noutput = \"tex\"\n\
          [[post]]\nfile = \"chain.wgsl\"\n{LAST}"
     );

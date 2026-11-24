@@ -1542,7 +1542,7 @@ const POST_ENTRIES: &str = concat!(
 
 /// A post pass with an `output`, a target of the pack's own or a kept texture: the texture holds
 /// data the pack reads back, so the pass's alpha stays.
-const POST_ENTRIES_KEPT: &str = concat!(
+const POST_ENTRIES_OUTPUT: &str = concat!(
     post_vertex!(),
     "\
 @fragment fn horizon_fs_post(in: HorizonPostOut) -> @location(0) vec4<f32> {
@@ -2493,7 +2493,7 @@ pub(crate) fn compose_traced(
     } else if let (StageKind::Compute | StageKind::BeforeWorld, Some(stage)) = (kind, stage) {
         push("<entries>", &compute_entries(stage));
     } else if kind == StageKind::Post && stage.is_some_and(|s| s.output.is_some()) {
-        push("<entries>", POST_ENTRIES_KEPT);
+        push("<entries>", POST_ENTRIES_OUTPUT);
     } else {
         push("<entries>", &entries(kind.entries()));
     }
