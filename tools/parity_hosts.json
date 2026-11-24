@@ -90,17 +90,13 @@
  },
  "known_failing": {
   "block_removal": "#18133: keeps banner_patterns:[] on dropped banners; no `set` record when a block-entity block is replaced",
-  "boat_void": "#18133: a boat removed in the void leaves 5 item entities that vanilla doesn't",
   "command_parse": "#18133: SNBT error text and empty-suggestion ranges differ from Brigadier",
   "crafter": "#18133: hopper minecart slot0 record missing",
   "datafix": "#18133: runner's .local resolves into shared-local, so every shard refuses its default root",
-  "dedicated_server": "#18133: extra config custom_payload horizon:payloads and one extra recipe_book_add entry",
   "dispenser": "#18133: container-entity slot0 and sapling-growth `set` records missing",
   "dragon_render": "#18133: dragon tests exit 101; Rust log not in the artifact",
-  "mob_ai": "#18133: enderman hurt twice in a tick teleports differently",
   "portal_cooldown": "#18133: cooldown test fails; Rust log not in the artifact",
   "save_roundtrip": "#18133: level.dat gains fml and horizon keys",
-  "sculk": "#18133: catalyst XP orbs missing",
   "sculk_saved_fields": "#18133: placed sensor/shrieker vibration fields read back as 0",
   "seed_sync": "#18133: summoned armor stand gets a different UUID",
   "server_resource_pack": "#18133: extra config custom_payload horizon:payloads"
