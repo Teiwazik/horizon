@@ -29,6 +29,10 @@ pub trait ScreensClientHost {
     /// opened with its `extra`. A copy, so native and wasm read it alike. @API:menu_extra_data@.
     #[access(ClientSetup)]
     fn screen_extra_data(&self) -> Option<Vec<u8>>;
+    /// What started this level load, while `screen` is its selected registered
+    /// transition screen. None outside the load or for a different screen.
+    #[access(ClientSetup)]
+    fn dimension_transition_cause(&self, screen: &str) -> Option<DimensionTransitionCause>;
     /// Side: client.
     /// Where the open screen draws outside its `rect`, and where mods draw
     /// over it: the recipe book's panel, the creative tab rows, the active
@@ -156,4 +160,11 @@ pub trait ScreensClientHost {
     /// wasm alike.
     #[access(ClientSetup)]
     fn request_screenshot(&mut self) -> Result<(), ScreenshotError>;
+    /// Side: client.
+    /// The already selected splash text on the main title screen. None on other
+    /// screens, when Hide Splash Texts is enabled, or if no splash was selected.
+    /// Still available in the title's render hooks if Pre cancels stock drawing.
+    #[access(ClientSetup)]
+    #[default_on_unavailable]
+    fn title_splash(&self) -> Option<String>;
 }

@@ -1529,7 +1529,7 @@ struct HorizonPostOut {
 
 /// The post stage's entry points, as the renderer builds them: a full-screen triangle, and a
 /// fragment that calls the pack's `post` for each pixel. The chain's targets hold linear light,
-/// so nothing converts, and the pass's alpha is ignored.
+/// so nothing converts, and the alpha of a pass that draws the next `previous` is ignored.
 const POST_ENTRIES: &str = concat!(
     post_vertex!(),
     "\
@@ -1540,9 +1540,9 @@ const POST_ENTRIES: &str = concat!(
 "
 );
 
-/// A post pass whose `output` is a kept texture: the texture holds data, so the pass's alpha
-/// stays.
-const POST_ENTRIES_KEPT: &str = concat!(
+/// A post pass with an `output`, a target of the pack's own or a kept texture: the texture holds
+/// data the pack reads back, so the pass's alpha stays.
+const POST_ENTRIES_OUTPUT: &str = concat!(
     post_vertex!(),
     "\
 @fragment fn horizon_fs_post(in: HorizonPostOut) -> @location(0) vec4<f32> {
@@ -1927,6 +1927,10 @@ pub fn post_target_declarations(manifest: &crate::manifest::Manifest) -> String 
 
 /// The motion guide's binding in group 3, in the 0.2 post passes of a pack with `[motion]`.
 pub const MOTION_BINDING: u32 = 14;
+
+/// The opaque scene's reversed depth and linear color, available to opted-in post passes.
+pub const POST_OPAQUE_DEPTH_BINDING: u32 = 8;
+pub const POST_OPAQUE_COLOR_BINDING: u32 = 15;
 
 /// The motion guide's declarations, at `MOTION_BINDING`. The raw texture holds the engine's
 /// objects (`frame_gen/motion.wgsl`): z 1 a matched one with xy its delta, w 1 one with nothing
@@ -2459,6 +2463,12 @@ pub(crate) fn compose_traced(
     ) + &texture_declarations(&pack.manifest.textures);
     if matches!(kind, StageKind::Post | StageKind::Compute) {
         prelude += &post_target_declarations(&pack.manifest);
+        if m.post_opaque {
+            prelude += &format!(
+                "@group({GROUP}) @binding({POST_OPAQUE_DEPTH_BINDING}) var opaque_depth: texture_depth_2d;\n\
+                 @group({GROUP}) @binding({POST_OPAQUE_COLOR_BINDING}) var opaque_color: texture_2d<f32>;\n"
+            );
+        }
     }
     if kind == StageKind::Post && pack.manifest.motion.is_some() {
         prelude += MOTION;
@@ -2482,11 +2492,8 @@ pub(crate) fn compose_traced(
         );
     } else if let (StageKind::Compute | StageKind::BeforeWorld, Some(stage)) = (kind, stage) {
         push("<entries>", &compute_entries(stage));
-    } else if kind == StageKind::Post
-        && let Some(output) = stage.and_then(|s| s.output.as_ref())
-        && m.kept.resources.iter().any(|r| r.name == *output)
-    {
-        push("<entries>", POST_ENTRIES_KEPT);
+    } else if kind == StageKind::Post && stage.is_some_and(|s| s.output.is_some()) {
+        push("<entries>", POST_ENTRIES_OUTPUT);
     } else {
         push("<entries>", &entries(kind.entries()));
     }

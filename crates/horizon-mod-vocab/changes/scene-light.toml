@@ -1,2 +1,3 @@
-ids = ["type:SceneBlock.light"]
-why = "A scene block can be drawn under sky and block light levels (SceneBlock::with_light), its colours times the frame's lightmap as the world's terrain is lit; without it a scene stays full bright as before."
+ids = ["type:SceneBlock.light", "type:SceneBlock", "type:Scene", "method:DrawContext::draw_scene"]
+why = "A scene block can be drawn under sky and block light levels (SceneBlock::with_light), its colours times the frame's lightmap as the world's terrain is lit; without it a scene stays full bright as before. The new light field changes the wasm layout of SceneBlock and of Scene, which holds it, and so of DrawContext::draw_scene."
+migrate = "Rebuild wasm mods that draw scenes against the new SDK. A SceneBlock built with SceneBlock::new stays full bright; call with_light(sky, block) to light it."
