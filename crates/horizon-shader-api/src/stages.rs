@@ -493,8 +493,10 @@ fn surface_at(texel: vec2<i32>) -> SurfaceData {
     let s = bitcast<vec4<f32>>(textureLoad(scene_surface, t, 0));
     let depth_size = vec2<i32>(textureDimensions(scene_depth));
     let depth = textureLoad(scene_depth, clamp(texel, vec2<i32>(0), depth_size - 1), 0);
-    // The terrain's own depth is stored with it: anything drawn nearer since hides it.
-    let present = s.w > 0.0 && abs(s.w - depth) <= s.w * 1e-5;
+    // The terrain's own depth is stored with it: anything drawn nearer since hides it. The
+    // tolerance holds the entity pipeline's depth bias (128 steps of a 24-bit mantissa, up to
+    // 2^-16 of the depth), which the depth buffer keeps and the stored depth may not.
+    let present = s.w > 0.0 && abs(s.w - depth) <= s.w * 2e-5;
     let e = unpack2x16snorm(bitcast<u32>(s.x));
     var n = vec3<f32>(e.x, 1.0 - abs(e.x) - abs(e.y), e.y);
     if n.y < 0.0 {

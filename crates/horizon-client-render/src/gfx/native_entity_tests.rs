@@ -705,7 +705,7 @@ fn an_entity_s_surface_is_present_where_its_depth_is() {
             );
             // `surface_at`'s `present` (horizon-shader-api's post prelude).
             assert!(
-                w > 0.0 && (w - depth).abs() <= w * 1e-5,
+                w > 0.0 && (w - depth).abs() <= w * 2e-5,
                 "{name}, texel {i}: the surface's depth {w:e} for the kept {depth:e} (drawn at {want:e})"
             );
         }

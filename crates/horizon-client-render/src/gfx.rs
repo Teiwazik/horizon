@@ -11988,6 +11988,7 @@ impl Renderer {
             if entity_surface.is_some() && !prepared {
                 drop(pass);
                 pass = plain_pass(&mut encoder);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             }
             if entity_stage.is_some() {
                 // The entity stage binds the frame's own group; a material stage that traces
