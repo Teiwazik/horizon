@@ -563,7 +563,8 @@ impl ApplicationHandler for Game<'_> {
     }
     fn device_event(&mut self, event_loop: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         // A mod's own screen that grabbed the pointer reads its motion itself.
-        if self.captured
+        if !self.scripted_run()
+            && self.captured
             && self.focused
             && self.keyboard_mouse
             && self.screen == Screen::Mod

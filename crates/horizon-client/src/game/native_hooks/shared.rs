@@ -149,6 +149,14 @@ impl Game<'_> {
         if had_grab && !matches!(screen, Screen::Mod | Screen::Playing) {
             // Another screen replaced a grabbing mod screen: it takes a free pointer.
             self.capture(false);
+        } else if had_grab
+            && screen == Screen::Playing
+            && self.captured
+            && !cfg!(target_os = "macos")
+        {
+            // Back to the world with the pointer still grabbed: `capture(true)` sees it held
+            // and skips MouseHandler.grabMouse's KeyMapping.setAll, so restore the keys here.
+            self.restore_held_keys();
         }
         if screen == Screen::Mod {
             self.keys.clear();

@@ -68,7 +68,6 @@ focused): the grab is then asked for again when the window gets the focus back. 
 grab; Escape or `mod_screen_close` back to the world grabs the pointer for the world as before, and a screen
 that replaces the mod's gets a free pointer.
 
-
 ## Decorating Multiplayer rows
 
 Implement the client hook `server_list_row_decorations` to draw on the saved servers in the title's

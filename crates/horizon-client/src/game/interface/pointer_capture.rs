@@ -130,7 +130,7 @@ impl Game<'_> {
     /// mapping it is bound to, so a key pressed or kept down behind a screen
     /// counts once the game has the keyboard back. A sneak or sprint that
     /// toggles keeps its toggle state (`shouldSetOnIngameFocus`).
-    pub(super) fn restore_held_keys(&mut self) {
+    pub(in crate::game) fn restore_held_keys(&mut self) {
         let held: Vec<KeyCode> = self.physical_keys.iter().copied().collect();
         let toggles = [self.settings.toggle_crouch, self.settings.toggle_sprint];
         for key in held {
