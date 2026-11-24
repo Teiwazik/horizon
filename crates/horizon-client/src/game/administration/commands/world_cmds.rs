@@ -1366,7 +1366,9 @@ impl Game<'_> {
             }
             "attribute.modifier.add" => {
                 // LivingEntity.collectEquipmentChanges: the gear's modifiers are in the map too.
-                let taken_by_gear = worn.as_ref().is_some_and(|w| w.has_modifier(key, modifier_id));
+                let taken_by_gear = worn
+                    .as_ref()
+                    .is_some_and(|w| w.has_modifier(key, modifier_id));
                 let write =
                     AttributeWrite::add(modifier_id, value_arg, operation_named(op), true, false)
                         .ok_or_else(no_attribute)?;
@@ -2292,6 +2294,7 @@ mod vehicle_damage_command_tests {
     use horizon_client::chunk::Chunk;
     use horizon_core::position::ChunkPos;
     use std::sync::Arc;
+    /// A server game with commands allowed and chunk 0 0 force-loaded.
     pub(super) fn with_game(test: impl FnOnce(&mut Game<'_>)) {
         let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
@@ -2825,3 +2828,7 @@ mod attribute_modifier_command_tests {
 #[cfg(test)]
 #[path = "attribute_equipment_tests.rs"]
 mod attribute_equipment_tests;
+
+#[cfg(test)]
+#[path = "guest_vehicle_relation_tests.rs"]
+mod guest_vehicle_relation_tests;

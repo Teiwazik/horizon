@@ -19,14 +19,23 @@ impl Game<'_> {
             renderer.clear_lods();
         }
     }
+    /// Clears far terrain for a world or dimension change, arming the next
+    /// far terrain's world-entry first-load hold.
+    pub(super) fn clear_lod_for_world_entry(&mut self) {
+        self.clear_lod();
+        self.lod_first_load = true;
+    }
     pub(super) fn prepare_lod(&mut self) {
-        let enabled = self.far_terrain_choice().0 > 0
-            && self.renderer.is_some()
-            && self.player.is_some()
-            && self.title.is_none();
+        let in_world = self.renderer.is_some() && self.player.is_some() && self.title.is_none();
+        let enabled = in_world && self.far_terrain_choice().0 > 0;
         if !enabled {
             if self.lod.is_some() || self.lod_source_attempted {
                 self.clear_lod();
+            }
+            if in_world {
+                // Far terrain is off in an already-entered world: toggling it
+                // on later must not start a world-entry first-load hold.
+                self.lod_first_load = false;
             }
             return;
         }
@@ -38,12 +47,13 @@ impl Game<'_> {
             .as_ref()
             .is_some_and(|level| self.remote.as_ref().is_some_and(|r| r.level != *level))
         {
-            self.clear_lod();
+            self.clear_lod_for_world_entry();
         }
         if self.lod_source_attempted || self.export_server_calls_blocked() {
             return;
         }
         self.lod_source_attempted = true;
+        let arm_first_load = std::mem::take(&mut self.lod_first_load);
         self.lod_level = None;
         let dim = self.dim;
         let source = match (&self.integrated, self.server_far_terrain(), &self.remote) {
@@ -107,12 +117,16 @@ impl Game<'_> {
             _ => Some(self.streaming.lod_source()),
         };
         if let Some(source) = source {
-            let lod = horizon_client::lod::Lod::new(source, self.worker_context());
+            let mut lod = horizon_client::lod::Lod::new(source, self.worker_context());
+            if arm_first_load {
+                lod.arm_first_load();
+            }
             // Far tiles are never in the ray scene: the arenas' looks alone.
             lod.set_looks(self.streaming.looks, self.streaming.nether_shading);
             lod.set_shader_pack(self.streaming.shader_pack);
             self.lod = Some(lod);
-            self.lod_observe.extend(self.world.chunks.keys().copied());
+            let resident: Vec<_> = self.world.chunks.keys().copied().collect();
+            self.lod_observe_later(resident);
         }
     }
     pub(in crate::game) fn update_world(&mut self) {
@@ -191,6 +205,10 @@ impl Game<'_> {
             self.streaming.complete_commit(&mut self.world, commit)
         });
         self.streaming.extra.truncate(areas);
+        // A lectern read from a save resolves its book pages as its chunk
+        // arrives (`LecternBlockEntity.loadAdditional`): the chunk was decoded
+        // on a worker, which has no game to read a selector or a score with.
+        horizon_client::spans::time("resolve_loaded_lecterns", || self.resolve_loaded_lecterns());
         // The viewed levels' meshing, queued after the player's level's (nothing while no view
         // names one).
         if self.streaming.mesh
@@ -226,18 +244,34 @@ impl Game<'_> {
         for chunk in &unloaded {
             self.world.modified.unloaded(&(chunk.x, chunk.z));
         }
+        self.lod_observe_later(uploads.iter().map(|(key, _)| (key.0, key.2)));
         if let Some(lod) = &mut self.lod {
-            self.lod_observe
-                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
             for chunk in &unloaded {
                 self.lod_observe.remove(&(chunk.x, chunk.z));
             }
             // Unloaded columns first (their summaries are all that remains),
-            // then a few resident ones (an edit copies a chunk the worker
-            // still holds). The worker summarizes them.
+            // then resident ones that left the full-detail area (their
+            // sections are held until their summary is drawn), then a few
+            // other resident ones (an edit copies a chunk the worker still
+            // holds). The worker summarizes them.
             horizon_client::spans::time("lod_observe", || {
                 for chunk in &unloaded {
                     lod.observe(chunk.clone(), self.res.facts());
+                }
+                let mut remaining =
+                    horizon_client::lod::OBSERVE_AHEAD.saturating_sub(lod.observing());
+                while remaining > 0 {
+                    let asks = lod.take_summary_asks(remaining);
+                    if asks.is_empty() {
+                        break;
+                    }
+                    for key in asks {
+                        if let Some(chunk) = self.world.chunks.get(&key) {
+                            self.lod_observe.remove(&key);
+                            lod.observe(chunk.clone(), self.res.facts());
+                            remaining -= 1;
+                        }
+                    }
                 }
                 while lod.observing() < horizon_client::lod::OBSERVE_AHEAD
                     && let Some(&key) = self.lod_observe.iter().next()
@@ -389,8 +423,7 @@ impl Game<'_> {
                 arriving || (meshing && self.view_arrival.recent(now)) || sampling,
             );
             if let (Some(lod), Some(player)) = (&mut self.lod, &self.player) {
-                let lod_distance =
-                    horizon_client::graphics::lod_distance_capped(far_distance, &renderer.info);
+                let lod_distance = far_distance.min(horizon_client::lod::MAX_CHUNKS);
                 lod.set_near_loading(self.streaming.terrain_loading());
                 lod.set_reduced_detail(far_reduced);
                 // The covered columns change only with the complete ones and
@@ -442,36 +475,42 @@ impl Game<'_> {
         out
     }
 
-    /// Rebuild sections dirtied by player block edits (or nearby dirty sections when
-    /// `prioritizeChunkUpdates == 2`) and upload them before the current frame renders, matching
-    /// vanilla's `SectionRenderDispatcher.rebuildSectionSync`. Under Threaded (`0`, default),
-    /// no main-thread meshing occurs.
+    /// Rebuild sections dirtied by player block edits and upload them before the current frame
+    /// renders, matching vanilla's `SectionRenderDispatcher.rebuildSectionSync`. With
+    /// `prioritizeChunkUpdates == 2` nearby dirty sections follow, nearest first, within
+    /// `NEARBY_MESH_BUDGET` (paused for `NEARBY_COOLDOWN_FRAMES` after an overrun); the rest
+    /// stay with the workers. Under Threaded (`0`, default), no main-thread meshing occurs.
     pub(in crate::game) fn flush_immediate_meshes(&mut self) {
+        use horizon_client::streaming::immediate_mesh::{
+            IMMEDIATE_MESH_LIMIT, NEARBY_IMMEDIATE_DIST_SQ,
+        };
         let mode = self.settings.prioritize_chunk_updates;
         if mode == 0 || self.title.is_some() || self.renderer.is_none() {
             self.world.immediate_sections.clear();
             return;
         }
-        if mode >= 2
-            && let Some(p) = self.player.as_ref()
-        {
-            let camera_block = [
-                p.position.x.floor() as i32,
-                p.position.y.floor() as i32,
-                p.position.z.floor() as i32,
-            ];
-            self.world.mark_nearby_dirty_immediate(
-                camera_block,
-                horizon_client::streaming::immediate_mesh::NEARBY_IMMEDIATE_DIST_SQ,
-                horizon_client::streaming::immediate_mesh::IMMEDIATE_MESH_LIMIT,
-            );
-        }
-        if self.world.immediate_sections.is_empty() {
+        let nearby = match self.player.as_ref() {
+            Some(p) if mode >= 2 && self.streaming.nearby_meshing_due() => {
+                self.world.nearby_dirty_sections(
+                    [
+                        p.position.x.floor() as i32,
+                        p.position.y.floor() as i32,
+                        p.position.z.floor() as i32,
+                    ],
+                    NEARBY_IMMEDIATE_DIST_SQ,
+                    IMMEDIATE_MESH_LIMIT,
+                )
+            }
+            _ => Vec::new(),
+        };
+        if self.world.immediate_sections.is_empty() && nearby.is_empty() {
             return;
         }
         self.observe_light_edits();
         self.ask_edited_light_emission();
-        let uploads = self.streaming.mesh_immediate(&mut self.world, mode);
+        let uploads = self
+            .streaming
+            .mesh_immediate(&mut self.world, mode, &nearby);
         if uploads.is_empty() {
             return;
         }
@@ -484,10 +523,7 @@ impl Game<'_> {
         if !spent.is_empty() {
             self.streaming.free(spent);
         }
-        if self.lod.is_some() {
-            self.lod_observe
-                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
-        }
+        self.lod_observe_later(uploads.iter().map(|(key, _)| (key.0, key.2)));
         if let Some(renderer) = self.renderer.as_mut() {
             for (key, mesh) in &uploads {
                 renderer.upload(*key, mesh);

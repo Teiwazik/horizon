@@ -33,6 +33,8 @@ use horizon_core::{
     random::RandomSource,
 };
 use horizon_world::registry::BlockStateId;
+#[path = "minecarts/fire.rs"]
+mod fire;
 #[cfg(test)]
 use std::sync::Arc;
 #[path = "minecarts/block_effects.rs"]
@@ -325,6 +327,8 @@ impl Game<'_> {
         // 🤖 Agent: `AbstractMinecart.move` runs applyEffectsFromBlocks at
         // once, the cart still at the rail's top height (below it is lowered).
         let here = c.position;
+        // Where the fire pass applies the move's block effects.
+        c.fire_move_at = Some(here);
         self.cart_inside_blocks(c, slot, here, here);
         let at = |e: [i32; 3], c: &Minecart| {
             c.position.x.floor() as i32 - pos[0] == e[0]
@@ -905,6 +909,7 @@ impl Game<'_> {
             }
         } else {
             self.come_off_track(c);
+            c.fire_move_at = Some(c.position);
         }
         // Only the movement above uses the snapshot. Drop it before storing the cart.
         c.near_carts = None;
@@ -1496,6 +1501,7 @@ impl Game<'_> {
                 hint = i + 1;
                 let p = self.carts[i].position;
                 if ticking(p.x.floor() as i32, p.z.floor() as i32) {
+                    self.cart_fire_tick(id, i);
                     self.cart_cactus_tick(id, i);
                     self.cart_lava_tick(id, i);
                 }
@@ -2280,7 +2286,7 @@ impl Game<'_> {
             camera: glam::DVec3::ZERO,
             spyglass_outline: self.camera_type.is_first_person() && self.scoping(),
             orientation: glam::Quat::IDENTITY,
-            anim: &|_| horizon_client::block_entity_render::BlockAnim::default(),
+            anim: &|_, _| horizon_client::block_entity_render::BlockAnim::default(),
             texts: None,
             partial: 0.0,
             game_time: self.world.game_time,
@@ -2293,7 +2299,8 @@ impl Game<'_> {
             nether: self.nether_lighting(),
             lid: &|_: [i32; 3]| 0.0,
             sign: &|_| None,
-            banner: &|_| Vec::new(),
+            sign_revision: None,
+            banner: &|_, _| {},
             skull: &|_| None,
             glyph: &|c| self.gui.atlas.glyph_cell(c),
             glyphs: self.gui.atlas.font.epoch(),
@@ -2941,6 +2948,96 @@ mod container_drop_tests {
                 assert_eq!(game.dropped.len(), 3, "boat: {boat}");
             });
         }
+    }
+
+    /// `BaseFireBlock.entityInside`: a cart in a fire block takes `inFire`
+    /// damage every tick (1 damage is 10 on the cart's counter, which decays
+    /// by 1 a tick) and breaks past 40.
+    #[test]
+    #[ignore = "daily"]
+    fn a_cart_in_fire_takes_fire_damage_and_breaks() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            game.carts.push(Minecart::new(
+                1,
+                CartKind::Rideable,
+                Vec3::new(8.5, 64.0, 8.5),
+            ));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 10.0);
+            for _ in 0..3 {
+                game.cart_fire_tick(1, 0);
+            }
+            assert_eq!(game.carts[0].damage, 40.0);
+            game.cart_fire_tick(1, 0);
+            assert!(game.carts.is_empty());
+        });
+    }
+
+    /// `BaseFireBlock.fireIgnite` lights a cart for 8 seconds (160 ticks) and
+    /// `Entity.isInvulnerable` only stops the `inFire` hurt, not the ignition.
+    #[test]
+    #[ignore = "daily"]
+    fn an_invulnerable_cart_in_fire_is_lit_but_not_hurt() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            game.carts.push(Minecart::new(
+                1,
+                CartKind::Rideable,
+                Vec3::new(8.5, 64.0, 8.5),
+            ));
+            let mut tag = horizon_core::nbt::Compound::new();
+            tag.insert("Invulnerable".into(), horizon_core::nbt::Tag::Byte(1));
+            game.persist
+                .raw
+                .insert(1, horizon_core::nbt::Tag::Compound(tag));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 0.0);
+            let fire_ticks = game.persist.raw[&1].get("Fire").and_then(horizon_client::nbt_path::int_value);
+            assert_eq!(fire_ticks, Some(160));
+        });
+    }
+
+    /// `AbstractMinecart.move` and `OldMinecartBehavior.tick` apply block
+    /// effects at the position the cart has then: a cart that started in fire
+    /// and ended clear of it is hurt only by the application right after its
+    /// move (once), and one that never touched fire is not hurt at all.
+    #[test]
+    #[ignore = "daily"]
+    fn a_cart_is_hurt_by_fire_at_the_positions_the_effects_apply_at() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            // Started overlapping the fire, ended a block away: no hurt.
+            let mut cart = Minecart::new(1, CartKind::Rideable, Vec3::new(10.5, 64.0, 8.5));
+            cart.previous = Vec3::new(8.9, 64.0, 8.5);
+            game.carts.push(cart);
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 0.0);
+            // In the fire only right after the move: one application hurts.
+            game.carts
+                .update(0, |c| c.fire_move_at = Some(Vec3::new(8.5, 64.0, 8.5)));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 10.0);
+            assert!(game.carts[0].fire_move_at.is_none());
+        });
     }
 }
 

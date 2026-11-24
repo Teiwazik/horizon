@@ -652,7 +652,7 @@ pub enum ExplosionDestroyError {
     TooMany(u64),
     /// A stale level, or one not in place; a stale source or one in another level; a client.
     Unavailable,
-    /// A centre or radius that isn't finite, or a negative radius.
+    /// A centre or radius that isn't finite, a negative radius, or a radius over 64.
     InvalidBlast,
     /// A host without a game.
     NoGame,
@@ -781,6 +781,25 @@ impl SpawnLimits {
 impl Default for SpawnLimits {
     fn default() -> Self {
         Self::VANILLA
+    }
+}
+
+impl SpawnLimits {
+    /// Sets one category's limit and returns true. `MobCategory::Misc` has no limit: it is
+    /// refused (false, nothing changes).
+    pub fn set(&mut self, category: MobCategory, limit: u32) -> bool {
+        let slot = match category {
+            MobCategory::Monster => &mut self.monster,
+            MobCategory::Creature => &mut self.creature,
+            MobCategory::Ambient => &mut self.ambient,
+            MobCategory::Axolotls => &mut self.axolotls,
+            MobCategory::UndergroundWaterCreature => &mut self.underground_water_creature,
+            MobCategory::WaterCreature => &mut self.water_creature,
+            MobCategory::WaterAmbient => &mut self.water_ambient,
+            MobCategory::Misc => return false,
+        };
+        *slot = limit;
+        true
     }
 }
 

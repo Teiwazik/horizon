@@ -691,6 +691,62 @@ pub fn block_entity_data(
     }
     tag
 }
+/// `BlockEntity.saveWithFullMetadata` for a modelled entity: the model's
+/// fields plus what Horizon keeps only in the tag it was loaded with (the
+/// `components` a type stores, a container's `lock`, other unmodelled keys),
+/// merged the way a chunk save merges them. `source` is that loaded tag,
+/// `custom_name` is `BaseContainerBlockEntity.name` and `lock` is its
+/// `LockCode`; the result omits the chunk-only `keepPacked`.
+pub fn full_block_entity_data(
+    p: (i32, i32, i32),
+    e: &crate::containers::BlockEntity,
+    block: &str,
+    source: Option<&Tag>,
+    custom_name: Option<&Tag>,
+    lock: Option<&Tag>,
+) -> Tag {
+    let mut current = block_entity_data(p, e, block, lock);
+    if let Some(name) = custom_name
+        && let Tag::Compound(map) = &mut current
+    {
+        map.insert("CustomName".into(), name.clone());
+    }
+    let merged = match source {
+        Some(original)
+            if crate::block_entity_nbt::id(original) == crate::block_entity_nbt::id(&current) =>
+        {
+            let loaded = decode_block_entity(original).map_or_else(
+                || current.clone(),
+                |(q, e)| {
+                    let mut loaded = block_entity_encode::encode(q, &e, block);
+                    if !matches!(
+                        e,
+                        crate::containers::BlockEntity::Banner(_)
+                            | crate::containers::BlockEntity::Sign(_)
+                            | crate::containers::BlockEntity::Mod(_)
+                    ) && let Some(name) = original
+                        .get("CustomName")
+                        .and_then(crate::block_entity_nbt::component)
+                        && let Tag::Compound(map) = &mut loaded
+                    {
+                        // BaseContainerBlockEntity.loadAdditional: the
+                        // external name is also part of the loaded model. Its
+                        // removal must win over the source overlay.
+                        map.insert("CustomName".into(), name);
+                    }
+                    loaded
+                },
+            );
+            merge_block_entity(original, &loaded, &current)
+        }
+        _ => current,
+    };
+    let mut saved = crate::block_entity_nbt::canonical(&merged).unwrap_or(merged);
+    if let Tag::Compound(map) = &mut saved {
+        map.remove(&"keepPacked".into());
+    }
+    saved
+}
 /// `BannerBlockEntity.loadAdditional` (and the `components` a block entity keeps).
 pub fn decode_banner(tag: &Tag) -> crate::containers::Banner {
     crate::containers::Banner {
@@ -1903,13 +1959,21 @@ impl RegionFiles {
     /// Close the least recently used regions until there is room for one
     /// more, as `RegionFileStorage.getRegionFile` does. A region a reader or
     /// the writer still holds stays: closing it under them would let a
-    /// second handle read a header older than its sectors.
+    /// second handle read a header older than its sectors. So does one with
+    /// changes a failed sync left staged: opened again, it would take the
+    /// header in the file, maybe not the one on the disk, and reuse sectors
+    /// that header on the disk still names.
     fn make_room(&mut self) {
         while self.regions.len() >= MAX_OPEN_REGIONS {
             let oldest = self
                 .regions
                 .iter()
-                .filter(|(_, (r, _))| r.as_ref().is_none_or(|r| Arc::strong_count(r) == 1))
+                .filter(|(_, (r, _))| {
+                    r.as_ref().is_none_or(|r| {
+                        Arc::strong_count(r) == 1
+                            && r.try_lock().is_ok_and(|r| !r.has_staged_changes())
+                    })
+                })
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(key, _)| *key);
             let Some(key) = oldest else {
@@ -1939,9 +2003,8 @@ fn cached_region(
         return Ok(cached.clone());
     }
     cache.make_room();
-    if create && let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    // `open_writable` makes the missing folders, and the region's first
+    // sync makes their names durable with the file's.
     // A file this process can't write (a read-only world) is still read.
     let region = match RegionFile::open_writable(path, create) {
         Err(e) if !create && e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -2000,7 +2063,10 @@ fn write_region_records(
                 None => changed |= region.clear(*pos, timestamp)?,
             }
         }
-        if changed {
+        // A clear retried after a failed sync changes nothing: the header in
+        // memory has the chunk gone already, but only a sync puts it on the
+        // disk.
+        if changed || region.has_staged_changes() {
             region.sync()?;
         }
     }
