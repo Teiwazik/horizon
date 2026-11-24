@@ -757,6 +757,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.dropped.is_empty() {
+            return;
+        }
         let live = self.dropped.iter().map(|item| {
             let (p, q) = (item.previous, item.position);
             let at = [
@@ -780,6 +783,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.pickups.live.is_empty() {
+            return;
+        }
         // ItemPickupParticle: the render state extracted at partial tick 1.
         let taken = self.pickups.live.iter().filter_map(|p| match &p.taken {
             super::pickups::Taken::Item(item) => Some(ItemEntityDraw {
@@ -889,7 +895,7 @@ impl Game<'_> {
             let culling = entity.then(|| {
                 // The posed envelope walks every model point in every copy;
                 // with culling off the decision is `Bypass` whatever it holds.
-                if self.settings.horizon.entity_culling == EntityCullingMode::Off {
+                if self.entity_culling_mode() == EntityCullingMode::Off {
                     return EntityCullDecision::Bypass;
                 }
                 state

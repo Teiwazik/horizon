@@ -75,7 +75,9 @@ pub fn sound_source(event: &str) -> usize {
     } else if e.starts_with("block.note_block.") {
         // NoteBlock.triggerEvent plays every instrument on RECORDS.
         index("record")
-    } else if e.starts_with("block.") {
+    } else if e.starts_with("block.") || e == "entity.generic.explode" {
+        // Block interactions (fence gates, redstone, etc.) and ServerExplosion's GENERIC_EXPLODE
+        // play on SoundSource.BLOCKS.
         index("block")
     } else if e.starts_with("ambient.") {
         index("ambient")
@@ -424,6 +426,8 @@ impl Settings {
         // Horizon's own key bindings live in horizon-extras.txt, not in options.txt.
         let emote = settings.extras.emote_key.clone();
         settings.keys.set("key.emote", &emote);
+        let fullbright = settings.extras.fullbright_key.clone();
+        settings.keys.set("key.fullbright", &fullbright);
         // The loaded set is the active one: `keybind` text components show its keys.
         settings.keys.sync_action_bindings();
         // `Options.load`: `sharePresence` decides what the friends service posts.
@@ -736,6 +740,8 @@ impl Settings {
         };
         // Horizon's own bindings aren't in options.txt.
         next.keys.set("key.emote", self.keys.get("key.emote"));
+        next.keys
+            .set("key.fullbright", self.keys.get("key.fullbright"));
         Ok(next)
     }
     /// The `options.txt` text (Options.save).
@@ -753,6 +759,7 @@ impl Settings {
             crate::gamepad::store::keep(&self.controller);
             let mut extras = self.extras.clone();
             extras.emote_key = self.keys.get("key.emote").to_owned();
+            extras.fullbright_key = self.keys.get("key.fullbright").to_owned();
             extras.save(dir);
             horizon_hooks::settings::engine::save_own(dir, &[crate::extras::FILE]);
             self.mods.save(&crate::logging::shared_dir(dir));
@@ -1365,5 +1372,39 @@ mod tests {
         assert_eq!(loaded.horizon.api, GraphicsApi::Vulkan);
         assert_eq!(loaded.startup_api, GraphicsApi::Vulkan);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocks_category_covers_explosions_fence_gates_and_redstone() {
+        let blocks = super::SOUND_SOURCES
+            .iter()
+            .position(|&name| name == "block")
+            .unwrap();
+        for event in [
+            "entity.generic.explode",
+            "minecraft:entity.generic.explode",
+            "block.fence_gate.open",
+            "minecraft:block.fence_gate.close",
+            "block.cherry_wood_fence_gate.open",
+            "block.lever.click",
+            "block.stone_button.click_on",
+            "block.comparator.click",
+            "block.piston.extend",
+            "block.redstone_torch.burnout",
+        ] {
+            assert_eq!(sound_source(event), blocks, "{event}");
+        }
+        // Explicit Blocks source keeps custom event IDs on the Blocks slider.
+        let mut audio = crate::audio::Audio::silent(
+            &horizon_assets::resource_source::ResourceSource::directory(
+                Path::new("/nonexistent/sp39-audio").to_path_buf(),
+            ),
+        );
+        audio.capture = Some(Vec::new());
+        audio.play_on(blocks, "gates:custom.open", Some([1.0; 3]), 1.0, 1.0);
+        assert_eq!(
+            audio.capture.as_ref().unwrap().first().map(|s| s.source),
+            Some(blocks)
+        );
     }
 }

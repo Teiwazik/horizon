@@ -21,6 +21,17 @@ pub trait DrawClientHost {
     /// @API:model_layers@.
     #[access(ClientSetup)]
     fn bake_layer(&self, layer: &str) -> Option<ModelPart>;
+    /// Side: client.
+    /// The local player's first-person arm appearance: `(sprite, slim)`.
+    /// Pass `sprite` directly to [`BlockEntityDrawContext::model_part`]; use
+    /// `minecraft:player_slim#main` when `slim` is true, `minecraft:player#main`
+    /// otherwise. Both hands use the same appearance.
+    /// The sprite falls back to Steve when the player's skin is not in the atlas;
+    /// that fallback does not change the arm width. `None` with no local player
+    /// or if neither sprite is available. Read it when drawing, since a skin
+    /// download or resource reload can change the answer.
+    #[access(ClientSetup)]
+    fn local_player_arm_skin(&self) -> Option<(&str, bool)>;
 }
 /// What the HUD, screen and tooltip hooks draw with, in GUI pixels: one per hook call.
 pub trait DrawContext {
@@ -132,6 +143,19 @@ pub trait DrawContext {
     ) -> Result<(), SceneError> {
         Err(SceneError::Unavailable)
     }
+    /// Draw a [`Scene`] with additional textured faces in its own coordinates. They
+    /// use the scene's projection, scissor and depth along with its blocks, entities
+    /// and particles, and do not need or change its clock. Invalid faces refuse the
+    /// whole draw before it changes the scene's state.
+    fn draw_scene_with_quads(
+        &mut self,
+        rect: [f32; 4],
+        scene: &Scene,
+        view: SceneView,
+        quads: &[SceneTexturedQuad],
+    ) -> Result<(), SceneWithQuadsError> {
+        Err(SceneWithQuadsError::Scene(SceneError::Unavailable))
+    }
     /// `GuiGraphics.enableScissor`: what this hook call draws from now on, until the matching
     /// [`pop_clip`](Self::pop_clip), is cut to `rect` (`[x, y, w, h]` in GUI pixels, as
     /// [`fill`](Self::fill) takes it), the visible part of a sprite, glyph or item kept.
@@ -170,6 +194,14 @@ pub trait DrawContext {
     /// texture (`gui/menu_background`). API @API:screen_transparent_background@.
     fn draw_menu_background(&mut self, rect: [f32; 4], in_world: bool) {
         unimplemented!("DrawContext::draw_menu_background")
+    }
+    /// `GuiGraphics.blurBeforeThisStratum` (`Screen.extractBlurredBackground`): what this frame's
+    /// GUI drew before the call, with the panorama or world under it, is blurred by the player's
+    /// menu background blur (`menuBackgroundBlurriness`; nothing at 0), and what is drawn after stays
+    /// sharp: a mod's modal over its own page or screen. One boundary a frame, the last call's.
+    /// API @API:screen_transparent_background@.
+    fn blur_behind(&mut self) {
+        unimplemented!("DrawContext::blur_behind")
     }
     /// Repeats sprite `sprite` across `rect` (`[x, y, w, h]` in GUI pixels) with each tile
     /// sized `size` GUI pixels square, tinted by `argb`. False when the sprite is not in the HUD atlas.
@@ -464,6 +496,20 @@ pub trait WorldDrawContext {
     /// Submit unlit, alpha-blended world quads atomically, using the white atlas texel.
     fn quads(&mut self, quads: &[WorldQuad]) -> Result<(), DrawError> {
         unimplemented!("WorldDrawContext::world_draw_quads")
+    }
+    /// Submit a beacon's beam atomically, textured and scrolling as a beacon's at this view's
+    /// game time, alpha-blended without writing depth. A taller beam than 2048 blocks is cut
+    /// there. Its quads count against the same per-view capacity as [`quads`](Self::quads).
+    fn beam(&mut self, beam: &WorldBeam) -> Result<(), DrawError> {
+        unimplemented!("WorldDrawContext::world_draw_beam")
+    }
+    /// Submit a line of text atomically, facing the camera as a name tag does, in the game's
+    /// font, alpha-blended without writing depth. Its glyph and background quads count against
+    /// the same per-view capacity as [`quads`](Self::quads). A scale that is not finite is
+    /// refused with [`DrawError::NonFinite`], one that is zero or negative with
+    /// [`DrawError::InvalidWidth`].
+    fn text(&mut self, text: &WorldText) -> Result<(), DrawError> {
+        unimplemented!("WorldDrawContext::world_draw_text")
     }
     /// Submit world quads drawn by the mod pipeline `pipeline`, atomically: its shader gets each
     /// quad's texture coordinate and colour, and its blend and depth modes apply. The quads

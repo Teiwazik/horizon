@@ -193,6 +193,11 @@ pub(super) trait Entity: EntityRules {
     fn ticks_after_projectiles(&self) -> bool {
         false
     }
+    /// Whether one that joined since the last spawn packets ticks in the late
+    /// ordered pass, after them (primed TNT and falling blocks; orbs do not).
+    fn waits_for_spawn_packet(&self) -> bool {
+        false
+    }
     /// `Entity.push` with the explosion's knockback.
     fn push_from_explosion(&mut self, push: Vec3) {
         let v = self.velocity_mut();
@@ -418,7 +423,7 @@ impl RenderEntityBounds for ArmorStand {
         // 0.5 x 1.975 collision box (especially raised arms and head banners).
         // This axis-aligned envelope contains every vanilla pose while staying
         // independent of the stand's yaw and partial-tick rotation.
-        let scale = if self.small { 0.5 } else { 1.0 };
+        let scale = if self.small { 0.5 } else { 1.0 } * f64::from(self.scale);
         let equipped = self.equipment.iter().any(Option::is_some);
         let horizontal = if equipped { 2.0 } else { 1.5 * scale };
         let lower = if equipped { -1.0 } else { -0.5 * scale };
@@ -2259,6 +2264,9 @@ impl Entity for PrimedTnt {
     fn ticks_after_projectiles(&self) -> bool {
         true
     }
+    fn waits_for_spawn_packet(&self) -> bool {
+        true
+    }
     fn native_type(&self) -> Cow<'static, str> {
         "minecraft:tnt".into()
     }
@@ -2351,6 +2359,9 @@ impl Entity for FallingBlock {
         self.on_ground = on_ground;
     }
     fn ticks_after_projectiles(&self) -> bool {
+        true
+    }
+    fn waits_for_spawn_packet(&self) -> bool {
         true
     }
     fn native_type(&self) -> Cow<'static, str> {

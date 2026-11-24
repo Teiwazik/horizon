@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::remote_vehicles::PickKind;
 
 impl Game<'_> {
     /// `Minecraft.startUseItem`'s entity turn for `hand`: Interact goes to
@@ -10,12 +11,14 @@ impl Game<'_> {
             r.use_target = None;
         }
         let sneaking = self.remote_shift_down();
-        // A non-mob object nearer than any mob: the server uses it
+        // The crosshair's entity, of any kind, as for an attack.
+        let Some(pick) = self.crosshair_entity(false) else {
+            return false;
+        };
+        // A boat, minecart, item frame, armor stand or painting: the server uses it
         // (AbstractBoat.interact boards it).
-        if let Some(hit) = self.remote_object_hit(false)
-            && self.mob_hit().is_none_or(|(_, d, _)| hit.distance < d)
-            && self.before_block(hit.distance)
-        {
+        if pick.kind == PickKind::Object {
+            let hit = pick.object_hit();
             // Interaction.interact answers SUCCESS when it responds and
             // CONSUME otherwise: both end the click (nothing behind the box
             // is used), but only SUCCESS swings; the packet carries the hand.
@@ -25,21 +28,12 @@ impl Game<'_> {
             // leave each hand's turn to its item: a crossbow aimed at it shoots.
             let is_painting = self.paintings.iter().any(|p| p.id as i32 == hit.id);
             let is_tnt = self.tnts.iter().any(|t| t.id as i32 == hit.id);
-            if is_tnt
-                && self
-                    .redirectable_hit()
-                    .is_some_and(|(_, d)| d <= hit.distance)
-            {
-                return false;
-            }
             let held = self.with_hand(hand, |g| g.held().cloned());
             let frame_passes = self
                 .item_frames
                 .iter()
                 .find(|f| f.id as i32 == hit.id)
-                .is_some_and(|f| {
-                    item_frame_interact_passes(f.fixed, f.item.is_some(), held.is_some())
-                });
+                .map(|f| item_frame_interact_passes(f.fixed, f.item.is_some(), held.is_some()));
             let boat_passes = self
                 .boats
                 .iter()
@@ -79,20 +73,15 @@ impl Game<'_> {
                         .any(|m| m.extra.mount.is_some_and(|r| r as i32 == hit.id)));
             let passes = is_painting
                 || is_tnt
-                || frame_passes
+                || frame_passes.unwrap_or(false)
                 || boat_passes
                 || cart_passes
                 || cushion_passes;
-            // Otherwise the main hand's turn takes it; there is no off hand turn.
-            if response.is_none() && hand == Hand::Off && !passes {
+            // An empty frame can pass on the main hand and accept the off-hand item.
+            if response.is_none() && frame_passes.is_none() && hand == Hand::Off && !passes {
                 return false;
             }
-            self.send(S::Interact(play::Interact {
-                id: hit.id,
-                hand: hand_id(hand),
-                location: hit.location,
-                secondary: sneaking,
-            }));
+            self.send_interact(&pick, hand_id(hand), sneaking);
             if let Some(done) = self.entity_interaction(hand, hit.id) {
                 return done;
             }
@@ -123,16 +112,9 @@ impl Game<'_> {
             }
             return true;
         }
-        if let Some((i, distance, location)) = self.mob_hit()
-            && self.before_block(distance)
-        {
-            let id = self.mobs[i].id as i32;
-            self.send(S::Interact(play::Interact {
-                id,
-                hand: hand_id(hand),
-                location,
-                secondary: sneaking,
-            }));
+        if let PickKind::Mob(i) = pick.kind {
+            let id = pick.id;
+            self.send_interact(&pick, hand_id(hand), sneaking);
             if let Some(done) = self.entity_interaction(hand, id) {
                 return done;
             }
@@ -153,12 +135,18 @@ impl Game<'_> {
             }
             if !player
                 && self.with_hand(hand, |g| {
-                    g.item_interact_mob(Some(crate::game::InteractTarget { id, location }))
+                    g.item_interact_mob(Some(crate::game::InteractTarget {
+                        id,
+                        location: pick.location,
+                    }))
                 })
             {
                 return true;
             }
+            return false;
         }
+        // Any other pickable entity: `Entity.interact` passes, so the item is used after it.
+        self.send_interact(&pick, hand_id(hand), sneaking);
         false
     }
     /// MultiPlayerGameMode.useItemOn for `hand`: whether the click ends there
