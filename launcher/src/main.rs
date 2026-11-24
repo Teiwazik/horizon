@@ -250,6 +250,19 @@ enum Load<T> {
 }
 
 const LOG_LINES: usize = 2000;
+/// A game folder and the graphics API notice it is due.
+type ApiNoticeOf = (std::path::PathBuf, Option<backend::api_fallback::Notice>);
+
+enum InstallSource {
+    Instance,
+    Manual(instances::ManualInstallTarget),
+    Update,
+}
+
+struct QueuedInstall {
+    release: Release,
+    source: InstallSource,
+}
 
 struct Launcher {
     theme: Theme,
@@ -296,8 +309,8 @@ struct Launcher {
     instance_install: Option<String>,
     /// The displayed instance when a manual install started.
     manual_install_for: Option<instances::ManualInstallTarget>,
-    /// Downloads requested by instance saves, ordered by when they were queued.
-    install_queue: VecDeque<Release>,
+    /// Pending downloads retain the reason and instance that requested them.
+    install_queue: VecDeque<QueuedInstall>,
     /// The Stable build Home's Update is installing (`nightly::install_stable`).
     stable_install: Option<Release>,
     /// A Stable build whose download failed: not offered again until the release list is read
@@ -461,6 +474,12 @@ struct Launcher {
     client_started: Option<std::time::SystemTime>,
     /// The folder the running game keeps its settings in: the game home, or a modpack's.
     client_home: Option<std::path::PathBuf>,
+    /// The Horizon version the last game was started as, for the record of a graphics API
+    /// switched after its start crash (`backend::api_fallback`).
+    client_build: Option<String>,
+    /// A game folder's graphics API notice, read once (`Self::api_notice`); emptied when a game
+    /// ends or the player answers.
+    api_notice: std::cell::RefCell<Option<ApiNoticeOf>>,
     crash: Option<Crash>,
     /// The Servers page (`servers_page.rs`).
     servers: servers_page::Servers,

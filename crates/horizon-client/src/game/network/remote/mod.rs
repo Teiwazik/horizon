@@ -258,7 +258,11 @@ pub(super) struct Tracked {
 /// listed got off. Every tracked entity counts, whatever its type, so a
 /// server's item display or marker on a player hides that player's name tag
 /// as vanilla's `isVehicle` does (#5666).
+///
+/// The list is the server's and may be long: it is looked up as a set built
+/// once, not scanned once per entity.
 fn seat_passengers(entities: &mut HashMap<i32, Tracked>, vehicle: u32, passengers: &[i32]) {
+    let passengers = passenger_set(passengers);
     for (id, t) in entities.iter_mut() {
         if passengers.contains(id) {
             t.vehicle = Some(vehicle);
@@ -266,6 +270,11 @@ fn seat_passengers(entities: &mut HashMap<i32, Tracked>, vehicle: u32, passenger
             t.vehicle = None;
         }
     }
+}
+/// The entity ids of a `SetPassengers` list, to look each entity up once
+/// (`handleSetEntityPassengersPacket` does one lookup per listed id).
+pub(super) fn passenger_set(passengers: &[i32]) -> std::collections::HashSet<i32> {
+    passengers.iter().copied().collect()
 }
 /// Smooth an entity toward a new position over three ticks (InterpolationHandler).
 #[derive(Clone, Copy)]
@@ -723,6 +732,10 @@ pub(super) struct Remote {
     pub(super) own_stingers: i32,
     /// `Player.DATA_SHOULDER_PARROT_LEFT` and `_RIGHT` of the own player.
     pub(super) own_shoulders: [Option<i32>; 2],
+    /// `Entity.DATA_POSE` of the own player as the server last sent it (a pose a plugin
+    /// shows only this viewer included), with the local pose it arrived over: the third-person
+    /// body draws it until the local pose changes.
+    pub(super) own_pose: Option<(crate::pose::Pose, crate::pose::Pose)>,
     /// The local player's profile UUID (always in the level).
     pub(super) profile: u128,
     /// The local player's profile name: its score holder and team member.
@@ -769,7 +782,7 @@ pub(super) struct Remote {
     overworld_clock: Option<i32>,
     clock_game_time: i64,
     /// `ClientChunkCache.Storage`'s view centre (ClientboundSetChunkCacheCenterPacket).
-    chunk_center: (i32, i32),
+    pub(in crate::game) chunk_center: (i32, i32),
     /// Received events a frame left for the next one, in order, with each
     /// item's arrival time so `BACKLOG_LIMIT` tracks the front item's age
     /// instead of staying overdue for an entire continuous chunk stream.
@@ -2452,6 +2465,9 @@ mod interaction_event_tests;
 mod native_entity_tests;
 
 #[cfg(test)]
+mod dimension_transition_tests;
+
+#[cfg(test)]
 mod effect_blend_tests;
 #[cfg(test)]
 mod level_sound_tests;
@@ -2459,7 +2475,10 @@ mod level_sound_tests;
 #[cfg(test)]
 mod attachment_query_tests;
 #[cfg(test)]
+mod item_menu_screen_tests;
+#[cfg(test)]
 mod passage_cross_tests;
+
 #[cfg(test)]
 pub(crate) mod tests;
 

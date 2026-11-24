@@ -55,12 +55,14 @@ mod raw_inbox;
 mod selector_sync;
 mod spawn_info;
 pub(super) mod terrain;
+mod view_center;
 use advancements::AdvancementOwners;
 use chat::yellow_names;
 pub use pending_move::{
     Accepted, Hearing, MOVE_PACKET_BUDGET, MOVE_PACKET_QUEUE, MovePacket, PendingMove,
 };
 use raw_inbox::{DeferredPayload, PacketDrain, yield_raw};
+pub use view_center::ViewCenterRefusal;
 pub mod game_event {
     pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 0;
     pub const START_RAINING: u8 = 1;
@@ -179,6 +181,12 @@ pub enum HostEvent {
     /// A guest left (state to save, entities to drop).
     Left(Box<Guest>),
     Packet(u32, Box<S>),
+    /// `handleClientTickEnd`'s movement reset, queued behind the packets that came
+    /// before it: a `MoveVehicle` the game dispatches after the drain sets the rider's
+    /// known movement first, and the reset keeps it for that tick (vanilla runs both
+    /// handlers in packet order on the main thread). The position flag and the
+    /// anticheat's tick end stay in the hub's drain, where no queued move bears on them.
+    TickEnd(u32),
     /// A guest sent new client information: the values before and after, for the mods.
     ClientInformation(
         u32,
@@ -1114,7 +1122,8 @@ impl Hub {
         self.guests
             .simulation_iter()
             .filter(move |g| self.watches(g) && loads(g))
-            .map(Guest::chunk)
+            // A mod's view centre loads as the player's chunk does; the player's own stays loaded.
+            .flat_map(|g| std::iter::once(g.chunk()).chain(g.view_center))
     }
     /// `PlayerList.broadcastAll(packet, dimension)`: the players in the level in place.
     pub fn broadcast_level(&self, packet: &C) {
@@ -1713,9 +1722,10 @@ impl Hub {
             });
         }
         self.send_level_info(i, ctx, true);
-        // ServerLevel.addNewPlayer: the chunk tracking starts at the player.
+        // ServerLevel.addNewPlayer: the chunk tracking starts at the player (or a mod's view
+        // centre, kept through a placement in the same level).
         self.guests.update(i, |g| {
-            let (cx, cz) = g.chunk();
+            let (cx, cz) = g.view_chunk();
             g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
                 x: cx,
                 z: cz,
@@ -1768,7 +1778,7 @@ impl Hub {
         }
         let recentered = self.guests[i]
             .center
-            .is_some_and(|c| c != self.guests[i].chunk());
+            .is_some_and(|c| c != self.guests[i].view_chunk());
         if recentered {
             self.update_view(i, self.chunk_watches.recording());
         }
@@ -2912,8 +2922,8 @@ impl Hub {
         let mut batches = Vec::new();
         for i in 0..self.guests.len() {
             if self.watches(&self.guests[i]) {
-                let moved =
-                    self.terrain.is_some() && self.guests[i].center != Some(self.guests[i].chunk());
+                let moved = self.terrain.is_some()
+                    && self.guests[i].center != Some(self.guests[i].view_chunk());
                 self.update_view(i, watching);
                 if moved || self.terrain.is_some() && self.ticks <= self.guests[i].placed_at + 1 {
                     self.warm_first_terrain(i, world, ctx.streaming);
@@ -3096,7 +3106,7 @@ impl Hub {
     /// the view forgotten and the ones that entered it queued, closest first;
     /// past the view, the far ring's.
     fn update_view(&mut self, i: usize, watching: bool) {
-        let (cx, cz) = self.guests[i].chunk();
+        let (cx, cz) = self.guests[i].view_chunk();
         let r = self.guests[i].view_distance;
         let reach = self.reach(&self.guests[i]);
         if self.guests[i].center != Some((cx, cz))
@@ -4444,12 +4454,17 @@ impl Hub {
                 }
                 S::ClientTickEnd(_) => {
                     // handleClientTickEnd: no move this tick, no known movement.
+                    // A rider's move came with its vehicle's packet, not its own.
+                    // The movement reset is queued behind the packets already handed
+                    // to the game: a MoveVehicle of this drain sets the movement when
+                    // the game dispatches it, and the reset must keep that move for the
+                    // tick, not zero it before the move runs (vanilla's main thread
+                    // handles the two in packet order). The position flag and the
+                    // anticheat tick end have no queued move to wait for.
                     self.guests.update(i, |g| {
-                        if !g.position_this_tick {
-                            g.known_movement = [0.0; 3];
-                        }
                         g.position_this_tick = false;
                     });
+                    events.push(HostEvent::TickEnd(conn));
                     self.anticheat_tick_end(i, events);
                 }
                 // ServerGamePacketListenerImpl.handleRecipeBookSeenRecipePacket:
@@ -4659,6 +4674,23 @@ impl Hub {
         false
     }
 
+    /// `handleClientTickEnd`'s movement reset (`ServerGamePacketListenerImpl.java:2256`),
+    /// applied by the game when it reaches the queued [`HostEvent::TickEnd`]: after the
+    /// `MoveVehicle` packets queued before it, so a rider's move of the tick is kept and
+    /// only a tick with no move of either zeroes the known movement. A guest that left
+    /// mid-drain has nothing to reset.
+    pub fn client_tick_end(&mut self, conn: u32) {
+        let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
+            return;
+        };
+        self.guests.update(i, |g| {
+            if !g.movement_this_tick {
+                g.known_movement = [0.0; 3];
+            }
+            g.movement_this_tick = false;
+        });
+    }
+
     /// ServerGamePacketListenerImpl.handleMovePlayer.
     fn move_player(
         &mut self,
@@ -4817,14 +4849,16 @@ impl Hub {
         // The anticheat's `ground`: a claim of the ground with nothing to
         // stand on is dropped (no-fall, walking on water).
         let client_on_ground = flags & 1 != 0;
-        let (mut flags, mut corrected) = (flags, false);
+        let (mut flags, mut corrected, mut again) = (flags, false, false);
         if flags & 1 != 0 && self.anticheat.is_some() {
+            use super::anticheat::GroundRefusal;
             match self.anticheat_ground(i, to, stands, ctx, events) {
-                Some(true) => {
+                Some(GroundRefusal::Kicked) => {
                     self.guests.update(i, |g| (g.yaw, g.pitch) = (yaw, pitch));
                     return;
                 }
-                Some(false) => (flags, corrected) = (flags & !1, true),
+                Some(GroundRefusal::Dropped) => (flags, corrected) = (flags & !1, true),
+                Some(GroundRefusal::Again) => (flags, again) = (flags & !1, true),
                 None => {}
             }
         }
@@ -4833,6 +4867,7 @@ impl Hub {
         // that lets the player hover (the server's allow-flight, mayfly,
         // levitation, gliding, riptide). A move whose ground claim the anticheat dropped never counts:
         // a false claim ends in the anticheat's own kick, logged and told to the operators, or not at all.
+        // One it dropped again without a flag (standing still where one was dropped) counts.
         let floating = !corrected && ctx.collision.is_some() && {
             let g = &self.guests[i];
             to[1] - g.position[1] >= -0.03125
@@ -4851,7 +4886,7 @@ impl Hub {
         // handlePlayerPositionChange: a client that says it is on the ground while the last move
         // the server resolved came down onto nothing is sent the blocks under it again, so a
         // client that missed a block change cannot stand on air for good.
-        if flags & 1 != 0 && !self.guests[i].rests_on_ground {
+        if (flags & 1 != 0 || again) && !self.guests[i].rests_on_ground {
             self.force_send_player_support_blocks(i, ctx);
         }
         let accepted = Accepted {
@@ -5341,8 +5376,10 @@ impl Hub {
         });
         self.send_level_info(i, ctx, true);
         self.send_permission_level(i);
-        // ServerLevel.addRespawnedPlayer: the chunk tracking starts again at the player.
+        // ServerLevel.addRespawnedPlayer: the chunk tracking starts again at the player; a mod's
+        // view centre ends with the player it was set for.
         self.guests.update(i, |g| {
+            g.view_center = None;
             let (cx, cz) = g.chunk();
             g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
                 x: cx,
@@ -5427,6 +5464,8 @@ impl Hub {
             // The load timer is not restarted: vanilla resets the client's loaded state on death and
             // respawn only, and covers a level change with its separate `isChangingDimension` term.
             g.center = None;
+            // A mod's view centre named a chunk of the level left.
+            g.view_center = None;
             g.yaw = yaw;
             if let Some(pitch) = pitch {
                 g.pitch = pitch;

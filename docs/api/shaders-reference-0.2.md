@@ -26,7 +26,9 @@ the frame stores gamma (`[frame] blend`, below).
 - **`[[lights]]` and `[[particle_lights]]` colours** are written in vanilla's gamma, and Horizon decodes
   them: `block_light_color` and `colored_light` are linear. `block_light_colors` holds them as written; read it through
   `block_light_color`.
-- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored.
+- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored, but for one with
+  an `output`: its target keeps the alpha, so a pack can keep data there (a target of the pack's own is
+  `rgba16float`; a kept texture keeps the channels its format has, none of them alpha in `r32float`).
 
 ## Room to grow
 
@@ -374,6 +376,15 @@ A `[[post]]` entry with `output = "<name>"` writes a target of the pack's own, a
 world's size (1, 0.5 or 0.25), instead of the next pass's `previous`; the prelude of every pass declares
 `var <name>: texture_2d<f32>` (group 3 from binding 32), which holds last frame's until written again (a
 pass reads a blank one in place of the target it writes).
+
+With `post_opaque = true` at the manifest root, raster and compute `[[post]]` passes may also read:
+
+- `opaque_depth` (binding 8), a `texture_depth_2d`: reversed depth before translucent terrain.
+- `opaque_color` (binding 15), a `texture_2d<f32>`: the sky and opaque scene at the same point, in linear light.
+
+Both are at the world's render size. Use the pass's UV and the texture's dimensions when the pass runs
+at a different size. The engine captures them only when a stage reads them. `scene_color` and
+`scene_depth` still contain the scene after translucency.
 
 ### Ray tracing
 

@@ -209,6 +209,8 @@ impl Launcher {
             client_error: None,
             client_started: None,
             client_home: None,
+            client_build: None,
+            api_notice: Default::default(),
             crash: None,
             servers: servers_page::Servers::new(),
             internet: internet::Internet::new(),
@@ -617,8 +619,7 @@ impl Launcher {
         {
             return;
         }
-        self.update_install = Some(release.tag.clone());
-        self.start_install(&release, None);
+        self.queue_install(release, InstallSource::Update);
     }
 
     /// What installed native build `version` was made from (`native_status::Build`), read once.

@@ -112,19 +112,20 @@ impl Game<'_> {
             self.mob_equip_event(id, [pos.x, pos.y, pos.z], true);
             return true;
         }
-        // Equippable.canBeSheared: shears take the harness off again.
+        // Entity.interact: shears take the harness off again
+        // (`Equippable.canBeSheared`), not from a ridden ghast
+        // (`canShearEquipment`) nor by a sneaking player.
         if item == "minecraft:shears"
-            && harnessed
             && !sneaking
-            && let Some(harness) = self.mobs[index].take_body_equipment()
+            && self.mount_passenger_count(m.id) == 0
+            && let Some(harness) = m.extra.body_stack()
+            && !self.kept_on(harness)
         {
-            self.audio
-                .play("minecraft:entity.happy_ghast.unequip", Some(at), 1.0, 1.0);
-            self.spawn_item(harness, at, [0.0, 0.2, 0.0], 10);
-            self.damage_held_tool();
-            let id = self.mobs[index].id;
-            let pos = self.mobs[index].position;
-            self.mob_equip_event(id, [pos.x, pos.y, pos.z], false);
+            self.shear_equipment(
+                index,
+                horizon_items::equipment::BODY,
+                "minecraft:entity.happy_ghast.unequip",
+            );
             return true;
         }
         if harnessed && !sneaking {
@@ -191,7 +192,7 @@ impl Game<'_> {
             Some("west") => 90.0,
             _ => 0.0,
         };
-        if let Some(id) = self.spawn_mob_raw("minecraft:happy_ghast", at, true)
+        if let Some(id) = self.spawn_mob_raw("minecraft:happy_ghast", at, false)
             && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
         {
             // DriedGhastBlock.spawnGhastling sets the baby age before
@@ -210,6 +211,33 @@ impl Game<'_> {
                 .in_source(SoundSource::Blocks);
             self.play_bound_sound(sound, id, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod ghastling_hatch_tests {
+    #[test]
+    #[ignore = "daily"]
+    fn hatched_ghastling_spawns_non_persistent() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let dried = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:dried_ghast")
+                .expect("minecraft:dried_ghast state");
+            game.spawn_ghastling([4, 64, 4], dried);
+            let hatched = game
+                .mobs
+                .iter()
+                .find(|m| m.kind.id == "minecraft:happy_ghast")
+                .expect("hatched ghastling should spawn");
+            assert!(
+                !hatched.persistent,
+                "DriedGhastBlock.spawnGhastling must not mark hatched ghastlings persistent"
+            );
+            assert!(hatched.is_baby(), "hatched ghastling should start as a baby");
+        });
     }
 }
 
