@@ -17,6 +17,7 @@ horizon-client game::allay_jukebox_source_tests::control_an_allay_out_of_reach_s
 horizon-client game::allay_jukebox_source_tests::control_data_merge_keeps_the_dance_and_its_jukebox lib daily resources
 horizon-client game::allay_jukebox_source_tests::stopping_the_first_jukebox_stops_the_dance_until_the_other_plays_again lib daily resources
 horizon-client game::allay_pickup_cooldown_tests::an_allay_keeps_its_item_pickup_cooldown_memory lib daily resources
+horizon-client game::allay_pickup_cooldown_tests::an_allay_picks_up_wanted_item_in_reach_without_line_of_sight lib daily resources
 horizon-client game::allay_pickup_cooldown_tests::pickup_cooldown_saves_the_full_integer_value lib daily resources
 horizon-client game::allay_pickup_cooldown_tests::the_saved_pickup_cooldown_follows_the_model lib daily resources
 horizon-client game::api_values::small_values::recipe_tests::recipe_json_text_fields lib daily resources
@@ -1819,6 +1820,7 @@ horizon-client game::native_makes_piglins_neutral_tests::without_parts_a_calm_pi
 horizon-client game::native_makes_piglins_neutral_tests::without_parts_the_piglin_safe_armor_tag_decides lib daily resources
 horizon-client game::native_menu_refs::tests::a_server_closes_a_guests_menu_and_sets_their_selected_slot lib daily resources
 horizon-client game::native_menu_refs::tests::a_stack_is_thrown_from_the_eyes_as_player_drop_does lib daily resources
+horizon-client game::native_menu_refs::tests::container_screen_reports_live_hover_and_capacity_in_menu_order lib daily resources
 horizon-client game::native_menu_refs::tests::inventory_boxes_follow_menu_indices_and_the_input_layout lib daily resources
 horizon-client game::native_menu_refs::tests::menus_read_storage_and_invalidate_on_replacement_wrap_and_reconnect lib daily resources
 horizon-client game::native_menus::tests::a_menu_opened_in_place_sends_no_close_returns_the_cursor_and_ignores_the_old_window lib daily resources
@@ -2193,6 +2195,7 @@ horizon-client game::persist::trader_llama_discard_tests::a_trader_llama_leaves_
 horizon-client game::perspective::preview_tests::player_render_transform_uses_vanilla_avatar_scale lib daily resources
 horizon-client game::piglin_admire_tests::piglin_admire_hit_keeps_baby_gold_and_cancels_adult_barter lib daily resources
 horizon-client game::piglin_admire_tests::piglin_admire_preserves_components_on_death_and_finish lib daily resources
+horizon-client game::piglin_admire_tests::piglin_picks_up_wanted_item_in_reach_without_line_of_sight lib daily resources
 horizon-client game::piglins::tests::a_throw_swings_the_off_hand_once lib daily resources
 horizon-client game::piston_carry::tests::a_restored_carried_chest_lands_with_world_item_stacks lib daily resources
 horizon-client game::piston_carry::tests::a_save_mid_move_keeps_the_carried_block_entity_and_a_bad_key_is_left_out lib daily resources

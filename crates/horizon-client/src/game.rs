@@ -1572,6 +1572,9 @@ struct Game<'a> {
     dragon_model: Option<horizon_client::mobs::Part>,
     /// Map textures waiting for the next HUD batch to upload them.
     map_patches: Vec<horizon_client::font::Patch>,
+    /// Client mods' dynamic textures (`native_dynamic_textures`): their places in the GUI atlas's
+    /// page and their last pixels, kept through resource reloads.
+    dynamic_textures: horizon_client::hud::dynamic_textures::DynamicTextures,
     name_tag_layouts: names::NameTagLayouts,
     text_displays: std::collections::HashMap<i32, text_displays::RemoteTextDisplay>,
     interactions: std::collections::HashMap<i32, interactions::RemoteInteraction>,
@@ -9044,6 +9047,9 @@ impl Game<'_> {
         // geometry (game/blocks/maps/mod.rs, world text) upload with this batch; draining
         // map_patches any earlier leaves them a frame behind.
         hud.patches.append(&mut self.map_patches);
+        // Client mods' dynamic textures created, updated or lost by a rebuilt atlas texture.
+        self.dynamic_textures
+            .patches(&mut self.gui.atlas, &mut hud.patches);
         hud.patches.append(self.text_patches.get_mut());
         let entity_spans = std::mem::take(self.entity_spans.get_mut());
         let entity_motion = std::mem::take(self.entity_motion.get_mut());
@@ -9733,6 +9739,12 @@ impl Game<'_> {
                     pressed: *state == ElementState::Pressed,
                 });
             }
+            if let Some(post) = &mouse_post
+                && self.container_mouse_input_pre(post)
+            {
+                mouse_post = None;
+                return Ok(());
+            }
             self.key_focus_mouse_press(&event);
             match event {
                 WindowEvent::CloseRequested => {
@@ -9811,7 +9823,12 @@ impl Game<'_> {
                         }
                         match self.screen_mouse_dragged(previous) {
                             native_hooks::ScreenMousePre::Canceled => return Ok(()),
-                            native_hooks::ScreenMousePre::Passed(post) => mouse_post = Some(post),
+                            native_hooks::ScreenMousePre::Passed(post) => {
+                                if self.container_mouse_input_pre(&post) {
+                                    return Ok(());
+                                }
+                                mouse_post = Some(post);
+                            }
                             native_hooks::ScreenMousePre::NotFired => {}
                         }
                         if self.dialog_open() {
@@ -9898,6 +9915,12 @@ impl Game<'_> {
                             scaled(raw_x),
                             scaled(raw_y),
                         ]));
+                    }
+                    if let Some(post) = &mouse_post
+                        && self.container_mouse_input_pre(post)
+                    {
+                        mouse_post = None;
+                        return Ok(());
                     }
                     // A prompt is vanilla's `Minecraft.screen`, the only one MouseHandler.onScroll
                     // tells: the top one hears the wheel, as the click arms below pick it, and
@@ -11400,6 +11423,7 @@ impl<'a> Game<'a> {
             breath_clouds: Default::default(),
             dragon_model: prepared.dragon_model,
             map_patches: Vec::new(),
+            dynamic_textures: Default::default(),
             name_tag_layouts: Default::default(),
             text_displays: Default::default(),
             interactions: Default::default(),
