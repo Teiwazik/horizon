@@ -226,15 +226,10 @@ impl Game<'_> {
         self.remote.as_ref()?.far_terrain
     }
 
-    /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
+    /// LOD Distance as far terrain uses it.
     pub(super) fn lod_distance(&self) -> u32 {
         let (distance, _) = self.far_terrain_choice();
-        match &self.renderer {
-            Some(renderer) => {
-                horizon_client::graphics::lod_distance_capped(distance, &renderer.info)
-            }
-            None => distance.min(horizon_client::lod::MAX_CHUNKS),
-        }
+        distance.min(horizon_client::lod::MAX_CHUNKS)
     }
 
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
@@ -311,8 +306,7 @@ impl Game<'_> {
     /// discarded, then every loaded section is rebuilt.
     pub(super) fn all_sections_changed(&mut self) {
         self.clear_lod();
-        self.streaming
-            .free(std::mem::take(&mut self.pending_uploads));
+        self.streaming.free(self.pending_uploads.take_all());
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.clear_sections(self.world.layout());
         }

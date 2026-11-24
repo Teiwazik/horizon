@@ -22,6 +22,30 @@ use crate::{
 /// The language key of the screen's name.
 const TITLE: &str = "Graphics";
 
+/// The language key of the Performance page's warning while the OS's energy saver is on: the
+/// system's own switch, which these settings don't set. The page says that and nothing more;
+/// whether and how much it costs frames is the system's business, not this screen's.
+const OS_ENERGY_SAVER: &str = "horizon.graphics.os_energy_saver";
+
+/// The language key of the page's warning while the OS holds the CPU below full speed for heat:
+/// that one does slow the game, and the page says so in the warning colour above its description.
+const OS_THERMAL_LIMIT: &str = "horizon.graphics.os_thermal_limit";
+
+/// What the OS reports about this machine right now, as the key of the warning the Performance page
+/// shows, or `None` while it reports nothing (`horizon_system::power`). The thermal limit wins when
+/// both are on: it is the one that costs frames.
+fn os_limit() -> Option<&'static str> {
+    let sample = horizon_system::power::sample();
+    if !sample.limited() {
+        return None;
+    }
+    Some(if sample.thermal.limited() {
+        OS_THERMAL_LIMIT
+    } else {
+        OS_ENERGY_SAVER
+    })
+}
+
 /// The screen's pages, in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -163,12 +187,6 @@ fn e(item: crate::extras::Item, cost: Cost) -> Setting {
 /// Every page's settings, in named groups of related rows.
 pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
     use Cost::*;
-    // Suggested, never switched on, where far terrain costs the GPU most.
-    let far = if crate::graphics::reduced_far_detail_suggested() {
-        "Reduced draws far terrain coarser: faster on this integrated GPU."
-    } else {
-        "Reduced draws far terrain coarser, for GPUs it slows down."
-    };
     let mut pages = vec![
         (
             Page::General,
@@ -199,9 +217,13 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         h(
                             H::LodDistance,
                             Medium,
-                            "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
+                            "Coarse distant terrain in local worlds.",
                         ),
-                        h(H::FarDetail, Medium, far),
+                        h(
+                            H::FarDetail,
+                            Medium,
+                            "Reduced draws far terrain coarser, for GPUs it slows down.",
+                        ),
                         v(
                             Opt::SimulationDistance,
                             Medium,
@@ -1421,6 +1443,10 @@ fn row(setting: Setting, s: &Settings, out: &EffectiveOutput) -> Row<Item> {
     let about = lang::get(setting.text);
     let chosen = lang::get(description(item, s, out, setting.text));
     Row {
+        agent_id: match item {
+            Item::Vanilla(opt) => opt.agent_id(),
+            _ => None,
+        },
         chosen: (chosen != about).then_some(chosen),
         ..Row::new(item, name, value)
             .about(about)
@@ -1508,7 +1534,9 @@ impl Screen for GraphicsScreen {
             self.output,
             g::translucent_batching_offered(),
             g::gpu_culling_offer(),
-            g::reduced_far_detail_suggested(),
+            // What the OS reports, not whether it reports something: a reason that changes without a
+            // moment of nothing (the saver, then the CPU's heat) has to rebuild the sheets too.
+            os_limit(),
         );
         shell::stamp_of(&(read(s), s.fullbright_held, &s.running_pack, offers))
     }
@@ -1517,7 +1545,13 @@ impl Screen for GraphicsScreen {
             id: page,
             name: lang::get(page.name()),
             about: lang::get(page.about()),
-            warning: None,
+            // What the machine is doing is no setting of this screen: when the OS itself limits
+            // the machine, the page that sells power use says what, before the player blames a
+            // switch for it.
+            warning: (page == Page::Performance)
+                .then(os_limit)
+                .flatten()
+                .map(lang::get),
             groups: groups
                 .into_iter()
                 .map(|(name, settings)| Group {

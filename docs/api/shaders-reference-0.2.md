@@ -26,7 +26,9 @@ the frame stores gamma (`[frame] blend`, below).
 - **`[[lights]]` and `[[particle_lights]]` colours** are written in vanilla's gamma, and Horizon decodes
   them: `block_light_color` and `colored_light` are linear. `block_light_colors` holds them as written; read it through
   `block_light_color`.
-- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored.
+- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored, but for one with
+  an `output`: its target keeps the alpha, so a pack can keep data there (a target of the pack's own is
+  `rgba16float`; a kept texture keeps the channels its format has, none of them alpha in `r32float`).
 
 ## Room to grow
 
@@ -361,6 +363,15 @@ A `[[post]]` entry with `output = "<name>"` writes a target of the pack's own, a
 world's size (1, 0.5 or 0.25), instead of the next pass's `previous`; the prelude of every pass declares
 `var <name>: texture_2d<f32>` (group 3 from binding 32), which holds last frame's until written again (a
 pass reads a blank one in place of the target it writes).
+
+With `post_opaque = true` at the manifest root, raster and compute `[[post]]` passes may also read:
+
+- `opaque_depth` (binding 8), a `texture_depth_2d`: reversed depth before translucent terrain.
+- `opaque_color` (binding 15), a `texture_2d<f32>`: the sky and opaque scene at the same point, in linear light.
+
+Both are at the world's render size. Use the pass's UV and the texture's dimensions when the pass runs
+at a different size. The engine captures them only when a stage reads them. `scene_color` and
+`scene_depth` still contain the scene after translucency.
 
 ### Ray tracing
 
@@ -779,9 +790,9 @@ The frame, as `frame` in every stage. Positions and directions are in world axes
 | Field | Type | Offset | Meaning |
 | --- | --- | --- | --- |
 | `view` | `mat4x4<f32>` | 0 | Camera-relative world to view space: yaw and pitch rotation only; excludes view bob and nausea spin. |
-| `projection` | `mat4x4<f32>` | 64 | View to clip space (reversed depth, wgpu's clip space: z 0..1), including view bob and nausea spin when active. |
+| `projection` | `mat4x4<f32>` | 64 | View to clip space (reversed depth, wgpu's clip space: z 0..1), including view bob and nausea spin when active. The pose's translation is in it, so the camera-relative point a clip position unprojects to is not on the camera's ray (it moves with the bob); a direction takes two depths at one `uv` (`normalize(view_position(uv, depth_far) - view_position(uv, depth_near))`, depth reversed). |
 | `view_inverse` | `mat4x4<f32>` | 128 | View to camera-relative world space. |
-| `projection_inverse` | `mat4x4<f32>` | 192 | Clip to view space. |
+| `projection_inverse` | `mat4x4<f32>` | 192 | Clip to view space, with the pose `projection` carries (view bob and nausea spin, translation included). |
 | `camera_position` | `vec3<f32>` | 256 | The camera's world position, in blocks (about a millimetre of precision 10 000 blocks out). |
 | `time` | `f32` | 268 | Seconds since the pack was loaded, wrapping to 0 every hour. |
 | `sun_direction` | `vec3<f32>` | 272 | Unit vector toward the sun (below the horizon at night). |
